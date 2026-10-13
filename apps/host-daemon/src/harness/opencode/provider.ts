@@ -59,12 +59,14 @@ import type {
 import { BaseLaunchProvider } from '../base-provider.js';
 import type {
   HarnessRoleTarget,
+  HarnessModelTarget,
   ModelLevel,
   OpenCodeAgentDescriptor,
   OpenCodeAgentDiscoveryFailureReason,
   OpenCodeAgentDiscoveryResult
 } from '@zana-ai/zcc-domain/harness-adapter';
 import { facetSupport, type TrustedHarnessAdapter } from '../adapter-contract.js';
+import { overlayDiscoveredModels } from '../discovered-model-evidence.js';
 import { spawn } from 'node:child_process';
 import { closeSync, openSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -78,9 +80,9 @@ const OPENCODE_MIN_VERSION = '1.18.0';
 const OPENCODE_REVIEWED_AT = '2026-09-02';
 const OPENCODE_VERIFIED_SCOPES = ['local', 'remote'] as const;
 const OPENCODE_MODEL_IDS = [
-  'llmgw/gpt-5.6-luna-1M',
+  'llmgw/gpt-6-luna',
   'llmgw/gpt-5.6-terra-1M',
-  'llmgw/gpt-5.6-sol-1M',
+  'llmgw/gpt-6.1-sol',
   'llmgw/gemini-3.1-pro-preview',
   'llmgw/gemini-3.5-flash',
   'llmgw/grok-4.6'
@@ -129,20 +131,19 @@ const OPENCODE_ADAPTER: TrustedHarnessAdapter = {
       ],
       providerModelRelationship: 'combined-provider-model',
       models: [
-        { id: 'llmgw/gpt-5.6-luna-1M', label: 'Luna', provider: 'openai', level: 'low', scope: [...OPENCODE_VERIFIED_SCOPES], evidenceVersion: OPENCODE_MIN_VERSION },
+        { id: 'llmgw/gpt-6-luna', label: 'Luna', provider: 'openai', level: 'low', scope: [...OPENCODE_VERIFIED_SCOPES], evidenceVersion: OPENCODE_MIN_VERSION },
         { id: 'llmgw/gpt-5.6-terra-1M', label: 'Terra', provider: 'openai', level: 'medium', scope: [...OPENCODE_VERIFIED_SCOPES], evidenceVersion: OPENCODE_MIN_VERSION },
-        { id: 'llmgw/gpt-5.6-sol-1M', label: 'Sol', provider: 'openai', level: 'high', scope: [...OPENCODE_VERIFIED_SCOPES], evidenceVersion: OPENCODE_MIN_VERSION },
+        { id: 'llmgw/gpt-6.1-sol', label: 'Sol', provider: 'openai', level: 'high', scope: [...OPENCODE_VERIFIED_SCOPES], evidenceVersion: OPENCODE_MIN_VERSION },
         { id: 'llmgw/gemini-3.1-pro-preview', label: 'Gemini Pro', provider: 'google', level: 'medium', scope: [...OPENCODE_VERIFIED_SCOPES], evidenceVersion: OPENCODE_MIN_VERSION },
         { id: 'llmgw/gemini-3.5-flash', label: 'Gemini Flash', provider: 'google', level: 'low', scope: [...OPENCODE_VERIFIED_SCOPES], evidenceVersion: OPENCODE_MIN_VERSION },
         { id: 'llmgw/grok-4.6', label: 'Grok', provider: 'xai', level: 'medium', scope: [...OPENCODE_VERIFIED_SCOPES], evidenceVersion: OPENCODE_MIN_VERSION }
       ],
-      // Single-family monotonic ladder (matches claude haiku/sonnet/opus, codex
-      // openai): the gpt-5.6 family is the only family spanning all three tiers.
-      // gemini + grok stay catalog-selectable but off the default ladder.
+      // Monotonic OpenAI ladder. Gemini + Grok stay catalog-selectable but off
+      // the default level mapping.
       modelLevelMapping: {
-        low: 'llmgw/gpt-5.6-luna-1M',
+        low: 'llmgw/gpt-6-luna',
         medium: 'llmgw/gpt-5.6-terra-1M',
-        high: 'llmgw/gpt-5.6-sol-1M',
+        high: 'llmgw/gpt-6.1-sol',
         'extra-high': undefined
       },
       executionStateMapping: {
@@ -495,6 +496,41 @@ function discoverOpenCodeModels(context: { cwd: string; config: AppConfig }): Pr
   return modelDiscoveryCache.discover(JSON.stringify([command, context.cwd]), () => runOpenCodeModelDiscovery(command, context.cwd));
 }
 
+function openCodeProviderFor(id: string): 'openai' | 'google' | 'xai' {
+  if (/gemini/i.test(id)) return 'google';
+  if (/grok/i.test(id)) return 'xai';
+  return 'openai';
+}
+
+const OPENCODE_LEVEL_TERMS = { low: 'luna', medium: 'terra', high: 'sol' } as const;
+const openCodeIdOrder = new Intl.Collator('en', { numeric: true, sensitivity: 'base' });
+
+/**
+ * Map portable levels onto a LIVE inventory, independent of gateway list order.
+ * Per tier: the curated snapshot id wins whenever the gateway still serves it;
+ * otherwise the tier's family term (luna/terra/sol) picks among live ids in a
+ * deterministic order (highest version first, by numeric collation, then id) so
+ * the same inventory always yields the same mapping however `opencode models`
+ * orders it. A tier with neither stays unmapped (resolution reports it).
+ */
+export function openCodeModelLevelMapping(liveIds: readonly string[]): Readonly<Record<ModelLevel, string | undefined>> {
+  const live = new Set(liveIds);
+  const ordered = [...live].sort((a, b) => openCodeIdOrder.compare(b, a) || (a < b ? 1 : a > b ? -1 : 0));
+  const curated = OPENCODE_ADAPTER.descriptor.targets!.modelLevelMapping;
+  const pick = (level: keyof typeof OPENCODE_LEVEL_TERMS) => {
+    const snapshot = curated[level];
+    if (snapshot && live.has(snapshot)) return snapshot;
+    const term = new RegExp(`(?:^|[-_/])${OPENCODE_LEVEL_TERMS[level]}(?:[-_/]|$)`, 'i');
+    return ordered.find((id) => term.test(id));
+  };
+  return {
+    low: pick('low'),
+    medium: pick('medium'),
+    high: pick('high'),
+    'extra-high': undefined
+  };
+}
+
 /**
  * Pane commands that mean the OpenCode agent is RUNNING. The CLI is an npm
  * (`opencode-ai`) node binary, so a remote tmux pane running it reports either
@@ -533,7 +569,46 @@ export function classifyOpenCodePaneCommand(command: string): AgentLiveness {
 
 export class OpenCodeProvider extends BaseLaunchProvider {
   readonly id = 'opencode';
-  readonly adapter = OPENCODE_ADAPTER;
+
+  /**
+   * The shared (registry singleton) adapter is ALWAYS the reviewed static
+   * snapshot. A live inventory is launch-scoped: see {@link liveModelAdapter}
+   * and `withLiveModelTargets` — it is never stored on this instance, so
+   * concurrent launches for different projects cannot see each other's
+   * inventory.
+   */
+  get adapter(): TrustedHarnessAdapter {
+    return OPENCODE_ADAPTER;
+  }
+
+  liveModelAdapter(ids: readonly string[]): TrustedHarnessAdapter {
+    const discovered: HarnessModelTarget[] = [...new Set(ids)].map((id) => ({
+      id,
+      label: id,
+      provider: openCodeProviderFor(id),
+      scope: [...OPENCODE_VERIFIED_SCOPES]
+    }));
+    if (!discovered.length) return OPENCODE_ADAPTER;
+    const { models, evidence } = overlayDiscoveredModels(
+      discovered,
+      OPENCODE_ADAPTER.evidence,
+      OPENCODE_MIN_VERSION,
+      (id, scope) => openCodeEvidence(id, 'Live OpenCode model inventory and --model contribution verified.', scope)
+    );
+    return {
+      ...OPENCODE_ADAPTER,
+      evidence,
+      descriptor: {
+        ...OPENCODE_ADAPTER.descriptor,
+        targets: {
+          ...OPENCODE_ADAPTER.descriptor.targets!,
+          models,
+          modelLevelMapping: openCodeModelLevelMapping(models.map(({ id }) => id))
+        }
+      }
+    };
+  }
+
   readonly acceptsDynamicRoleTargets = true;
   // An OpenCode `--agent <role>` pins the agent's own model; a forced catalog
   // `--model` overrides that pin and dies with ProviderModelNotFoundError (dead
@@ -626,11 +701,14 @@ export class OpenCodeProvider extends BaseLaunchProvider {
    * snapshot rather than blocking a launch on a transient probe error — an empty
    * live list would otherwise reject every model. A non-empty result is the
    * authoritative set the gateway currently exposes.
+   *
+   * Pure with respect to this (shared) provider: the result is returned, never
+   * stored here. Callers scope it to one launch via `withLiveModelTargets`.
    */
   async discoverModelTargets(context: { cwd: string; config: AppConfig }): Promise<readonly string[] | undefined> {
     try {
       const ids = await discoverOpenCodeModels(context);
-      return ids.length > 0 ? ids : undefined;
+      return ids.length ? ids : undefined;
     } catch {
       return undefined;
     }
@@ -819,7 +897,8 @@ export class OpenCodeProvider extends BaseLaunchProvider {
       perTabRouting: input.harnessRouting,
       profile: effectiveProfile,
       extraArgs: remoteExtra,
-      scope: 'remote'
+      scope: 'remote',
+      authorizedModel: input.authorizedModel
     });
     const roleTarget = resolveRoleTarget(this, {
       config: input.config,
