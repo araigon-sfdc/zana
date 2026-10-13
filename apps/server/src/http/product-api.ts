@@ -14,6 +14,7 @@ import { projectSources } from '@zana-ai/zcc-domain/project';
 import { getPrimaryHost, countConversationThreadsForQuit } from '@zana-ai/zcc-db';
 import { handleProjectSourcesApi } from './project-sources-api.js';
 import { handleNotificationsApi } from './notifications-api.js';
+import { handleNativeToolPolicyApi } from './native-tool-policy-api.js';
 import { resolveProjectHost } from './project-host.js';
 import { mutateProjectFile } from './project-file-mutations.js';
 import { invalidateHarnessModelCatalog } from '@zana-ai/zcc-host-daemon/harness/registry';
@@ -539,6 +540,7 @@ export async function handleProductHttp(
     if (await handleSharedProductApi(request, response, ctx, path, method)) return true;
     if (await handleProjectSourcesApi(request, response, ctx, path, method)) return true;
     if (await handleNotificationsApi(request, response, ctx, path, method, requestUrl)) return true;
+    if (await handleNativeToolPolicyApi(request, response, ctx, path, method)) return true;
 
     if (path === '/api/v1/projects' && method === 'GET') {
       sendJson(response, 200, { projects: ctx.projects.list() });
