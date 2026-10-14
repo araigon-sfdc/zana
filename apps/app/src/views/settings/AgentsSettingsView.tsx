@@ -277,6 +277,48 @@ export function AgentsSettingsView({
           checked={config.includeScheduledAgentsInAgentView ?? true}
           onChange={(v) => onUpdate({ includeScheduledAgentsInAgentView: v })}
         />
+        <Field
+          label="Max scheduled runs at once"
+          searchId="agents.scheduled.concurrency"
+          help="How many scheduled runs may work at the same time. Each run is a full agent session, and they also count toward the live terminal sessions limit. Default 5."
+        >
+          <input
+            type="number"
+            min={1}
+            max={20}
+            aria-label="Max scheduled runs at once"
+            value={config.scheduledRunConcurrency ?? 5}
+            onChange={(e) => {
+              const n = parseInt(e.target.value, 10);
+              if (!Number.isNaN(n)) onConfigDraft({ ...config, scheduledRunConcurrency: n });
+            }}
+            onBlur={(e) => {
+              // An empty or invalid entry falls back to the default (5), not the minimum.
+              const parsed = parseInt(e.target.value, 10);
+              const n = Number.isNaN(parsed) ? 5 : Math.max(1, Math.min(20, parsed));
+              onUpdate({ scheduledRunConcurrency: n });
+            }}
+          />
+        </Field>
+        <Field
+          label="When the limit is reached"
+          searchId="agents.scheduled.overflow"
+          help="Automatic: schedules with recovery turned on wait their turn in a queue; schedules without it skip that run and wait for their next time. Retries always queue."
+        >
+          <PopoverPicklist
+            value={config.scheduledRunOverflow ?? 'auto'}
+            ariaLabel="When the limit is reached"
+            searchable={false}
+            onChange={(scheduledRunOverflow) =>
+              onUpdate({ scheduledRunOverflow: scheduledRunOverflow as 'auto' | 'queue' | 'skip' })
+            }
+            options={[
+              { value: 'auto', label: 'Automatic (recommended)' },
+              { value: 'queue', label: 'Always queue' },
+              { value: 'skip', label: 'Always skip' }
+            ]}
+          />
+        </Field>
       </Section>
 
       {/* Agent automation — capabilities that let agents (or a bulk action) end or

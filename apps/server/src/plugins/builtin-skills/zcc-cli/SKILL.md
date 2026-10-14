@@ -75,12 +75,12 @@ read-only.
 **Refused:** `thread spawn` / `run`, `thread tell` / `agent send`, `thread stop`,
 `thread background stop`, `terminal create|send|close`, `machine rename|remove`,
 `settings` writes,
-`schedule update|reload|run-now|enable|disable`, unless you are the **host-stamped orchestrator**
+`schedule update|reload|run-now|enable|disable|retry|dismiss`, unless you are the **host-stamped orchestrator**
 (the app's own spawn/close set). Do not set `ZCC_SESSION_ID` by hand.
 Schedule mutations remain operator-only even for orchestrators. In-session, use
 MCP `schedule_update`, `schedule_reload`, `schedule_run_now` or
-`schedule_set_enabled` on `zcc-inbox`. `schedule get` is a live read available
-to agent shells too.
+`schedule_set_enabled` on `zcc-inbox`; `schedule_runs` / `schedule_retry` / `schedule_dismiss` cover
+run history. `schedule get` and `schedule runs` are live reads available to agent shells too.
 
 See `references/agent-gate.md`.
 
@@ -199,6 +199,9 @@ zcc schedule update <id> --patch-file /path/to/patch.json
 zcc schedule reload <id> --json
 zcc schedule run-now <id>
 zcc schedule enable|disable <id>
+zcc schedule runs [--open|--problems|--all] [--outcome a,b] [--reason a,b] [--since 24h|7d|ISO] [--project <id>] [--schedule <id>] [--limit N] [--json]
+zcc schedule retry <scheduleId:runId>... | --open [--dry-run]
+zcc schedule dismiss <scheduleId:runId>...
 zcc personas ls
 zcc agent ls
 zcc team ls

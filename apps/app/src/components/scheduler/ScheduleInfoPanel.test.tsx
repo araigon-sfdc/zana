@@ -7,6 +7,8 @@ import type { ScheduledTask, TerminalSession } from '@zana-ai/zcc-domain/product
 
 const setEnabled = vi.fn();
 const runNow = vi.fn();
+const retryRuns = vi.fn();
+const dismissRuns = vi.fn();
 const close = vi.fn();
 const pushToast = vi.fn();
 
@@ -16,7 +18,9 @@ vi.mock('../../lib/product-client.js', () => ({
   product: {
     scheduler: {
       setEnabled: (...args: unknown[]) => setEnabled(...args),
-      runNow: (...args: unknown[]) => runNow(...args)
+      runNow: (...args: unknown[]) => runNow(...args),
+      retryRuns: (...args: unknown[]) => retryRuns(...args),
+      dismissRuns: (...args: unknown[]) => dismissRuns(...args)
     },
     terminals: { close: (...args: unknown[]) => close(...args) }
   }
@@ -31,7 +35,7 @@ vi.mock('../../store.js', () => ({
   )
 }));
 
-import { ScheduleInfoPanel } from './ScheduleInfoPanel.js';
+import { ScheduleInfoPanel, retryAtLabel } from './ScheduleInfoPanel.js';
 
 const baseTask = {
   id: 'sched-1',
@@ -70,6 +74,8 @@ describe('ScheduleInfoPanel', () => {
     cleanup();
     setEnabled.mockReset();
     runNow.mockReset();
+    retryRuns.mockReset();
+    dismissRuns.mockReset();
     close.mockReset();
     pushToast.mockReset();
     for (const key of Object.keys(terminals)) delete terminals[key];
@@ -201,5 +207,123 @@ describe('ScheduleInfoPanel', () => {
     runNow.mockResolvedValueOnce({ ok: true, value: withRun('success') });
     fireEvent.click(screen.getByRole('button', { name: /Run now/ }));
     await vi.waitFor(() => expect(pushToast).toHaveBeenCalledWith('Fired "Morning digest"', 'info'));
+  });
+
+  describe('run reasons and actions', () => {
+    const failedRun = { id: 'run-1', at: new Date(Date.now() - 60_000).toISOString(), result: 'error', reasonCode: 'exit-nonzero' } as const;
+    const withRuns = (runs: unknown[], extra: Partial<ScheduledTask> = {}) => ({
+      ...baseTask, catchUp: { mode: 'once' }, ...extra,
+      status: { ...baseTask.status, runCount: runs.length, runs, ...(extra.status ?? {}) }
+    }) as ScheduledTask;
+
+    it('shows the outcome badge and Retry/Dismiss for an open problem', async () => {
+      retryRuns.mockResolvedValue({ ok: true, value: [{ scheduleId: 'sched-1', runId: 'run-1', ok: true, status: 'started' }] });
+      dismissRuns.mockResolvedValue({ ok: true, value: 1 });
+      render(<ScheduleInfoPanel task={withRuns([failedRun])} />);
+      expect(screen.getByText('Error')).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: 'Retry Morning digest run' }));
+      await vi.waitFor(() => expect(retryRuns).toHaveBeenCalledWith([{ scheduleId: 'sched-1', runId: 'run-1' }]));
+      await vi.waitFor(() => expect(pushToast).toHaveBeenCalledWith('Fired "Morning digest"', 'info'));
+      await vi.waitFor(() => expect((screen.getByRole('button', { name: 'Dismiss Morning digest run' }) as HTMLButtonElement).disabled).toBe(false));
+      fireEvent.click(screen.getByRole('button', { name: 'Dismiss Morning digest run' }));
+      await vi.waitFor(() => expect(dismissRuns).toHaveBeenCalledWith([{ scheduleId: 'sched-1', runId: 'run-1' }]));
+    });
+
+    it('labels the action Run now for a missed run', () => {
+      render(<ScheduleInfoPanel task={withRuns([{ ...failedRun, reasonCode: 'missed-asleep', result: 'skipped' }])} />);
+      expect(screen.getByRole('button', { name: 'Run now Morning digest run' })).toBeTruthy();
+    });
+
+    it('disables both buttons while the action is pending', async () => {
+      let release!: (v: unknown) => void;
+      retryRuns.mockReturnValue(new Promise((resolve) => { release = resolve; }));
+      render(<ScheduleInfoPanel task={withRuns([failedRun])} />);
+      fireEvent.click(screen.getByRole('button', { name: 'Retry Morning digest run' }));
+      await vi.waitFor(() => expect((screen.getByRole('button', { name: 'Dismiss Morning digest run' }) as HTMLButtonElement).disabled).toBe(true));
+      release({ ok: true, value: [{ scheduleId: 'sched-1', runId: 'run-1', ok: true }] });
+      await vi.waitFor(() => expect((screen.getByRole('button', { name: 'Dismiss Morning digest run' }) as HTMLButtonElement).disabled).toBe(false));
+    });
+
+    it('shows failure notices for transport, per-run and dismiss errors', async () => {
+      render(<ScheduleInfoPanel task={withRuns([failedRun])} />);
+      retryRuns.mockResolvedValueOnce({ ok: false, message: 'offline' });
+      fireEvent.click(screen.getByRole('button', { name: 'Retry Morning digest run' }));
+      await vi.waitFor(() => expect(pushToast).toHaveBeenCalledWith('Run failed: offline', 'error'));
+      retryRuns.mockResolvedValueOnce({ ok: true, value: [{ scheduleId: 'sched-1', runId: 'run-1', ok: false, error: 'Previous run still active' }] });
+      fireEvent.click(screen.getByRole('button', { name: 'Retry Morning digest run' }));
+      await vi.waitFor(() => expect(pushToast).toHaveBeenCalledWith('Run failed: Previous run still active', 'error'));
+      retryRuns.mockResolvedValueOnce({ ok: true, value: [{ scheduleId: 'sched-1', runId: 'run-1', ok: false }] });
+      fireEvent.click(screen.getByRole('button', { name: 'Retry Morning digest run' }));
+      await vi.waitFor(() => expect(pushToast).toHaveBeenCalledWith('Run failed: not started', 'error'));
+      dismissRuns.mockResolvedValueOnce({ ok: false, message: 'denied' });
+      fireEvent.click(screen.getByRole('button', { name: 'Dismiss Morning digest run' }));
+      await vi.waitFor(() => expect(pushToast).toHaveBeenCalledWith('Dismiss failed: denied', 'error'));
+    });
+
+    it('hides actions for successes, dismissed or old problems, id-less runs and external rows', () => {
+      const old = { ...failedRun, id: 'old', at: new Date(Date.now() - 30 * 86_400_000).toISOString() };
+      const { rerender } = render(<ScheduleInfoPanel task={withRuns([
+        { id: 'ok', at: new Date().toISOString(), result: 'success' },
+        { ...failedRun, id: 'd', dismissedAt: new Date().toISOString() },
+        old,
+        { ...failedRun, id: undefined }
+      ])} />);
+      expect(screen.queryByRole('button', { name: /Retry Morning digest run/ })).toBeNull();
+      expect(screen.queryByRole('button', { name: /Dismiss Morning digest run/ })).toBeNull();
+      rerender(<ScheduleInfoPanel task={withRuns([{ ...failedRun, reasonCode: 'overlap' }])} />);
+      expect(screen.queryByRole('button', { name: /Retry Morning digest run/ })).toBeNull();
+      rerender(<ScheduleInfoPanel task={withRuns([failedRun], { external: { kind: 'claude-loop' } as ScheduledTask['external'] })} />);
+      expect(screen.queryByRole('button', { name: /Retry Morning digest run/ })).toBeNull();
+      expect(screen.queryByText('Recovery off')).toBeNull();
+    });
+
+    it('shows only history.retain rows', () => {
+      const runs = Array.from({ length: 3 }, (_, i) => ({ id: `r${i}`, at: new Date(Date.now() - i * 1000).toISOString(), result: 'success' }));
+      const { container } = render(<ScheduleInfoPanel task={withRuns(runs, { history: { retain: 2 } })} />);
+      expect(container.querySelectorAll('.scheduler-run-row')).toHaveLength(2);
+    });
+
+    it('hides actions for a failure a later finished success closed, even without resolvedBy', () => {
+      const ok = { id: 'ok', at: new Date().toISOString(), result: 'success', durationMs: 5 };
+      render(<ScheduleInfoPanel task={withRuns([ok, failedRun])} />);
+      expect(screen.queryByRole('button', { name: 'Retry Morning digest run' })).toBeNull();
+      expect(screen.queryByRole('button', { name: 'Dismiss Morning digest run' })).toBeNull();
+    });
+
+    it('shows the attempt alone once manual retries pass the policy', () => {
+      render(<ScheduleInfoPanel task={withRuns([{ ...failedRun, attempt: 4 }], { retry: { attempts: 1, delayMinutes: 10 } })} />);
+      expect(screen.getByText('Attempt 4')).toBeTruthy();
+      expect(screen.queryByText('Attempt 4/2')).toBeNull();
+    });
+
+    it('reports a thrown retry or dismiss call', async () => {
+      render(<ScheduleInfoPanel task={withRuns([failedRun])} />);
+      retryRuns.mockRejectedValueOnce(new Error('ipc down'));
+      fireEvent.click(screen.getByRole('button', { name: 'Retry Morning digest run' }));
+      await vi.waitFor(() => expect(pushToast).toHaveBeenCalledWith('Run failed: ipc down', 'error'));
+      await vi.waitFor(() => expect((screen.getByRole('button', { name: 'Dismiss Morning digest run' }) as HTMLButtonElement).disabled).toBe(false));
+      dismissRuns.mockRejectedValueOnce('nope');
+      fireEvent.click(screen.getByRole('button', { name: 'Dismiss Morning digest run' }));
+      await vi.waitFor(() => expect(pushToast).toHaveBeenCalledWith('Dismiss failed: nope', 'error'));
+    });
+
+    it('formats Retry at with the date when the retry is not today', () => {
+      const now = new Date(2026, 9, 14, 9, 0);
+      expect(retryAtLabel(new Date(2026, 9, 14, 14, 30).toISOString(), now)).not.toMatch(/,/);
+      expect(retryAtLabel(new Date(2026, 9, 16, 14, 30).toISOString(), now)).toMatch(/16.*,/);
+      expect(retryAtLabel('garbage', now)).toBe('');
+    });
+
+    it('shows Queued, Retry at and Recovery off chips', () => {
+      const due = new Date(2026, 0, 1, 14, 30).toISOString();
+      const { rerender } = render(<ScheduleInfoPanel task={withRuns([], { catchUp: undefined, status: { runCount: 0, runs: [], queuedAt: '2026-01-01T00:00:00Z', pendingRetry: { rootRunId: 'x', attempt: 1, dueAt: due } } })} />);
+      expect(screen.getByText('Queued')).toBeTruthy();
+      expect(screen.getByText(/^Retry at /)).toBeTruthy();
+      expect(screen.getByText('Recovery off').getAttribute('title')).toContain("follow this schedule's original rules");
+      rerender(<ScheduleInfoPanel task={withRuns([])} />);
+      expect(screen.queryByText('Queued')).toBeNull();
+      expect(screen.queryByText(/^Retry at /)).toBeNull();
+      expect(screen.queryByText('Recovery off')).toBeNull();
+    });
   });
 });

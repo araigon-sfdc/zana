@@ -1,0 +1,43 @@
+.schedule-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.schedule-chip {
+  padding: 1px 8px;
+  border: 1px solid var(--border, currentColor);
+  border-radius: 999px;
+  font-size: 11px;
+  color: var(--text-muted, inherit);
+  white-space: nowrap;
+}
+.schedule-run-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+/* The run list is a 6-column subgrid (dot, when, result, duration, details,
+   report): the actions take their own line under the row instead of an
+   auto-placed 7th cell, so #328's details/report icons stay aligned. */
+.scheduler-run-row > .schedule-run-actions {
+  grid-column: 2 / -1;
+  justify-self: end;
+}
+.schedule-run-actions .settings-btn {
+  padding: 1px 8px;
+  font-size: 11px;
+}
+.scheduler-run-list .scheduler-run-when {
+  white-space: nowrap;
+}
+.schedule-policy-inline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+.schedule-policy-inline input[type='number'] {
+  width: 72px;
+}

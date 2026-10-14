@@ -3,8 +3,9 @@ import { productHandle, safeProductHandle } from './shared-product-registration.
 import { IPC } from '@zana-ai/zcc-desktop-contract';
 import { ctx } from './ctx.js';
 import { externalReject, isExternalId, listSchedulesForUi } from './shared.js';
+import { scheduleRunQuerySchema, scheduleRunRefsSchema, slimRunQueryResult } from '@zana-ai/zcc-server/services/scheduler/schedule-run-schemas';
 import { store } from '@zana-ai/zcc-server/services/projects/store';
-import type { FeedDigestResult, FollowUp, FollowUpCreateInput, FollowUpStatus, FollowUpUpdateInput, Goal, GoalCreateInput, GoalStatus, GoalUpdateInput, Result, ScheduleCreateInput, ScheduleGroup, ScheduleGroupInput, ScheduleUpdateInput, ScheduledTask } from '@zana-ai/zcc-domain/product';
+import type { FeedDigestResult, FollowUp, FollowUpCreateInput, FollowUpStatus, FollowUpUpdateInput, Goal, GoalCreateInput, GoalStatus, GoalUpdateInput, Result, ScheduleCreateInput, ScheduleGroup, ScheduleGroupInput, ScheduleRunQueryResult, ScheduleRunRef, ScheduleUpdateInput, ScheduledTask } from '@zana-ai/zcc-domain/product';
 
 export function registerSchedulerIpc(): void {
   for (const [channel, manager] of [[IPC.scheduler.reconcile, ctx.scheduler], [IPC.goals.reconcile, ctx.goals]] as const) {
@@ -88,6 +89,28 @@ export function registerSchedulerIpc(): void {
       }
     }
   );
+  // Run history / recovery. The renderer is untrusted: query and refs are
+  // schema-validated here and any externally owned schedule is refused (Rule 1).
+  productHandle(IPC.scheduler.queryRuns, async (query: unknown): Promise<Result<ScheduleRunQueryResult>> => {
+    const parsed = scheduleRunQuerySchema.safeParse(query ?? {});
+    if (!parsed.success) return { ok: false, code: 'BAD_INPUT', message: parsed.error.message };
+    if (parsed.data.scheduleIds?.some(isExternalId)) return externalReject();
+    try { return { ok: true, value: slimRunQueryResult(await ctx.scheduler.queryRuns(parsed.data)) }; }
+    catch (err) { return { ok: false, code: 'QUERY_FAILED', message: String(err) }; }
+  });
+  for (const [channel, max, code, run] of [
+    [IPC.scheduler.retryRuns, 50, 'RETRY_FAILED', (refs: ScheduleRunRef[]) => ctx.scheduler.retryRuns(refs)],
+    [IPC.scheduler.dismissRuns, 200, 'DISMISS_FAILED', (refs: ScheduleRunRef[]) => ctx.scheduler.dismissRuns(refs)]
+  ] as const) {
+    const schema = scheduleRunRefsSchema(max);
+    productHandle(channel, async (refs: unknown): Promise<Result<unknown>> => {
+      const parsed = schema.safeParse(refs);
+      if (!parsed.success) return { ok: false, code: 'BAD_INPUT', message: parsed.error.message };
+      if (parsed.data.some(ref => isExternalId(ref.scheduleId))) return externalReject();
+      try { return { ok: true, value: await run(parsed.data) }; }
+      catch (err) { return { ok: false, code, message: String(err) }; }
+    });
+  }
   // The UI list merges native schedules with Claude /loop rows read from disk,
   // which the manager doesn't track. 'changed' always publishes; each poll
   // ('polled') publishes only when the merged list differs from the last send.

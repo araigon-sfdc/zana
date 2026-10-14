@@ -17,6 +17,8 @@ import type { ScheduledTask, Project, ScheduleRun } from '@zana-ai/zcc-domain/pr
 import { useData } from '../../store.js';
 import { filterSchedules, scheduleIssue, type ScheduleFilter } from './schedule-filter.js';
 import { ScheduleFilters } from './ScheduleFilters.js';
+import { RecoveryCard } from './RecoveryOptIn.js';
+import { countOpenProblems } from '@zana-ai/zcc-domain/schedule-health';
 import './scheduler-overview.css';
 import { KpiCard } from './KpiCard.js';
 import { ProjectDot } from '../listpane/ProjectDot.js';
@@ -45,6 +47,12 @@ interface SchedulerOverviewProps {
   onBrowse?: () => void;
   /** Open a project's own Scheduler tab from the "By project" breakdown. */
   onOpenProject?: (projectId: string) => void;
+  /** Open the Problems view (banner button). */
+  onReviewProblems?: () => void;
+  /** Open the Turn on recovery dialog (recovery card). */
+  onTurnOnRecovery?: () => void;
+  /** True while the recovery dialog is open; the card re-reads its state when it closes. */
+  recoveryOpen?: boolean;
 }
 
 export function SchedulerOverview({
@@ -60,15 +68,25 @@ export function SchedulerOverview({
   onStopLive,
   hideByProject = false,
   onOpenProject,
-  onBrowse
+  onBrowse,
+  onReviewProblems,
+  onTurnOnRecovery,
+  recoveryOpen
 }: SchedulerOverviewProps) {
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<ScheduleFilter>('all');
   const [page, setPage] = useState(0);
   const inventory = useRef<HTMLElement>(null);
   const projectMap = useMemo(() => new Map(projects.map(p => [p.id, p])), [projects]);
-  const issues = useMemo(() => tasks.filter(t => scheduleIssue(t, projectMap)), [tasks, projectMap]);
+  // Open problems age out with real time; `tick` keeps the banner and the KPI in step.
+  const issues = useMemo(() => tasks.filter(t => scheduleIssue(t, projectMap)), [tasks, projectMap, tick]);
   const missing = issues.filter(t => !projectMap.has(t.projectId)).length;
+  const withProblems = issues.length - missing;
+  const openProblems = useMemo(() => {
+    // Counts only: no row objects or sorting on every tick.
+    const { runs, byOutcome } = countOpenProblems(tasks, Date.now());
+    return { total: runs, failed: byOutcome.error + byOutcome.incomplete, missed: byOutcome.missed, skipped: byOutcome.skipped };
+  }, [tasks, tick]);
   const reviewIssues = () => {
     setSearch('');
     setFilter('attention');
@@ -232,7 +250,8 @@ export function SchedulerOverview({
     });
   }, [tasks]);
 
-  const matches = useMemo(() => filterSchedules(allSchedules, projectMap, search, filter), [allSchedules, projectMap, search, filter]);
+  // `tick`: the attention filter ages out with real time, like the banner and KPI.
+  const matches = useMemo(() => filterSchedules(allSchedules, projectMap, search, filter), [allSchedules, projectMap, search, filter, tick]);
   const pageSize = 8;
   const pageCount = Math.max(1, Math.ceil(matches.length / pageSize));
   const currentPage = Math.min(page, pageCount - 1);
@@ -240,12 +259,15 @@ export function SchedulerOverview({
 
   return (
     <div className="scheduler-overview">
+      <RecoveryCard tasks={tasks} projectIds={projectMap} refreshKey={recoveryOpen} onReview={() => onTurnOnRecovery?.()} />
       {issues.length > 0 && <section className="schedule-attention" aria-label="Schedules needing attention">
         <AlertTriangle size={20} aria-hidden />
         <div><h3>{issues.length} {issues.length === 1 ? 'schedule needs' : 'schedules need'} attention</h3>
-          <p>{missing > 0 ? `${missing} with a missing project. ` : ''}{issues.length - missing > 0 ? `${issues.length - missing} with a failed or incomplete latest run. ` : ''}Check the project and recent run details.</p>
+          <p>{missing > 0 ? `${missing} with a missing project. ` : ''}{withProblems > 0 ? `${withProblems} with open problems. ` : ''}Check the project and recent run details.</p>
         </div>
-        <button type="button" className="settings-btn" onClick={reviewIssues}>Review schedules</button>
+        {withProblems > 0 && onReviewProblems
+          ? <button type="button" className="settings-btn" onClick={onReviewProblems}>Review problems</button>
+          : <button type="button" className="settings-btn" onClick={reviewIssues}>Review schedules</button>}
       </section>}
       <section className="overview-kpis">
         <KpiCard label="Schedules" value={tasks.length} sub={`${enabled.length} enabled · ${disabled} paused`} />
@@ -271,6 +293,12 @@ export function SchedulerOverview({
           value={runs24}
           sub={`${success24} succeeded · ${errors24} failed · ${incomplete24} incomplete · ${skipped24} skipped`}
           accent={errors24 > 0 || incomplete24 > 0 ? 'error' : undefined}
+        />
+        <KpiCard
+          label="Open problems"
+          value={openProblems.total}
+          sub={`${openProblems.failed} failed · ${openProblems.missed} missed · ${openProblems.skipped} skipped`}
+          accent={openProblems.total > 0 ? 'error' : undefined}
         />
       </section>
 

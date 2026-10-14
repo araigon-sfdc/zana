@@ -7,15 +7,20 @@ import type {
   ScheduledTask,
   ScheduleCreateInput,
   InboxNotifyLevel,
-  Team
+  Team,
+  ScheduleCatchUp,
+  ScheduleRetryPolicy
 } from '@zana-ai/zcc-domain/product';
 import { parseEvery, formatInterval } from '@zana-ai/zcc-domain/parse-every';
 import { isValidCron, nextCronRuns } from '@zana-ai/zcc-domain/parse-cron';
 import { useData, useUi, useScheduleGroups, upsertSchedulerTask } from '../../store.js';
 import { ImprovePromptButton } from '../ImprovePromptButton.js';
 import { PopoverPicklist } from '../ui/PopoverPicklist.js';
-import { PROFILE_LABEL, INBOX_LEVELS, scopeLabel, sourceLabel } from './schedulerUtils.js';
+import { PROFILE_LABEL, INBOX_LEVELS, RETRY_CHOICES, missedRunChoices, scopeLabel, sourceLabel, type MissedRunChoiceValue } from './schedulerUtils.js';
 import type { ScheduleSeed } from './schedule-seed.js';
+import './schedule-runs.css';
+
+type MissedRunChoice = MissedRunChoiceValue;
 
 const PROFILES = VALID_PROFILES;
 
@@ -108,6 +113,19 @@ export function ScheduleEditor({
       ?? seededTask?.group
       ?? (task === null && !seededTask && schedulerTab === 'group' ? selectedGroupId ?? '' : '')
   );
+  // Missed-run and retry policies. A NEW schedule (including a copy of one on its
+  // original rules) starts with "Run once"; an existing one without `catchUp`
+  // keeps its original rules and shows them as such.
+  const policySource = task ?? seededTask;
+  const [missedChoice, setMissedChoice] = useState<MissedRunChoice>(
+    task ? (task.catchUp ? task.catchUp.mode : 'original') : (seededTask?.catchUp?.mode ?? 'once')
+  );
+  // Number fields keep the raw text while typing; they are clamped on save.
+  const [missedMax, setMissedMax] = useState<string>(String(policySource?.catchUp?.max ?? 3));
+  const [retryOn, setRetryOn] = useState<boolean>(!!policySource?.retry);
+  // Defaults match the recovery dialog: one retry, ten minutes later.
+  const [retryAttempts, setRetryAttempts] = useState<string>(String(policySource?.retry?.attempts ?? 1));
+  const [retryDelay, setRetryDelay] = useState<string>(String(policySource?.retry?.delayMinutes ?? 10));
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -166,6 +184,18 @@ export function ScheduleEditor({
     return null;
   })();
 
+  const clampInt = (text: string, min: number, max: number) => {
+    const n = parseInt(text, 10);
+    return Math.max(min, Math.min(max, Number.isFinite(n) ? Math.round(n) : min));
+  };
+  const catchUpValue = (): ScheduleCatchUp | null =>
+    missedChoice === 'original' ? null
+      : missedChoice === 'all' ? { mode: 'all', max: clampInt(missedMax, 1, 10) }
+        : { mode: missedChoice };
+  const retryValue = (): ScheduleRetryPolicy | null =>
+    retryOn ? { attempts: clampInt(retryAttempts, 1, 5), delayMinutes: clampInt(retryDelay, 1, 1440) } : null;
+  const showPolicies = !readOnly && !task?.external;
+
   const save = async () => {
     if (!canSave) return;
     setSaving(true);
@@ -190,7 +220,9 @@ export function ScheduleEditor({
           scope: scope === 'project' ? { projectId } : 'global',
           inboxLevel,
           autoCloseOnFinish,
-          group: scope === 'global' && group ? group : undefined
+          group: scope === 'global' && group ? group : undefined,
+          catchUp: catchUpValue(),
+          retry: retryValue()
         };
         const result = await product.scheduler.create(input);
         if (!result.ok) {
@@ -217,6 +249,8 @@ export function ScheduleEditor({
           prompt,
           inboxLevel,
           autoCloseOnFinish,
+          catchUp: catchUpValue(),
+          retry: retryValue(),
           ...(isGlobalTask ? { group: group || null } : {})
         });
         if (!result.ok) {
@@ -582,6 +616,102 @@ export function ScheduleEditor({
           </span>
         </label>
       </div>
+      {showPolicies ? (
+        <>
+          <div className="scheduler-form-field">
+            <label>Missed runs</label>
+            <p className="modal-hint">When a scheduled time passes while the computer sleeps or Zana is closed.</p>
+            <div className="scheduler-scope-picker" role="radiogroup" aria-label="Missed runs">
+              {missedRunChoices(cadenceMode, !isNew).map(({ value, title, hint }) => (
+                <label key={value} className={`scheduler-scope-option ${missedChoice === value ? 'is-active' : ''}`}>
+                  <input
+                    type="radio"
+                    name="sched-missed"
+                    value={value}
+                    checked={missedChoice === value}
+                    disabled={disabled}
+                    onChange={() => setMissedChoice(value)}
+                  />
+                  <div className="scheduler-scope-option-body">
+                    <span className="scheduler-scope-title">{title}</span>
+                    <span className="scheduler-scope-hint">{hint}</span>
+                  </div>
+                </label>
+              ))}
+            </div>
+            {missedChoice === 'all' ? (
+              <div className="schedule-policy-inline">
+                <span aria-hidden>Up to</span>
+                <input
+                  id="sched-missed-max"
+                  className="settings-input"
+                  type="number"
+                  min={1}
+                  max={10}
+                  aria-label="Missed runs to catch up"
+                  value={missedMax}
+                  disabled={disabled}
+                  onChange={(e) => setMissedMax(e.target.value)}
+                  onBlur={() => setMissedMax(String(clampInt(missedMax, 1, 10)))}
+                />
+                <span aria-hidden>missed times</span>
+              </div>
+            ) : null}
+          </div>
+          <div className="scheduler-form-field">
+            <label>Auto-retry</label>
+            <div className="scheduler-scope-picker" role="radiogroup" aria-label="Auto-retry">
+              {RETRY_CHOICES.map(({ value, title, hint }) => (
+                <label key={value} className={`scheduler-scope-option ${(retryOn ? 'on' : 'off') === value ? 'is-active' : ''}`}>
+                  <input
+                    type="radio"
+                    name="sched-retry"
+                    value={value}
+                    checked={(retryOn ? 'on' : 'off') === value}
+                    disabled={disabled}
+                    onChange={() => setRetryOn(value === 'on')}
+                  />
+                  <div className="scheduler-scope-option-body">
+                    <span className="scheduler-scope-title">{title}</span>
+                    <span className="scheduler-scope-hint">{hint}</span>
+                  </div>
+                </label>
+              ))}
+            </div>
+            {retryOn ? (
+              <div className="schedule-policy-inline">
+                <span aria-hidden>Up to</span>
+                <input
+                  id="sched-retry-attempts"
+                  className="settings-input"
+                  type="number"
+                  min={1}
+                  max={5}
+                  aria-label="Retry attempts"
+                  value={retryAttempts}
+                  disabled={disabled}
+                  onChange={(e) => setRetryAttempts(e.target.value)}
+                  onBlur={() => setRetryAttempts(String(clampInt(retryAttempts, 1, 5)))}
+                />
+                <span aria-hidden>times, waiting</span>
+                <input
+                  id="sched-retry-delay"
+                  className="settings-input"
+                  type="number"
+                  min={1}
+                  max={1440}
+                  aria-label="Minutes to wait between retries"
+                  value={retryDelay}
+                  disabled={disabled}
+                  onChange={(e) => setRetryDelay(e.target.value)}
+                  onBlur={() => setRetryDelay(String(clampInt(retryDelay, 1, 1440)))}
+                />
+                <span aria-hidden>minutes first</span>
+              </div>
+            ) : null}
+          </div>
+        </>
+      ) : null}
       {error && <div className="modal-error">{error}</div>}
       {!readOnly ? (
         <div className="schedule-editor-actions">

@@ -98,17 +98,29 @@ export type InboxNotifyLevel = 'silent' | 'quiet' | 'loud';
 
 export interface ScheduleStatus {
   lastRunAt?: string;
-  lastRunResult?: 'success' | 'error' | 'skipped';
+  lastRunResult?: 'success' | 'error' | 'skipped' | 'incomplete';
   lastRunSessionId?: string;
   nextRunAt?: string;
   runCount: number;
   runs: ScheduleRun[];
+  slotCursorAt?: string;
+  missedFloorAt?: string;
+  pendingRetry?: { rootRunId: string; attempt: number; dueAt: string };
 }
+
+export type ScheduleRunReasonCode =
+  | 'exit-nonzero' | 'no-report' | 'timeout' | 'subagent-timeout'
+  | 'launch-failed' | 'worker-not-started' | 'outcome-unknown' | 'project-missing'
+  | 'concurrency-cap' | 'queue-full'
+  | 'missed-asleep' | 'missed-app-closed'
+  | 'overlap' | 'in-flight'
+  | 'squad-failed' | 'squad-stopped';
 
 export interface ScheduleRun {
   id?: string;
   at: string;
-  result: 'success' | 'error' | 'skipped';
+  result: 'success' | 'error' | 'skipped' | 'incomplete';
+  launchState?: 'pending' | 'running' | 'failed';
   sessionId?: string;
   durationMs?: number;
   finishedAt?: string;
@@ -116,6 +128,17 @@ export interface ScheduleRun {
   report?: string;
   reportedAt?: string;
   reportStatus?: 'success' | 'partial' | 'failure';
+  reasonCode?: ScheduleRunReasonCode;
+  trigger?: 'schedule' | 'manual' | 'retry' | 'catch-up';
+  slotAt?: string;
+  lateByMs?: number;
+  lateCause?: 'asleep' | 'app-closed';
+  missed?: { count: number; from: string; to: string };
+  marker?: true;
+  attempt?: number;
+  retryOf?: string;
+  resolvedBy?: string;
+  dismissedAt?: string;
 }
 
 export interface ScheduledTask {
@@ -129,8 +152,12 @@ export interface ScheduledTask {
   extraArgs?: string[];
   prompt?: string;
   schedule: {
-    every: string;
+    every?: string;
+    cron?: string;
+    tz?: string;
   };
+  catchUp?: { mode: 'once' | 'skip' | 'all'; max?: number };
+  retry?: { attempts: number; delayMinutes: number };
   overlap: 'skip';
   history: {
     retain: number;

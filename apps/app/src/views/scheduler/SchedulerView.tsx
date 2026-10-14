@@ -3,7 +3,7 @@ import { product } from '../../lib/product-client.js';
 import { DelayedStencilList } from '../../components/ui/Skeleton.js';
 import React, { useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { Clock, Plus, Sparkles, Pause, PlayCircle, AlertTriangle, Activity, Settings } from 'lucide-react';
+import { Clock, Plus, ListChecks, Sparkles, Pause, PlayCircle, AlertTriangle, Activity, Settings } from 'lucide-react';
 import type { ScheduledTask, ScheduleTemplate } from '@zana-ai/zcc-domain/product';
 import { useCompactLayout } from '@/hooks/useCompactLayout';
 import { MobilePageHeader } from '@/components/MobilePageHeader';
@@ -17,6 +17,8 @@ import { TemplatePickerModal } from '@/components/scheduler/TemplatePickerModal'
 import { filterSchedules, type ScheduleFilter } from '@/components/scheduler/schedule-filter';
 import { ScheduleFilters } from '@/components/scheduler/ScheduleFilters';
 import { SchedulerOverview } from '@/components/scheduler/SchedulerOverview';
+import { ProblemsPanel } from '@/components/scheduler/ProblemsPanel';
+import { RecoveryDialog } from '@/components/scheduler/RecoveryOptIn';
 import { ScheduleGroupsModal } from '@/components/ScheduleGroupsModal';
 import { getNewScheduleRoutePath, getScheduleRoutePath } from '@/lib/route-paths';
 import { openScheduleInSplit } from '@/lib/split-layout/openThreadInSplit';
@@ -54,7 +56,8 @@ export function SchedulerView({ projectId }: { projectId?: string } = {}) {
   /** When the user hits "Pause all", we stash the ids that were enabled so
    *  "Resume all" only re-enables those. Session-local — by design. */
   const [pausedSet, setPausedSet] = useState<Set<string> | null>(null);
-  const [view, setView] = useState<'overview' | 'schedules'>('overview');
+  const [view, setView] = useState<'overview' | 'schedules' | 'problems'>('overview');
+  const [recoveryOpen, setRecoveryOpen] = useState(false);
 
   useEffect(() => {
     const t = setInterval(() => setTick((n) => n + 1), 1000);
@@ -105,6 +108,8 @@ export function SchedulerView({ projectId }: { projectId?: string } = {}) {
     }
     return tasks;
   }, [tasks, lockedProjectId]);
+
+  const projectMap = useMemo(() => new Map(projects.map((p) => [p.id, p])), [projects]);
 
   const filteredTasks = useMemo(() => filterSchedules(scopedTasks,
     new Map(projects.map(p => [p.id, p])), search, filter), [scopedTasks, projects, search, filter]);
@@ -234,6 +239,14 @@ export function SchedulerView({ projectId }: { projectId?: string } = {}) {
                 >
                   <Clock size={13} /> Schedules
                 </button>
+                <button
+                  type="button"
+                  className={view === 'problems' ? 'active' : ''}
+                  onClick={() => setView('problems')}
+                  aria-pressed={view === 'problems'}
+                >
+                  <ListChecks size={13} /> Problems
+                </button>
               </div>
             )}
             {!compact && secondaryActions}
@@ -265,6 +278,14 @@ export function SchedulerView({ projectId }: { projectId?: string } = {}) {
           </div>
         ) : loading ? (
           <DelayedStencilList label="Loading schedules" className="scheduler-empty" />
+        ) : view === 'problems' && scopedTasks.length > 0 ? (
+          <ProblemsPanel
+            tasks={scopedTasks}
+            projects={projectMap}
+            onOpenSchedule={(id) => navigate(getScheduleRoutePath(id, lockedProjectId))}
+            onOpenSession={(sessionId, pid) => openScheduledLive(pid, sessionId, navigate)}
+            onTurnOnRecovery={() => setRecoveryOpen(true)}
+          />
         ) : view === 'overview' && (!lockedProject || scopedTasks.length > 0) ? (
           <SchedulerOverview
             tasks={lockedProject ? scopedTasks : tasks}
@@ -277,6 +298,9 @@ export function SchedulerView({ projectId }: { projectId?: string } = {}) {
             onEdit={openSchedule}
             onShowReport={(_run, task) => openSchedule(task)}
             onBrowse={() => setView('schedules')}
+            onReviewProblems={() => setView('problems')}
+            onTurnOnRecovery={() => setRecoveryOpen(true)}
+            recoveryOpen={recoveryOpen}
             onToggle={toggleSchedule}
             onRunNow={runScheduleNow}
             onStopLive={stopScheduleLive}
@@ -349,6 +373,7 @@ export function SchedulerView({ projectId }: { projectId?: string } = {}) {
           }}
         />
       )}
+      {recoveryOpen && <RecoveryDialog tasks={scopedTasks} projectIds={projectMap} onClose={() => setRecoveryOpen(false)} />}
       {confirmDelete && (
         <DeleteConfirmModal
           task={confirmDelete}

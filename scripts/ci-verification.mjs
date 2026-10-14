@@ -33,6 +33,7 @@ export function boundarySpecs(paths) {
     if (/opencode/.test(path)) add('opencode-launch-boundary');
     if (/desktop-browser/.test(path)) add('desktop-browser-broker');
     if (/mobile-relay|mobile\/|mobile-/.test(path)) add('mobile-shell', 'mobile-relay-upload');
+    if (/services\/scheduler\/|components\/scheduler\/|views\/scheduler\/|schedule-health/.test(path)) add('scheduler-self-healing', 'scheduler-overview', 'scheduler-detail', 'scheduler-cron');
     if (/ci-verification|\.github\/workflows\/ci\.yml/.test(path)) add('smoke');
   }
   return [...specs].sort();

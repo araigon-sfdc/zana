@@ -19,7 +19,17 @@
 
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { ScheduledTask, ScheduleUpdateInput, ScheduleReloadResult } from '@zana-ai/zcc-domain/product';
+import type {
+  ScheduledTask,
+  ScheduleUpdateInput,
+  ScheduleReloadResult,
+  ScheduleRetryResult,
+  ScheduleRunQuery,
+  ScheduleRunQueryResult,
+  ScheduleRunRef
+} from '@zana-ai/zcc-domain/product';
+import { scheduleRunQuerySchema, scheduleRunRefsSchema } from './schedule-run-schemas.js';
+import { compactRunRow, openRetryRefs } from '@zana-ai/zcc-domain/schedule-health';
 
 export const scheduleDefinitionPatchSchema = z.object({
   prompt: z.string().max(1_000_000).optional(),
@@ -44,7 +54,13 @@ export interface ScheduleAgentApi {
   reload?(id: string): Promise<ScheduleReloadResult>;
   runNow(id: string): ScheduledTask | Promise<ScheduledTask>;
   setEnabled(id: string, enabled: boolean): ScheduledTask | null | Promise<ScheduledTask | null>;
+  queryRuns?(query: ScheduleRunQuery): Promise<ScheduleRunQueryResult>;
+  retryRuns?(refs: ScheduleRunRef[]): Promise<ScheduleRetryResult[]>;
+  dismissRuns?(refs: ScheduleRunRef[]): Promise<number>;
 }
+
+const MAX_RETRY_REFS = 50;
+const MAX_DISMISS_REFS = 200;
 
 export const SCHEDULE_GET_DESCRIPTION = 'Read the live Scheduler UI definition that the app will run, including prompt, extraArgs, cadence and updatedAt. Default scope is this project; allProjects explicitly widens it.';
 export const SCHEDULE_UPDATE_DESCRIPTION = 'Patch prompt, extraArgs or cadence through the same Scheduler UI edit path. Supply id and patch. Default scope is this project; allProjects explicitly widens it. Use schedule_get to verify the acknowledged definition.';
@@ -60,6 +76,38 @@ export const SCHEDULE_LIST_DESCRIPTION = [
   'comes from the MCP URL). Pass `allProjects: true` to list every schedule',
   'the user has (the UI aggregate). Read-only: it never creates, edits, or',
   'fires a schedule.'
+].join(' ');
+
+export const SCHEDULE_RUNS_DESCRIPTION = [
+  'List scheduled runs that need attention, or any run history, across',
+  'Zana Command Center Scheduler schedules: failed, skipped (limit reached) and',
+  'missed runs, each with a reason code, attempt number and a ref',
+  '(scheduleId + runId) for schedule_retry / schedule_dismiss.',
+  '',
+  'Default `state` is "open" (unresolved problems from the last 7 days);',
+  '"problems" adds resolved and dismissed ones, "all" includes successes.',
+  'Filter with outcomes, reasonCodes, since/until (ISO), scheduleIds, limit.',
+  "By default only THIS project's schedules are included; pass",
+  '`allProjects: true` to widen. Read-only.'
+].join(' ');
+
+export const SCHEDULE_RETRY_DESCRIPTION = [
+  'Retry problem runs of Scheduler schedules (same as Retry in the Scheduler',
+  'UI). Pass `refs` ([{ scheduleId, runId }], max 50, from schedule_runs) or',
+  '`open: true` to retry every open retryable problem (up to 50). Retrying a',
+  'missed marker runs the missed time once. Returns one result per ref with',
+  'status started / queued, or an error. By default only THIS project\'s',
+  'schedules are in scope; refs outside it are rejected. Pass',
+  '`allProjects: true` to widen. First use asks the user for permission unless',
+  'Trust ZCC tools is on.'
+].join(' ');
+
+export const SCHEDULE_DISMISS_DESCRIPTION = [
+  'Dismiss problem runs so they leave the open list (same as Dismiss in the',
+  'Scheduler UI). Pass `refs` ([{ scheduleId, runId }], max 200, from',
+  'schedule_runs). The run record is kept. By default only THIS project\'s',
+  'schedules are in scope; refs outside it are rejected. Pass',
+  '`allProjects: true` to widen.'
 ].join(' ');
 
 export const SCHEDULE_RUN_NOW_DESCRIPTION = [
@@ -124,6 +172,23 @@ export const scheduleSetEnabledInputSchema = {
       "When true, resolve `id` against every project's schedules. Defaults to false (this project only)."
     )
 };
+
+const allProjectsField = z.boolean().optional().describe(
+  "When true, include every project's schedules instead of just this one. Defaults to false (this project only)."
+);
+
+/** The query fields, minus `projectId`: scope comes from the route, never the agent. */
+const { projectId: _routeScoped, ...scheduleRunQueryFields } = scheduleRunQuerySchema.shape;
+void _routeScoped;
+export const scheduleRunsInputSchema = { ...scheduleRunQueryFields, allProjects: allProjectsField };
+
+const refsField = (max: number) => scheduleRunRefsSchema(max).describe(`Run references from schedule_runs (max ${max}).`);
+export const scheduleRetryInputSchema = {
+  refs: refsField(MAX_RETRY_REFS).optional(),
+  open: z.boolean().optional().describe('Retry every open retryable problem in scope (up to 50) instead of listing refs.'),
+  allProjects: allProjectsField
+};
+export const scheduleDismissInputSchema = { refs: refsField(MAX_DISMISS_REFS), allProjects: allProjectsField };
 
 export const scheduleUpdateInputSchema = { ...scheduleRunNowInputSchema, patch: scheduleDefinitionPatchSchema };
 
@@ -279,6 +344,73 @@ export function registerScheduleManageTools(
       } catch (error) { return fail(name, error instanceof Error ? error.message : String(error)); }
     });
   }
+
+  const unavailable = (tool: string) => fail(tool, 'Schedule run history is unavailable');
+
+  server.registerTool(
+    'schedule_runs',
+    { description: SCHEDULE_RUNS_DESCRIPTION, inputSchema: scheduleRunsInputSchema },
+    async ({ allProjects, ...query }) => {
+      try {
+        if (!scheduleAgentApi.queryRuns) return unavailable('schedule_runs');
+        const widen = allProjects === true;
+        const result = await scheduleAgentApi.queryRuns({ ...query, ...(widen ? {} : { projectId }) });
+        // Compact rows: full run records would cost tens of thousands of tokens.
+        return okJson({ scope: widen ? 'all-projects' : `project:${projectId}`, total: result.total, truncated: result.truncated, rows: result.rows.map(compactRunRow) });
+      } catch (err) {
+        return fail('schedule_runs', err instanceof Error ? err.message : String(err));
+      }
+    }
+  );
+
+  /** Keep the refs whose schedule is in scope; the rest are rejected as not found. */
+  const splitByScope = (refs: ScheduleRunRef[], widen: boolean) => {
+    const inScope = new Set(scopeSchedules(scheduleAgentApi.list(), projectId, widen).map((task) => task.id));
+    return { allowed: refs.filter((ref) => inScope.has(ref.scheduleId)), rejected: refs.filter((ref) => !inScope.has(ref.scheduleId)) };
+  };
+
+  server.registerTool(
+    'schedule_retry',
+    { description: SCHEDULE_RETRY_DESCRIPTION, inputSchema: scheduleRetryInputSchema },
+    async ({ refs, open, allProjects }) => {
+      try {
+        if (!scheduleAgentApi.retryRuns || !scheduleAgentApi.queryRuns) return unavailable('schedule_retry');
+        if ((refs === undefined) === (open !== true)) return fail('schedule_retry', 'pass either refs or open: true');
+        const widen = allProjects === true;
+        let wanted: ScheduleRunRef[];
+        if (refs) wanted = refs;
+        else {
+          const found = await scheduleAgentApi.queryRuns({ state: 'open', limit: 500, ...(widen ? {} : { projectId }) });
+          wanted = openRetryRefs(found.rows, MAX_RETRY_REFS);
+        }
+        const { allowed, rejected } = splitByScope(wanted, widen);
+        const done = allowed.length ? await scheduleAgentApi.retryRuns(allowed) : [];
+        const results: ScheduleRetryResult[] = [
+          ...done,
+          ...rejected.map((ref) => ({ ...ref, ok: false, error: 'schedule not found' }))
+        ];
+        // `ok` is the call's outcome: false only when nothing could be retried.
+        return okJson({ ok: results.length === 0 || results.some((r) => r.ok), allOk: results.every((r) => r.ok), count: results.length, results });
+      } catch (err) {
+        return fail('schedule_retry', err instanceof Error ? err.message : String(err));
+      }
+    }
+  );
+
+  server.registerTool(
+    'schedule_dismiss',
+    { description: SCHEDULE_DISMISS_DESCRIPTION, inputSchema: scheduleDismissInputSchema },
+    async ({ refs, allProjects }) => {
+      try {
+        if (!scheduleAgentApi.dismissRuns) return unavailable('schedule_dismiss');
+        const { allowed, rejected } = splitByScope(refs, allProjects === true);
+        const dismissed = allowed.length ? await scheduleAgentApi.dismissRuns(allowed) : 0;
+        return okJson({ ok: dismissed > 0 || rejected.length === 0, allOk: rejected.length === 0 && dismissed === allowed.length, dismissed, rejected });
+      } catch (err) {
+        return fail('schedule_dismiss', err instanceof Error ? err.message : String(err));
+      }
+    }
+  );
 
   server.registerTool(
     'schedule_list',

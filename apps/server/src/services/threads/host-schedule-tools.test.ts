@@ -1,4 +1,4 @@
-import { beforeEach, expect, it, vi } from 'vitest';
+import { describe, beforeEach, expect, it, vi } from 'vitest';
 import type { ProductHttpContext } from '../../http/product-context.js';
 import { invokeHostScheduleTool } from './host-schedule-tools.js';
 const { control } = vi.hoisted(() => ({ control: vi.fn() }));
@@ -71,4 +71,102 @@ it.each(['schedule_get', 'schedule_reload', 'schedule_update'])('confines the %s
 it('rejects forged fields and empty patches on modern schedule updates', async () => {
   for (const patch of [{}, { enabled: true }, { extraArgs: [1] }, { projectId: 'p2' }]) expect((await invoke('schedule_update', { id: task.id, patch })).success).toBe(false);
   expect(control.mock.calls.every(call => call[2].method === 'scheduler.list')).toBe(true);
+});
+describe('schedule run tools', () => {
+  const rows = [
+    { scheduleId: 'schedule-one', run: { id: 'r1' }, manualRetry: true },
+    { scheduleId: 'schedule-one', run: { id: 'r2' }, manualRetry: false },
+    { scheduleId: 'schedule-one', run: {}, manualRetry: true }
+  ];
+  const owner = (extra: Record<string, unknown> = {}) => control.mockImplementation(async (_dir, _op, call) => {
+    if (call.method === 'scheduler.list') return { ok: true, value: [task, { ...task, id: 'foreign', projectId: 'p2' }] };
+    if (call.method === 'scheduler.queryRuns') return { ok: true, value: { ok: true, value: { rows, total: 3, truncated: false } } };
+    if (call.method === 'scheduler.retryRuns') return { ok: true, value: { ok: true, value: call.args[0].map((ref: object) => ({ ...ref, ok: true, status: 'queued' })) } };
+    if (call.method === 'scheduler.dismissRuns') return { ok: true, value: { ok: true, value: call.args[0].length } };
+    return { ok: true, value: { ok: true, value: extra } };
+  });
+  const body = (r: { contentItems: Array<{ text?: string }> }) => JSON.parse(r.contentItems[0]!.text!);
+  const owned = () => control.mock.calls.map(call => call[2]).filter(call => call.method !== 'scheduler.list');
+
+  it('schedule_runs queries the owner with the route project, ignoring a supplied one', async () => {
+    owner();
+    const result = await invoke('schedule_runs', { state: 'problems', limit: 3 });
+    expect(result.success).toBe(true);
+    expect(owned()).toEqual([{ method: 'scheduler.queryRuns', args: [{ state: 'problems', limit: 3, projectId: 'p1' }] }]);
+    expect(body(result)).toMatchObject({ scope: 'project:p1', total: 3 });
+    // Compact rows only: the full run record never crosses the 256 KB reply cap.
+    expect(body(result).rows[0]).toMatchObject({ scheduleId: 'schedule-one', runId: 'r1' });
+    expect(body(result).rows[0]).not.toHaveProperty('run');
+    expect((await invoke('schedule_runs', { projectId: 'p2' })).success).toBe(false);
+    control.mockClear(); owner();
+    await invoke('schedule_runs', { allProjects: true });
+    expect(owned()).toEqual([{ method: 'scheduler.queryRuns', args: [{ limit: 50 }] }]);
+    control.mockClear(); owner();
+    await invoke('schedule_runs', { limit: 500 });
+    expect(owned()).toEqual([{ method: 'scheduler.queryRuns', args: [{ limit: 100, projectId: 'p1' }] }]);
+  });
+
+  it('schedule_retry sends in-scope refs and rejects the rest', async () => {
+    owner();
+    const result = await invoke('schedule_retry', { refs: [{ scheduleId: 'schedule-one', runId: 'r1' }, { scheduleId: 'foreign', runId: 'r9' }] });
+    expect(owned()).toEqual([{ method: 'scheduler.retryRuns', args: [[{ scheduleId: 'schedule-one', runId: 'r1' }]] }]);
+    // Partial success is a working call: `ok` true, `allOk` false.
+    expect(result.success).toBe(true);
+    expect(body(result)).toMatchObject({ ok: true, allOk: false, count: 2 });
+    expect(body(result).results[1]).toMatchObject({ ok: false, error: 'schedule not found' });
+  });
+
+  it('schedule_retry open:true retries only retryable open rows; needs exactly one mode', async () => {
+    owner();
+    const result = await invoke('schedule_retry', { open: true });
+    expect(owned()).toEqual([
+      { method: 'scheduler.queryRuns', args: [{ state: 'open', limit: 200, projectId: 'p1' }] },
+      { method: 'scheduler.retryRuns', args: [[{ scheduleId: 'schedule-one', runId: 'r1' }]] }
+    ]);
+    expect(body(result).count).toBe(1);
+    control.mockClear(); owner();
+    expect((await invoke('schedule_retry', {})).success).toBe(false);
+    expect((await invoke('schedule_retry', { open: true, refs: [{ scheduleId: 'a', runId: 'b' }] })).success).toBe(false);
+    expect(owned()).toEqual([]);
+  });
+
+  it('schedule_dismiss counts in-scope refs and skips the owner when none are', async () => {
+    owner();
+    expect(body(await invoke('schedule_dismiss', { refs: [{ scheduleId: 'schedule-one', runId: 'r1' }] }))).toEqual({ ok: true, allOk: true, dismissed: 1, rejected: [] });
+    control.mockClear(); owner();
+    expect(body(await invoke('schedule_dismiss', { refs: [{ scheduleId: 'foreign', runId: 'r1' }] }))).toMatchObject({ ok: false, dismissed: 0 });
+    expect(owned()).toEqual([]);
+    expect((await invoke('schedule_dismiss', { refs: [] })).success).toBe(false);
+  });
+
+  it('surfaces an owner failure Result', async () => {
+    control.mockImplementation(async (_dir, _op, call) => call.method === 'scheduler.list'
+      ? { ok: true, value: [task] } : { ok: true, value: { ok: false, message: 'QUERY_FAILED' } });
+    const result = await invoke('schedule_runs');
+    expect(result.success).toBe(false);
+    expect(result.contentItems[0]!.text).toContain('QUERY_FAILED');
+  });
+
+  it('declares the three tools with closed input schemas', async () => {
+    const { HOST_SCHEDULE_TOOLS } = await import('./host-schedule-tools.js');
+    for (const name of ['schedule_runs', 'schedule_retry', 'schedule_dismiss']) {
+      const tool = HOST_SCHEDULE_TOOLS.find(candidate => candidate.name === name)!;
+      expect(tool.inputSchema).toMatchObject({ type: 'object', additionalProperties: false });
+      expect(Object.keys((tool.inputSchema as { properties: object }).properties)).toContain('allProjects');
+    }
+  });
+});
+
+describe('schedule run tools: scope edge cases', () => {
+  it('never targets Claude /loop rows, even when they carry the route project', async () => {
+    control.mockImplementation(async (_dir, _op, call) => {
+      if (call.method === 'scheduler.list') return { ok: true, value: [task, { ...task, id: 'claude-loop:abc', external: { kind: 'claude-loop', cron: '* * * * *' } }] };
+      if (call.method === 'scheduler.retryRuns') return { ok: true, value: { ok: true, value: call.args[0].map((ref: object) => ({ ...ref, ok: true, status: 'queued' })) } };
+      return { ok: true, value: { ok: true, value: 0 } };
+    });
+    const result = await invoke('schedule_retry', { refs: [{ scheduleId: task.id, runId: 'r1' }, { scheduleId: 'claude-loop:abc', runId: 'r2' }] });
+    const sent = control.mock.calls.map(call => call[2]).filter(call => call.method === 'scheduler.retryRuns');
+    expect(sent).toEqual([{ method: 'scheduler.retryRuns', args: [[{ scheduleId: task.id, runId: 'r1' }]] }]);
+    expect(JSON.parse(result.contentItems[0]!.text!).results[1]).toMatchObject({ scheduleId: 'claude-loop:abc', ok: false, error: 'schedule not found' });
+  });
 });

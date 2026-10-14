@@ -12,12 +12,12 @@ Mutating ops then fail with `FORBIDDEN_AGENT` and exit 5:
 - `zcc terminal create|send|close`
 - `zcc machine rename|remove`
 - `zcc settings` writes
-- `zcc schedule update|reload|run-now|enable|disable` (in-session, use MCP `schedule_run_now` /
-  `schedule_set_enabled` / `schedule_update` / `schedule_reload` on `zcc-inbox` instead)
+- `zcc schedule update|reload|run-now|enable|disable|retry|dismiss` (in-session, use MCP `schedule_run_now` /
+  `schedule_set_enabled` / `schedule_update` / `schedule_reload` / `schedule_retry` / `schedule_dismiss` on `zcc-inbox` instead)
 
 Reads stay allowed: `status`, `thread list|show|log|wait`, `thread background list`,
 `machine list|show`,
-`project list|show`, `guide`, inbox/followup/schedule/personas list.
+`project list|show`, `guide`, inbox/followup/schedule/personas list, `schedule runs`.
 
 The **host-stamped orchestrator** is the exception: the app itself may spawn and
 close worker threads. Agents must not impersonate it by exporting `ZCC_SESSION_ID`.

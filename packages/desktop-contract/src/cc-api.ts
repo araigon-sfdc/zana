@@ -125,6 +125,10 @@ import type {
   ScheduleGroupInput,
   ScheduleTemplate,
   ScheduleUpdateInput,
+  ScheduleRunQuery,
+  ScheduleRunQueryResult,
+  ScheduleRunRef,
+  ScheduleRetryResult,
   ScheduleReloadResult,
   ScheduledTask,
   SearchOptions,
@@ -1829,6 +1833,12 @@ export interface CcApi {
     delete(id: string): Promise<Result<true>>;
     setEnabled(id: string, enabled: boolean): Promise<Result<ScheduledTask>>;
     runNow(id: string): Promise<Result<ScheduledTask>>;
+    /** Cross-schedule run history (open problems by default). */
+    queryRuns(query: ScheduleRunQuery): Promise<Result<ScheduleRunQueryResult>>;
+    /** Re-run failed or missed runs now (max 50). */
+    retryRuns(refs: ScheduleRunRef[]): Promise<Result<ScheduleRetryResult[]>>;
+    /** Mark runs as seen so they leave the open list (max 200). Resolves to the number dismissed. */
+    dismissRuns(refs: ScheduleRunRef[]): Promise<Result<number>>;
     /** Check reserved workers without starting or enabling work. False means still unconfirmed. */
     reconcile(id: string): Promise<Result<boolean>>;
     onChanged(cb: (tasks: ScheduledTask[]) => void): () => void;

@@ -17,6 +17,9 @@ Zana exposes an MCP server, `zcc-inbox`, with these inbox tools:
   list, read, edit, refresh, fire, and enable/disable the schedules the Scheduler UI
   shows (`.zcc/schedules` JSON). Not the marketplace `zana_schedule_*` YAML
   tools.
+- **`schedule_runs`** / **`schedule_retry`** / **`schedule_dismiss`** — find failed,
+  skipped and missed scheduled runs, retry them, or dismiss them. Same scope rules
+  as the other schedule tools.
 - **`remote_exec`** — run a shell command on a registered **remote (SSH)**
   project and get its output back. Use it to inspect or act on a remote
   workspace without opening a terminal there. First use asks the user for
@@ -209,7 +212,7 @@ desktop Scheduler UI aggregates. They do **not** read
 these `zcc-inbox` tools instead.
 
 **Tools:** `schedule_list` · `schedule_get` (read-only live definition) · `schedule_update` · `schedule_reload` · `schedule_run_now` ·
-`schedule_set_enabled` (first use asks permission unless Trust ZCC tools is on)
+`schedule_set_enabled` · `schedule_runs` (read-only) · `schedule_retry` · `schedule_dismiss` (first use of a mutating tool asks permission unless Trust ZCC tools is on)
 
 ```ts
 // schedule_list
@@ -253,6 +256,37 @@ schedule_set_enabled({ id: "qa-hourly", enabled: false })
 ```
 
 Create schedules in the UI or using the JSON format in `zcc-center`.
+
+**Find and fix problem runs:**
+
+```ts
+// schedule_runs: every field optional; default state is "open"
+{ state?: "open" | "problems" | "all", outcomes?: ("success"|"error"|"skipped"|"incomplete"|"missed")[],
+  reasonCodes?: string[], since?: string, until?: string,   // ISO times
+  scheduleIds?: string[], limit?: number,                   // 1-500, default 100
+  allProjects?: boolean }
+
+// schedule_retry: exactly one of refs / open
+{ refs?: { scheduleId: string, runId: string }[],  // max 50, from schedule_runs rows
+  open?: true,                                     // retry every open retryable problem (up to 50)
+  allProjects?: boolean }
+
+// schedule_dismiss
+{ refs: { scheduleId: string, runId: string }[], allProjects?: boolean }  // max 200
+```
+
+`schedule_runs` returns `{ scope, rows, total, truncated }`; each row carries the
+run, its `outcome` and `reason`, and `manualRetry`. A ref is `scheduleId` plus
+`run.id`. `schedule_retry` answers one result per ref (`started` / `queued` or an
+`error`); a ref outside this project's scope is rejected as "schedule not found"
+unless `allProjects: true`. Dismissing keeps the run record and removes it from the
+open list.
+
+```
+schedule_runs({})
+schedule_retry({ open: true })
+schedule_dismiss({ refs: [{ scheduleId: "qa-hourly", runId: "3a4b5c6d" }] })
+```
 
 For edits to existing schedules, use `schedule_update({ id, patch })`. Its strict
 patch supports `prompt`, `extraArgs` (a string array, replaced as a whole), `every`,
@@ -355,7 +389,8 @@ To find remote project ids, call `list_projects` — remote projects carry a
 - `remote_exec` only works against a project the user registered as remote; a
   local or unknown id returns an error. You never supply the host or credentials.
 - `inbox_search` is read-only: it never creates, edits, or removes entries.
-- `schedule_list` and `schedule_get` are read-only. `schedule_update`,
+- `schedule_list`, `schedule_get` and `schedule_runs` are read-only. `schedule_retry` and
+  `schedule_dismiss` change run state only. `schedule_update`,
   `schedule_reload`, `schedule_run_now` and `schedule_set_enabled` are
   the in-session way to edit, refresh, fire or toggle a Scheduler UI schedule; they never
   touch `.zana/scheduler` YAML.

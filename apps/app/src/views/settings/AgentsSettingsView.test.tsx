@@ -1,9 +1,17 @@
+// @vitest-environment jsdom
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AppConfig } from '@zana-ai/zcc-domain/product';
 import { AgentsTab } from '@/views/settings/AgentsSettingsView';
 import { entries as agentsEntries } from '@/lib/settings-search/entries/agents';
 import { findSecretValueViolations } from '@/lib/settings-search/secrets';
+
+vi.mock('@/components/ui/PopoverPicklist', () => ({ PopoverPicklist: (props: any) => <select aria-label={props.ariaLabel} value={props.value} onChange={event => props.onChange(event.target.value)}>
+  {props.options.map((row: any) => <option key={row.value} value={row.value}>{row.label}</option>)}
+</select> }));
+
+afterEach(cleanup);
 
 const config: AppConfig = {
   version: 1,
@@ -259,5 +267,49 @@ describe('Agents settings search entries', () => {
 
   it('evaluates every value accessor without throwing', () => {
     for (const e of agentsEntries) expect(() => e.value?.(snapshot())).not.toThrow();
+  });
+});
+
+describe('AgentsTab scheduled run limit', () => {
+  const mount = (c: AppConfig = config) => {
+    const onUpdate = vi.fn().mockResolvedValue(undefined);
+    const onConfigDraft = vi.fn();
+    render(<AgentsTab config={c} onConfigDraft={onConfigDraft} onUpdate={onUpdate} />);
+    return { onUpdate, onConfigDraft };
+  };
+
+  it('defaults to 5 runs and automatic overflow', () => {
+    mount();
+    expect((screen.getByLabelText('Max scheduled runs at once') as HTMLInputElement).value).toBe('5');
+    expect((screen.getByRole('combobox', { name: 'When the limit is reached' }) as HTMLSelectElement).value).toBe('auto');
+  });
+
+  it('shows saved values', () => {
+    mount({ ...config, scheduledRunConcurrency: 8, scheduledRunOverflow: 'skip' });
+    expect((screen.getByLabelText('Max scheduled runs at once') as HTMLInputElement).value).toBe('8');
+    expect((screen.getByRole('combobox', { name: 'When the limit is reached' }) as HTMLSelectElement).value).toBe('skip');
+  });
+
+  it('drafts while typing and clamps on blur', () => {
+    const { onUpdate, onConfigDraft } = mount();
+    const input = screen.getByLabelText('Max scheduled runs at once');
+    fireEvent.change(input, { target: { value: '7' } });
+    expect(onConfigDraft).toHaveBeenCalledWith({ ...config, scheduledRunConcurrency: 7 });
+    fireEvent.change(input, { target: { value: 'abc' } });
+    expect(onConfigDraft).toHaveBeenCalledTimes(1);
+    // Empty or invalid falls back to the default (5); numbers clamp to 1-20.
+    for (const [raw, want] of [['7', 7], ['0', 1], ['50', 20], ['', 5], ['abc', 5]] as const) {
+      fireEvent.blur(input, { target: { value: raw } });
+      expect(onUpdate).toHaveBeenLastCalledWith({ scheduledRunConcurrency: want });
+    }
+  });
+
+  it('writes each overflow choice', () => {
+    const { onUpdate } = mount();
+    const select = screen.getByRole('combobox', { name: 'When the limit is reached' });
+    for (const v of ['queue', 'skip', 'auto']) {
+      fireEvent.change(select, { target: { value: v } });
+      expect(onUpdate).toHaveBeenLastCalledWith({ scheduledRunOverflow: v });
+    }
   });
 });

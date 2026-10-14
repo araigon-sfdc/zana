@@ -6,6 +6,8 @@ import type { Project, ScheduledTask, ScheduleRun } from '@zana-ai/zcc-domain/pr
 import { filterSchedules, scheduleIssue } from './schedule-filter.js';
 
 const state = vi.hoisted(() => ({ terminals: {} as Record<string, Array<{ id: string; status: string }>> }));
+const config = vi.hoisted(() => ({ get: vi.fn(), set: vi.fn() }));
+vi.mock('../../lib/product-client.js', () => ({ product: { config } }));
 vi.mock('../../store.js', () => ({ useData: (select: (value: typeof state) => unknown) => select(state) }));
 import { SchedulerOverview } from './SchedulerOverview.js';
 
@@ -25,21 +27,22 @@ function mount(tasks: ScheduledTask[], extra = {}) {
   return { ...view, props, inventory: () => screen.getByRole('region', { name: 'All schedules' }) };
 }
 afterEach(cleanup);
-beforeEach(() => { state.terminals = {}; });
+beforeEach(() => { state.terminals = {}; config.get.mockReset().mockResolvedValue({ schedulerRecoveryIntro: 'dismissed' }); config.set.mockReset().mockResolvedValue(undefined); });
 
 describe('schedule filtering and health', () => {
   it('keeps missing projects visible, including paused schedules', () => {
     expect(scheduleIssue(task('missing', { projectId: 'gone', enabled: false }), projectMap)).toBe('Project missing');
     expect(scheduleIssue(task('healthy'), projectMap)).toBeNull();
-    expect(scheduleIssue(withRun('incomplete', 'incomplete'), projectMap)).toBe('Last run incomplete');
+    expect(scheduleIssue(withRun('incomplete', 'incomplete'), projectMap)).toBe('Open problem');
   });
   it('ignores skipped overlaps, clears resolved failures, and supports legacy summary status', () => {
     const failed = withRun('failed', 'error');
     failed.status!.runs.unshift({ at: new Date().toISOString(), result: 'skipped' });
-    expect(scheduleIssue(failed, projectMap)).toBe('Last run failed');
-    failed.status!.runs.unshift({ at: new Date().toISOString(), result: 'success' });
+    expect(scheduleIssue(failed, projectMap)).toBe('Open problem');
+    failed.status!.runs[1] = { ...failed.status!.runs[1]!, resolvedBy: 'later-success' };
     expect(scheduleIssue(failed, projectMap)).toBeNull();
-    expect(scheduleIssue(task('legacy', { status: { runs: [], runCount: 1, lastRunResult: 'error' } }), projectMap)).toBe('Last run failed');
+    // A legacy summary-only status carries no run to act on, so it is not an open problem.
+    expect(scheduleIssue(task('legacy', { status: { runs: [], runCount: 1, lastRunResult: 'error' } }), projectMap)).toBeNull();
   });
   it('combines case-insensitive search with enabled, paused and attention filters', () => {
     const tasks = [task('digest', { description: 'Weekly summary' }), task('paused', { enabled: false, projectId: 'p2' }), withRun('failed', 'error')];
@@ -139,5 +142,37 @@ describe('SchedulerOverview', () => {
     expect(screen.getByText('No schedules yet.')).toBeTruthy();
     expect(screen.queryByText('By project')).toBeNull();
     expect(screen.getByText('No runs recorded yet.')).toBeTruthy();
+  });
+
+  it('opens Problems from the banner and counts open problems in the KPI', () => {
+    const missed = task('Missed', { status: { runCount: 0, runs: [{ id: 'm', at: new Date().toISOString(), result: 'skipped', reasonCode: 'missed-asleep' }] } });
+    const { props } = mount([withRun('Failed', 'error', { id: 'f' }), missed, task('Missing', { projectId: 'gone' })], { onReviewProblems: vi.fn() });
+    expect(screen.getByText('3 schedules need attention')).toBeTruthy();
+    expect(screen.getByText(/2 with open problems\./)).toBeTruthy();
+    expect(screen.getByText(/1 with a missing project\./)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Review problems' }));
+    expect(props.onReviewProblems).toHaveBeenCalledOnce();
+    expect(screen.getByText('Open problems')).toBeTruthy();
+    expect(screen.getByText('1 failed · 1 missed · 0 skipped')).toBeTruthy();
+  });
+  it('does not flag a schedule whose older failure a later finished success closed (upgrade case)', () => {
+    const healed = task('Healed', { status: { runCount: 2, runs: [
+      { id: 'ok', at: new Date().toISOString(), result: 'success', durationMs: 10 },
+      { id: 'f', at: new Date(Date.now() - 3_600_000).toISOString(), result: 'error', message: 'exit 1' }
+    ] } });
+    mount([healed]);
+    expect(screen.queryByText(/need(s)? attention/)).toBeNull();
+    expect(screen.getByText('0 failed · 0 missed · 0 skipped')).toBeTruthy();
+  });
+  it('keeps Review schedules when only a project is missing', () => {
+    mount([task('Missing', { projectId: 'gone' })], { onReviewProblems: vi.fn() });
+    expect(screen.getByRole('button', { name: 'Review schedules' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Review problems' })).toBeNull();
+  });
+  it('offers the recovery card and routes Review to the dialog callback', async () => {
+    config.get.mockResolvedValue({});
+    const { props } = mount([task('Classic')], { onTurnOnRecovery: vi.fn() });
+    fireEvent.click(await screen.findByRole('button', { name: 'Review' }));
+    expect(props.onTurnOnRecovery).toHaveBeenCalledOnce();
   });
 });

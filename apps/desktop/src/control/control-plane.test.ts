@@ -88,7 +88,7 @@ describe('authorizeRequest', () => {
   });
 
   // Read-only ops (incl. the new persona.list) are allowed for agent-class callers.
-  it.each(['status', 'project.list', 'persona.list', 'team.status', 'agent.list', 'term.list', 'term.get', 'sched.list', 'sched.get'])(
+  it.each(['status', 'project.list', 'persona.list', 'team.status', 'agent.list', 'term.list', 'term.get', 'sched.list', 'sched.get', 'sched.runs'])(
     'allows agent-class caller for read op %s',
     (op) => {
       const r = authorizeRequest({ ...EXPECTED, op, callerSessionId: 'sess-1' }, EXPECTED);
@@ -97,7 +97,7 @@ describe('authorizeRequest', () => {
   );
 
   // The keystone guarantee: an agent shelling out to `zcc` cannot mutate.
-  it.each(['term.create', 'term.close', 'term.close-summary', 'term.reply', 'agent.send', 'sched.runNow', 'sched.setEnabled', 'sched.reload', 'sched.update', 'team.launch', 'team.answer', 'team.stop'])(
+  it.each(['term.create', 'term.close', 'term.close-summary', 'term.reply', 'agent.send', 'sched.runNow', 'sched.setEnabled', 'sched.reload', 'sched.update', 'sched.retry', 'sched.dismiss', 'team.launch', 'team.answer', 'team.stop'])(
     'refuses agent-class caller for mutating op %s',
     (op) => {
       const r = authorizeRequest({ ...EXPECTED, op, callerSessionId: 'sess-1' }, EXPECTED);
@@ -121,7 +121,7 @@ describe('authorizeRequest', () => {
       expect(r).toMatchObject({ ok: true, caller: 'orchestrator' });
     }
   );
-  it.each(['status', 'project.list', 'persona.list', 'team.status', 'agent.list', 'term.list', 'term.get', 'sched.list', 'sched.get'])(
+  it.each(['status', 'project.list', 'persona.list', 'team.status', 'agent.list', 'term.list', 'term.get', 'sched.list', 'sched.get', 'sched.runs'])(
     'allows an orchestrator the read op %s',
     (op) => {
       const r = authorizeRequest(
@@ -153,7 +153,7 @@ describe('authorizeRequest', () => {
       expect(r).toMatchObject({ ok: true, caller: 'orchestrator' });
     }
   );
-  it.each(['term.reply', 'agent.send', 'sched.runNow', 'sched.setEnabled', 'sched.reload', 'sched.update', 'team.launch', 'team.answer', 'team.stop'])(
+  it.each(['term.reply', 'agent.send', 'sched.runNow', 'sched.setEnabled', 'sched.reload', 'sched.update', 'sched.retry', 'sched.dismiss', 'team.launch', 'team.answer', 'team.stop'])(
     'still refuses an orchestrator the operator-only op %s',
     (op) => {
       const r = authorizeRequest(
@@ -870,5 +870,43 @@ describe('schedule definition control operations', () => {
     const update = vi.fn();
     expect(await dispatchOp('sched.update', { id: 'task', patch }, makeDeps({ updateSchedule: update }))).toMatchObject({ ok: false, code: 'BAD_ARGS' });
     expect(update).not.toHaveBeenCalled();
+  });
+});
+
+describe('dispatchOp sched.runs / sched.retry / sched.dismiss', () => {
+  const ref = { scheduleId: 's', runId: 'r' };
+  const bare = {} as ControlPlaneDeps;
+
+  it('is UNAVAILABLE when the dependency is absent', async () => {
+    expect(await dispatchOp('sched.runs', {}, bare, { class: 'operator' })).toMatchObject({ ok: false, code: 'UNAVAILABLE' });
+    expect(await dispatchOp('sched.retry', { refs: [ref] }, bare, { class: 'operator' })).toMatchObject({ ok: false, code: 'UNAVAILABLE' });
+    expect(await dispatchOp('sched.dismiss', { refs: [ref] }, bare, { class: 'operator' })).toMatchObject({ ok: false, code: 'UNAVAILABLE' });
+  });
+
+  it('rejects malformed args with BAD_ARGS', async () => {
+    const deps = { queryScheduleRuns: vi.fn(), retryScheduleRuns: vi.fn(), dismissScheduleRuns: vi.fn() } as unknown as ControlPlaneDeps;
+    expect(await dispatchOp('sched.runs', { query: { limit: 0 } }, deps, { class: 'operator' })).toMatchObject({ ok: false, code: 'BAD_ARGS' });
+    expect(await dispatchOp('sched.retry', { refs: [] }, deps, { class: 'operator' })).toMatchObject({ ok: false, code: 'BAD_ARGS' });
+    expect(await dispatchOp('sched.retry', { refs: Array(51).fill(ref) }, deps, { class: 'operator' })).toMatchObject({ ok: false, code: 'BAD_ARGS' });
+    expect(await dispatchOp('sched.dismiss', { refs: Array(201).fill(ref) }, deps, { class: 'operator' })).toMatchObject({ ok: false, code: 'BAD_ARGS' });
+    expect(deps.queryScheduleRuns).not.toHaveBeenCalled();
+    expect(deps.retryScheduleRuns).not.toHaveBeenCalled();
+    expect(deps.dismissScheduleRuns).not.toHaveBeenCalled();
+  });
+
+  it('delegates validated input to the dependencies', async () => {
+    const deps = {
+      queryScheduleRuns: vi.fn(async () => ({ ok: true, value: { rows: [], total: 0, truncated: false } })),
+      retryScheduleRuns: vi.fn(async () => ({ ok: true, value: [] })),
+      dismissScheduleRuns: vi.fn(async () => ({ ok: true, value: 1 }))
+    } as unknown as ControlPlaneDeps;
+    expect(await dispatchOp('sched.runs', { query: { state: 'all' } }, deps, { class: 'operator' })).toMatchObject({ ok: true });
+    expect(await dispatchOp('sched.runs', {}, deps, { class: 'operator' })).toMatchObject({ ok: true });
+    expect(deps.queryScheduleRuns).toHaveBeenNthCalledWith(1, { state: 'all' });
+    expect(deps.queryScheduleRuns).toHaveBeenNthCalledWith(2, {});
+    expect(await dispatchOp('sched.retry', { refs: [ref] }, deps, { class: 'operator' })).toEqual({ ok: true, value: [] });
+    expect(await dispatchOp('sched.dismiss', { refs: [ref] }, deps, { class: 'operator' })).toEqual({ ok: true, value: 1 });
+    expect(deps.retryScheduleRuns).toHaveBeenCalledWith([ref]);
+    expect(deps.dismissScheduleRuns).toHaveBeenCalledWith([ref]);
   });
 });

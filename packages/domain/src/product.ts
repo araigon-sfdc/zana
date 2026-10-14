@@ -1980,6 +1980,12 @@ export interface AppConfig {
    *  ('freeform', default) or treat a plan as provided in the goal/sources
    *  ('structured'). Only sets the composer's starting selection. */
   teamDefaultCoordinationMode?: 'freeform' | 'structured';
+  /** Max scheduled runs at once, 1-20. Default 5. */
+  scheduledRunConcurrency?: number;
+  /** Over the limit: `auto` (default) skips Classic schedules and queues Recovery ones; retries always queue. */
+  scheduledRunOverflow?: 'auto' | 'queue' | 'skip';
+  /** State of the one-time "turn on recovery" card on the Scheduler overview. */
+  schedulerRecoveryIntro?: 'dismissed' | 'applied';
   /** How the inbox Feed groups rows within each day bucket: per-project
    *  subgroups ('project', default) or a flat chronological stream ('time'). */
   inboxGrouping?: 'project' | 'time';
@@ -3606,6 +3612,28 @@ export type CloneProjectResult =
     };
 
 /** Per-fire record persisted in a schedule's status.runs ring buffer. */
+/**
+ * Why a scheduled run did not succeed (or was not started). Additive: older
+ * records carry only free-text `message`; see `runReason` in
+ * `@zana-ai/zcc-domain/schedule-health` for the legacy inference.
+ */
+export type ScheduleRunReasonCode =
+  | 'exit-nonzero' | 'no-report' | 'timeout' | 'subagent-timeout'
+  | 'launch-failed' | 'worker-not-started' | 'outcome-unknown' | 'project-missing'
+  | 'concurrency-cap' | 'queue-full'
+  | 'missed-asleep' | 'missed-app-closed'
+  | 'overlap' | 'in-flight'
+  | 'squad-failed' | 'squad-stopped';
+/** What started a run. Absent on legacy records = `schedule`. */
+export type ScheduleRunTrigger = 'schedule' | 'manual' | 'retry' | 'catch-up';
+/** Derived display outcome of a run (`missed` is a skipped marker with a `missed-*` reason). */
+export type ScheduleRunOutcome = 'success' | 'error' | 'skipped' | 'incomplete' | 'missed';
+
+/** Catch-up policy. Present on a task = Recovery mode; absent = Classic. */
+export interface ScheduleCatchUp { mode: 'once' | 'skip' | 'all'; max?: number }
+/** Opt-in auto-retry policy for failed runs. */
+export interface ScheduleRetryPolicy { attempts: number; delayMinutes: number }
+
 export interface ScheduleRun {
   /** Durable spawn reservation; pending launches must never be replayed. */
   launchState?: 'pending' | 'running' | 'failed';
@@ -3656,6 +3684,28 @@ export interface ScheduleRun {
   reportedAt?: string;
   /** Agent's self-assessment of the run, independent of the pty exit code. */
   reportStatus?: 'success' | 'partial' | 'failure';
+  /** Machine-readable reason for an error/skipped/incomplete run. Absent on legacy records. */
+  reasonCode?: ScheduleRunReasonCode;
+  /** What started this run. Absent on legacy records = `schedule`. */
+  trigger?: ScheduleRunTrigger;
+  /** ISO slot this record covers. */
+  slotAt?: string;
+  /** Set when a scheduled/catch-up fire started more than 60 s after `slotAt`. */
+  lateByMs?: number;
+  /** Why the fire was late. */
+  lateCause?: 'asleep' | 'app-closed';
+  /** Only on missed-* marker records: how many slots were missed, and the first/last. */
+  missed?: { count: number; from: string; to: string };
+  /** A bookkeeping record, not a fire (missed records). */
+  marker?: true;
+  /** 1 = original run; retries are 2..n. */
+  attempt?: number;
+  /** ROOT run id of the retry chain. */
+  retryOf?: string;
+  /** Run id that closed this problem. */
+  resolvedBy?: string;
+  /** ISO time the user dismissed this problem. */
+  dismissedAt?: string;
 }
 
 export interface ScheduleStatus {
@@ -3667,6 +3717,14 @@ export interface ScheduleStatus {
   runCount: number;
   /** Newest first. Capped at history.retain (default 10). */
   runs: ScheduleRun[];
+  /** Timing anchor: slots at or before this are handled. */
+  slotCursorAt?: string;
+  /** Accounting floor: slots at or before this are never reported missed. */
+  missedFloorAt?: string;
+  /** An auto-retry waiting to start. */
+  pendingRetry?: { rootRunId: string; attempt: number; dueAt: string };
+  /** RUNTIME ONLY, never carried by the loader. */
+  queuedAt?: string;
 }
 
 /**
@@ -3729,6 +3787,13 @@ export interface ScheduledTask {
     retain: number;
   };
   status: ScheduleStatus;
+  /**
+   * Missed-run policy. Its presence selects Recovery mode; absent means Classic
+   * mode (the timing of earlier Zana versions, unchanged).
+   */
+  catchUp?: ScheduleCatchUp;
+  /** Auto-retry of failed runs. Absent = off (both modes). */
+  retry?: ScheduleRetryPolicy;
   /** ISO-8601. */
   createdAt: string;
   /** ISO-8601. */
@@ -3811,6 +3876,10 @@ export interface ScheduleCreateInput {
   maxDurationMinutes?: number;
   /** Group id (see {@link ScheduleGroup}). Only meaningful for global scope. */
   group?: string;
+  /** Missed-run policy. Omitted = `{ mode: 'once' }` (Recovery); `null` = Classic. */
+  catchUp?: ScheduleCatchUp | null;
+  /** Auto-retry policy. `null` or omitted = off. */
+  retry?: ScheduleRetryPolicy | null;
 }
 
 /**
@@ -4581,6 +4650,50 @@ export interface ScheduleUpdateInput {
   maxDurationMinutes?: number;
   /** Group id, or null to clear (move to Ungrouped). Omit to leave unchanged. */
   group?: string | null;
+  /** Missed-run policy. `null` = back to Classic. Omit to leave unchanged. */
+  catchUp?: ScheduleCatchUp | null;
+  /** Auto-retry policy. `null` = off. Omit to leave unchanged. */
+  retry?: ScheduleRetryPolicy | null;
+}
+
+export interface ScheduleRunRef { scheduleId: string; runId: string }
+
+export interface ScheduleRunQuery {
+  /** Default `open`. */
+  state?: 'open' | 'problems' | 'all';
+  outcomes?: ScheduleRunOutcome[];
+  reasonCodes?: ScheduleRunReasonCode[];
+  /** ISO. */
+  since?: string;
+  /** ISO. */
+  until?: string;
+  projectId?: string;
+  /** At most 50. */
+  scheduleIds?: string[];
+  /** 1-500, default 100. */
+  limit?: number;
+}
+
+export interface ScheduleRunRow {
+  scheduleId: string;
+  scheduleName: string;
+  projectId: string;
+  run: ScheduleRun;
+  outcome: ScheduleRunOutcome;
+  reason?: ScheduleRunReasonCode;
+  problem: boolean;
+  open: boolean;
+  manualRetry: boolean;
+}
+
+export interface ScheduleRunQueryResult { rows: ScheduleRunRow[]; total: number; truncated: boolean }
+
+export interface ScheduleRetryResult {
+  scheduleId: string;
+  runId: string;
+  ok: boolean;
+  status?: 'queued' | 'started';
+  error?: string;
 }
 
 // ----- Goals -----------------------------------------------------------------

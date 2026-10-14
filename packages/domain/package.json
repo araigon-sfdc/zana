@@ -70,6 +70,11 @@
       "source": "./src/schedule-spec.ts",
       "default": "./src/schedule-spec.ts"
     },
+    "./schedule-health": {
+      "types": "./src/schedule-health.ts",
+      "source": "./src/schedule-health.ts",
+      "default": "./src/schedule-health.ts"
+    },
     "./path-encoding": {
       "types": "./src/path-encoding.ts",
       "source": "./src/path-encoding.ts",

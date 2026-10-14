@@ -1,14 +1,14 @@
 import type { Project, ScheduledTask } from '@zana-ai/zcc-domain/product';
+import { taskOpenProblems } from '@zana-ai/zcc-domain/schedule-health';
+
+const OPEN_PROBLEM_LABEL = 'Open problem';
 
 export type ScheduleFilter = 'all' | 'enabled' | 'paused' | 'attention';
 
 export function scheduleIssue(task: ScheduledTask, projects: ReadonlyMap<string, Project>): string | null {
   if (!projects.has(task.projectId)) return 'Project missing';
-  // A skipped overlap does not erase the last actual run's outcome.
-  const result = task.status?.runs.find(run => run.result !== 'skipped')?.result
-    ?? task.status?.lastRunResult;
-  if (result === 'error') return 'Last run failed';
-  if (result === 'incomplete') return 'Last run incomplete';
+  // A later finished success closes earlier problems (also in pre-recovery history).
+  if (taskOpenProblems(task, Date.now()).length > 0) return OPEN_PROBLEM_LABEL;
   return null;
 }
 

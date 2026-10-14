@@ -1137,6 +1137,9 @@ const api: CcApi = {
     setEnabled: (id, enabled) =>
       ipcRenderer.invoke(IPC.scheduler.setEnabled, id, enabled),
     runNow: (id) => ipcRenderer.invoke(IPC.scheduler.runNow, id),
+    queryRuns: (query) => ipcRenderer.invoke(IPC.scheduler.queryRuns, query),
+    retryRuns: (refs) => ipcRenderer.invoke(IPC.scheduler.retryRuns, refs),
+    dismissRuns: (refs) => ipcRenderer.invoke(IPC.scheduler.dismissRuns, refs),
     reconcile: (id) => ipcRenderer.invoke(IPC.scheduler.reconcile, id),
     onChanged: (cb) => {
       const handler = (_e: unknown, tasks: Parameters<typeof cb>[0]) => cb(tasks);

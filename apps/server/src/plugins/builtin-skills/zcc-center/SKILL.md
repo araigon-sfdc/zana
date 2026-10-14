@@ -99,6 +99,7 @@ well-formed or the file is silently skipped at load.
   "extraArgs": [],
   "prompt": "Run the test suite and the type-checker. If anything fails, summarize the failure and the suspected root cause. If everything passes, reply 'all green'.",
   "schedule": { "every": "1h" },
+  "catchUp": { "mode": "once" },
   "overlap": "skip",
   "history": { "retain": 10 },
   "status": { "runCount": 0, "runs": [] },
@@ -122,6 +123,8 @@ well-formed or the file is silently skipped at load.
 | `extraArgs` | — | Array of strings, passed verbatim to the launched CLI. `[]` if none. |
 | `prompt` | — | Initial prompt typed into the session. **Ignored for `shell`.** For claude profiles it's passed as the positional prompt arg. Multi-line is fine. |
 | `schedule` | ✅ | Cadence object. Set **exactly one** of `every` (interval) or `cron` (wall-clock). See both syntaxes below. |
+| `catchUp` | — | `{ "mode": "once" \| "skip" \| "all", "max"?: 1-10 }`. **Include `"catchUp": { "mode": "once" }` in every NEW schedule file.** It turns on missed-run recovery: after the laptop slept or Zana was closed, `once` runs the latest missed time once, `skip` only records the gap, `all` runs up to `max` missed times (default 3). **Absent = Classic**, the behaviour of earlier versions (cron schedules catch up once; an interval schedule more than two intervals overdue waits for its next time). Don't add it to an existing schedule's file by hand; change it with `zcc schedule update` or the Scheduler editor. |
+| `retry` | — | `{ "attempts": 0-5, "delayMinutes": 1-1440 }`. Optional automatic retry of temporary failures (non-zero exit, no report, timeout, couldn't start): up to `attempts` more tries, waiting `delayMinutes` times the attempt number. Absent = no automatic retry. |
 | `overlap` | ✅ | Must be `"skip"` (only mode supported; a fire is skipped if the previous run's session is still alive). |
 | `history.retain` | ✅ | Number; how many past runs to keep in `status.runs`. Use `10`. |
 | `status` | ✅ | For a brand-new schedule use exactly `{ "runCount": 0, "runs": [] }`. The app fills in `lastRunAt`, `nextRunAt`, etc. — **don't fabricate run history.** |

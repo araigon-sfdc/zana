@@ -268,6 +268,13 @@ export async function runCli(argv: string[], deps?: Partial<CliDeps>): Promise<C
       const id = rest[0];
       if (!id) return errResult('schedule run-now requires a <scheduleId>', 2);
       return await live(dataDir, 'sched.runNow', { id }, jsonOutput);
+    } else if (command === 'schedule' && (subcommand === 'runs' || subcommand === 'retry' || subcommand === 'dismiss')) {
+      const { runScheduleRunsCommand } = await import('./commands/schedule-runs.js');
+      return await runScheduleRunsCommand(subcommand, rest, jsonOutput, async (op, args) => {
+        const resp = await callControlPlane({ dataDir, op, args });
+        if (!resp.ok) return { error: { exitCode: exitCodeForControl(resp.code), stdout: '', stderr: `Error: ${resp.message ?? resp.code}\n` } };
+        return { value: resp.value };
+      });
     } else if (command === 'schedule' && (subcommand === 'enable' || subcommand === 'disable')) {
       const id = rest[0];
       if (!id) return errResult(`schedule ${subcommand} requires a <scheduleId>`, 2);
@@ -374,6 +381,13 @@ LIVE CONTROL PLANE (app must be running):
   term close-summary <projectId> <sessionId...>
   schedule get|reload|run-now|enable|disable <id>
   schedule update <id> --patch <JSON> | --patch-file <path>
+  schedule runs [--open|--problems|--all] [--outcome a,b] [--reason a,b]
+       [--since 24h|7d|ISO] [--project ID] [--schedule ID] [--limit N]
+                           List scheduled runs across Projects (default: open problems)
+  schedule retry <scheduleId:runId>... | --open [--dry-run]
+                           Retry problem runs (max 50)
+  schedule dismiss <scheduleId:runId>...
+                           Dismiss problem runs (max 200)
 
 OPTIONS:
   --json                   Output as JSON (machine-readable)

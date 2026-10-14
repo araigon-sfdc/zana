@@ -25,6 +25,13 @@ it('selects required ownership boundaries, deduplicates specs and leaves docs al
   expect(boundarySpecs(['apps/app/src/App.tsx'])).toEqual([...new Set(boundarySpecs(['apps/app/src/App.tsx']))].sort());
 });
 
+it('selects the scheduler specs for scheduler seams', () => {
+  for (const path of ['apps/server/src/services/scheduler/scheduler.ts', 'apps/app/src/components/scheduler/ProblemsPanel.tsx', 'apps/app/src/views/scheduler/SchedulerView.tsx', 'packages/domain/src/schedule-health.ts']) {
+    expect(boundarySpecs([path])).toEqual(expect.arrayContaining(['e2e/scheduler-self-healing.spec.ts', 'e2e/scheduler-overview.spec.ts', 'e2e/scheduler-detail.spec.ts', 'e2e/scheduler-cron.spec.ts']));
+  }
+  expect(boundarySpecs(['apps/app/src/components/inbox/Row.tsx'])).not.toContain('e2e/scheduler-cron.spec.ts');
+});
+
 it('runs changed Electron specs themselves and ignores helpers and removed specs', () => {
   expect(boundarySpecs(['e2e/tasks-bb-parity.spec.ts', 'e2e/tasks-bb-parity.spec.ts'])).toEqual([
     'e2e/smoke.spec.ts', 'e2e/tasks-bb-parity.spec.ts'

@@ -12,11 +12,19 @@ import type {
   ScheduledTask,
   ScheduleRun,
   ScheduleReloadResult,
+  ScheduleRetryResult,
+  ScheduleRunQuery,
+  ScheduleRunQueryResult,
+  ScheduleRunReasonCode,
+  ScheduleRunRef,
+  ScheduleRunTrigger,
   ScheduleUpdateInput
 } from '@zana-ai/zcc-domain/product';
 import { MAX_INTERVAL_MS, MIN_INTERVAL_MS, parseEvery as parseEveryShared } from '@zana-ai/zcc-domain/parse-every';
 import { nextCronRunAt } from '@zana-ai/zcc-domain/parse-cron';
-import { isCronCadence, validateCadence } from '@zana-ai/zcc-domain/schedule-spec';
+import { isCronCadence, previousCronSlots, slotsBetween, validateCadence } from '@zana-ai/zcc-domain/schedule-spec';
+import { collectRunRows, isOpenProblem, isProblemRun, isRecoveryMode, runReason, SCHEDULE_REASONS } from '@zana-ai/zcc-domain/schedule-health';
+import { normalizeCatchUp, normalizeRetry } from './schedule-validation.js';
 import { providerCapabilities, seedPromptArgs } from '@zana-ai/zcc-domain/launch-provider';
 import { applyUnattendedScheduledLaunch } from '@zana-ai/zcc-host-daemon/harness/unattended-launch';
 import type { PtyManager } from '@zana-ai/zcc-host-daemon/pty';
@@ -37,8 +45,8 @@ import type { store as Store } from '../projects/store.js';
 const MAX_RETAIN = 100;
 
 /**
- * Global ceiling on concurrently-running scheduled sessions across ALL
- * schedules. Per-schedule `overlap:'skip'` stops a single schedule stacking on
+ * Default global ceiling on concurrently-running scheduled sessions across ALL
+ * schedules (override: `AppConfig.scheduledRunConcurrency`, 1-20). Per-schedule `overlap:'skip'` stops a single schedule stacking on
  * itself, but says nothing across schedules: N schedules sharing an interval
  * (e.g. five "every 1h" jobs) all come due in the same tick and would fire N
  * `claude` processes at once — a thundering herd that spikes CPU/memory and
@@ -46,12 +54,14 @@ const MAX_RETAIN = 100;
  *
  * 5 is a conservative cockpit value: a handful of background agents can run in
  * parallel without the machine noticing, while a sixth coincident fire waits
- * for its next interval rather than piling on. It sits well under the pty
+ * (queued, or skipped for its next interval) rather than piling on. It sits well under the pty
  * MAX_LIVE_SESSIONS (50) so the two caps don't fight — the scheduler self-limits
  * long before it could exhaust the pty manager's slots, leaving headroom for
  * the user's own interactive tabs.
  */
-const MAX_CONCURRENT_SCHEDULED_RUNS = 5;
+const DEFAULT_SCHEDULED_RUN_LIMIT = 5;
+const MIN_SCHEDULED_RUN_LIMIT = 1;
+const MAX_SCHEDULED_RUN_LIMIT = 20;
 
 /**
  * Fallback max-runtime for a scheduled `autoCloseOnFinish` run whose provider
@@ -94,6 +104,19 @@ interface Live {
   /** True when a fire operation is actively launching and we haven't finished
    *  launching yet. Prevents simultaneous duplicate fires due to TOCTOU. */
   firing?: boolean;
+  /** Runtime-only third term of the timing anchor: the newest slot already
+   *  handed to the run queue. Unset until a queue exists; never persisted. */
+  queuedThroughMs?: number;
+  /** Runtime-only: a late gap handled without a marker (or whose marker write
+   *  failed). Advances the timing anchor so the gap isn't re-fired; never
+   *  persisted, so a restart re-detects the gap. */
+  handledThroughMs?: number;
+  /** The un-floored slot (epoch ms) the armed timer is for; the slot a scheduled
+   *  fire covers. Set by `arm`. */
+  targetAt?: number;
+  /** Set by `arm` for a Classic interval schedule found long overdue (epoch ms of the
+   *  arm): its gap is recorded as a marker at the next timer fire, never at load. */
+  staleSince?: number;
 }
 
 function scheduledSquadObjective(task: ScheduledTask): string {
@@ -102,6 +125,34 @@ function scheduledSquadObjective(task: ScheduledTask): string {
     .find((value): value is string => Boolean(value))
     ?? '';
 }
+
+/** A run waiting for a free slot under the concurrency limit (design 6.4). */
+interface QueueEntry {
+  taskId: string;
+  trigger: 'schedule' | 'catch-up' | 'retry';
+  /** Epoch ms of the slot this entry covers. */
+  slotAt?: number;
+  retryOf?: string;
+  attempt?: number;
+  enqueuedAt: number;
+  /** Run id reserved at enqueue so a marker can already point at the run. */
+  runId?: string;
+  /** Set when the slot was found late; the launched run gets a "ran late" chip. */
+  lateCause?: 'asleep' | 'app-closed';
+  /** An automatic retry (policy-driven): dropped on disable and on a later success. */
+  auto?: true;
+}
+
+/** Run-queue bounds (Rule 5). */
+const MAX_QUEUE_TOTAL = 200;
+const MAX_QUEUE_CATCH_UP_PER_TASK = 10;
+/** An auto-retry timer never fires sooner than this after (re)arming. */
+const RETRY_MIN_DELAY_MS = 5_000;
+/** How long `retryRuns` waits for its launches before answering "queued" (CLI control timeout is 10 s). */
+const RETRY_REPORT_WAIT_MS = 4_000;
+/** A stored timing anchor later than now by more than this (clock skew, a crafted file) is ignored. */
+const FUTURE_ANCHOR_TOLERANCE_MS = 60_000;
+const MAX_SLOT_ITERATIONS = 1000;
 
 type DeferredClose = {
   taskId: string;
@@ -131,6 +182,94 @@ export class ScheduleConflictError extends Error {
     super(`schedule ${scheduleId} prompt was edited since this run launched`);
     this.name = 'ScheduleConflictError';
   }
+}
+
+/** Options of the private `fire`. */
+interface FireOptions {
+  manual: boolean;
+  /** Absent = the timer (`schedule`); `manual` is derived from `manual`. */
+  trigger?: ScheduleRunTrigger;
+  /** Epoch ms of the slot this fire covers. */
+  slotAt?: number;
+  /** Root run id of a retry chain. */
+  retryOf?: string;
+  attempt?: number;
+  /** Reserved run id (queue entries carry the id a marker already references). */
+  runId?: string;
+  /** Launched from the run queue: never re-enqueues, and skips late assessment. */
+  fromQueue?: boolean;
+  /** Carried from the queue entry: the slot was found late for this cause. */
+  lateCause?: 'asleep' | 'app-closed';
+  /** Epoch ms the timer callback ran: lateness is measured here, not after the serial-queue wait. */
+  firedAt?: number;
+  /** An automatic (policy-driven) retry, carried from its queue entry. */
+  auto?: true;
+}
+
+/** What a timer fire found out about the gap since the last handled slot. */
+interface LateInfo {
+  late: boolean;
+  /** Epoch ms of the newest slot. */
+  last: number;
+  /** Epoch ms of the oldest slot in the gap. */
+  first: number;
+  /** The accounting floor the gap started from (epoch ms). */
+  floor: number;
+  count: number;
+  lateByMs: number;
+  cause: 'asleep' | 'app-closed';
+  /** Interval cadences: the slot spacing (ms); slots sit on the anchor's grid. */
+  intervalMs?: number;
+}
+
+/** A fire starting more than this after its slot is "late". */
+const LATE_THRESHOLD_MS = 60_000;
+/** Longest `message` we keep on a run. */
+const MAX_RUN_MESSAGE = 500;
+/** Older open problems kept beyond `retain`, and the absolute history ceiling. */
+const MAX_KEPT_PROBLEMS = 20;
+const MAX_REF_RETRY = 50;
+const MAX_REF_DISMISS = 200;
+
+/** `trigger` / `attempt` / slot bookkeeping stamped on every run record a fire writes. */
+function runMeta(opts: FireOptions): Pick<ScheduleRun, 'trigger' | 'attempt' | 'slotAt' | 'retryOf'> {
+  return {
+    trigger: opts.manual ? 'manual' : opts.trigger ?? 'schedule',
+    attempt: opts.attempt ?? 1,
+    ...(opts.slotAt !== undefined && Number.isFinite(opts.slotAt) ? { slotAt: new Date(opts.slotAt).toISOString() } : {}),
+    ...(opts.retryOf ? { retryOf: opts.retryOf } : {})
+  };
+}
+
+/** "Ran late" fields for a fire's reservation: from this fire's own assessment, or carried from its queue entry. */
+function lateFields(opts: FireOptions, late: LateInfo | undefined): Pick<ScheduleRun, 'lateByMs' | 'lateCause'> {
+  if (late?.late) return { lateByMs: late.lateByMs, lateCause: late.cause };
+  if (opts.lateCause && opts.slotAt !== undefined) return { lateByMs: Math.max(0, Date.now() - opts.slotAt), lateCause: opts.lateCause };
+  return {};
+}
+
+/**
+ * Bound a run history (newest first). Unresolved records (a pending launch
+ * reservation, a live Squad run) are ownership state and always kept; their
+ * own bound lives in the loader. Finished records keep the newest `retain`,
+ * plus up to 20 older open problems, never more than 100 in total.
+ */
+export function trimRuns(
+  runs: ScheduleRun[],
+  retain: number,
+  nowMs: number,
+  isUnresolved: (run: ScheduleRun) => boolean = run => run.launchState === 'pending'
+): ScheduleRun[] {
+  const kept: ScheduleRun[] = [];
+  const cap = Math.min(retain, MAX_RETAIN);
+  let terminal = 0;
+  let extra = 0;
+  for (const run of runs) {
+    if (isUnresolved(run)) kept.push(run);
+    else if (terminal < cap) { kept.push(run); terminal++; }
+    else if (extra < MAX_KEPT_PROBLEMS && terminal + extra < MAX_RETAIN && isOpenProblem(run, nowMs)) { kept.push(run); extra++; }
+  }
+  return kept;
 }
 
 type Deps = {
@@ -183,8 +322,19 @@ export class SchedulerManager extends EventEmitter {
   private timedOutSessions = new Set<string>();
   /** Coordinator commits are async; count in-flight launches before PTY appears. */
   private pendingLaunches = 0;
+  /** Runs waiting for a free slot, FIFO. In-memory only (design 6.4). */
+  private queue: QueueEntry[] = [];
+  private draining = false;
+  /** Why a queue entry's launch threw, for `retryRuns` to report. */
+  private launchErrors = new WeakMap<QueueEntry, string>();
+  /** One auto-retry timer per task (design 6.5). */
+  private retryTimers = new Map<string, NodeJS.Timeout>();
   /** Lazily set after the window opens. We don't fire before then. */
   private deps: Deps | null = null;
+  /** When this scheduler first loaded; a slot older than this was missed while
+   *  Zana was closed, a newer one while the machine slept. Set once. */
+  private startedAtMs = Date.now();
+  private started = false;
 
   /** fs.watch handles, keyed by the watched directory path. */
   private watchers = new Map<string, FSWatcher>();
@@ -252,7 +402,7 @@ export class SchedulerManager extends EventEmitter {
         return { reloaded: false, schedule: this.get(id), reason: sessionIds.length ? `run ${sessionIds.join(', ')} is live` : 'run is unresolved', sessionIds };
       }
       const task = await this.readCurrent(live.task);
-      this.replaceDefinition(live, task);
+      await this.replaceDefinition(live, task);
       this.deferredReloads.delete(id);
       this.emit('changed');
       return { reloaded: true, schedule: this.get(id) };
@@ -292,6 +442,7 @@ export class SchedulerManager extends EventEmitter {
 
   /** Read every schedule from disk and (re)arm enabled ones. Called on boot. */
   private async loadAllNow(projects: Project[]) {
+    if (!this.started) { this.started = true; this.startedAtMs = Date.now(); }
     this.deps?.ptys.reapDeadSessions();
     const epoch = this.epoch;
     const tasks = this.deps?.persistence ? await this.deps.persistence.load() : listAllSchedules(projects, (path, reason) =>
@@ -308,6 +459,7 @@ export class SchedulerManager extends EventEmitter {
       }
       if (!ids.has(id)) {
         this.disarm(id);
+        this.forgetTask(id);
         for (const run of live.task.status.runs) if (run.sessionId) this.releaseSession(run.sessionId);
         this.live.delete(id);
         this.deferredReloads.delete(id);
@@ -322,7 +474,7 @@ export class SchedulerManager extends EventEmitter {
           deferred ||= this.deferredReloads.has(task.id);
         }
         else {
-          if (differs || this.deferredReloads.has(task.id)) this.replaceDefinition(existing, task);
+          if (differs || this.deferredReloads.has(task.id)) await this.replaceDefinition(existing, task);
           this.deferredReloads.delete(task.id);
         }
         continue;
@@ -341,7 +493,9 @@ export class SchedulerManager extends EventEmitter {
         } catch (error) { this.log(`recover ${task.id}`, error); }
       }
       if (task.enabled) this.arm(task.id);
+      this.armRetry(task.id);
     }
+    await this.drainSafely();
     this.emitChangedIfDifferent();
     // `loadAll` can restore active Squad executions without a cadence timer,
     // including disabled Run now schedules after restart.
@@ -382,7 +536,7 @@ export class SchedulerManager extends EventEmitter {
       status: {
         runCount: 0,
         runs: [],
-        nextRunAt: new Date(this.nextTargetFireMs(schedule, 0, Date.now())).toISOString()
+        nextRunAt: new Date(this.nextTargetFireMs({ schedule, status: {} }, Date.now())).toISOString()
       },
       createdAt: now,
       updatedAt: now,
@@ -403,6 +557,10 @@ export class SchedulerManager extends EventEmitter {
       maxDurationMinutes: input.maxDurationMinutes
     };
     if (task.kind === 'team' && !task.teamId) throw new Error('teamId is required for team schedules');
+    // New schedules start in Recovery; an explicit `catchUp: null` keeps Classic.
+    if (input.catchUp !== null) task.catchUp = normalizeCatchUp(input.catchUp) ?? { mode: 'once' };
+    const retry = normalizeRetry(input.retry);
+    if (retry) task.retry = retry;
     await this.persist(task, task);
     this.live.set(task.id, this.makeLive(task));
     if (task.enabled) this.arm(task.id);
@@ -432,6 +590,8 @@ export class SchedulerManager extends EventEmitter {
       throw new Error('Cannot change schedule mode while an existing run or launch is unresolved');
     }
     const next: ScheduledTask = { ...current, status: structuredClone(live.task.status) };
+    const wasEnabled = live.task.enabled;
+    const priorSchedule = live.task.schedule;
     if (patch.name !== undefined) next.name = patch.name.trim();
     if (patch.description !== undefined) next.description = patch.description.trim() || undefined;
     if (patch.enabled !== undefined) next.enabled = patch.enabled;
@@ -471,6 +631,15 @@ export class SchedulerManager extends EventEmitter {
         : { every: cadence.every! };
     }
     if (patch.retain !== undefined) next.history = { retain: clampRetain(patch.retain) };
+    if (patch.catchUp !== undefined) {
+      const catchUp = patch.catchUp === null ? undefined : normalizeCatchUp(patch.catchUp);
+      if (catchUp) next.catchUp = catchUp; else delete next.catchUp;
+    }
+    if (patch.retry !== undefined) {
+      const retry = patch.retry === null ? undefined : normalizeRetry(patch.retry);
+      if (retry) next.retry = retry; else delete next.retry;
+      if (!retry || retry.attempts < 1) delete next.status.pendingRetry;
+    }
     if (patch.inboxLevel !== undefined) next.inboxLevel = patch.inboxLevel;
     if (patch.autoCloseOnFinish !== undefined) next.autoCloseOnFinish = patch.autoCloseOnFinish;
     if (patch.maxDurationMinutes !== undefined) {
@@ -482,6 +651,11 @@ export class SchedulerManager extends EventEmitter {
       next.group = patch.group?.trim() ? patch.group.trim() : undefined;
     }
     next.updatedAt = new Date().toISOString();
+    // Disabling cancels an auto-retry that was waiting (design 6.5).
+    if (wasEnabled && !next.enabled) delete next.status.pendingRetry;
+    // Pause/resume and cadence edits are never reported as missed; Recovery also
+    // moves the timing anchor so the paused slot isn't fired (design D10).
+    if ((!wasEnabled && next.enabled) || !isDeepStrictEqual(priorSchedule, next.schedule)) this.markDiscontinuity(next);
     const definitionPatch: Partial<ScheduledTask> = { updatedAt: next.updatedAt };
     for (const key of Object.keys(patch) as (keyof ScheduleUpdateInput)[]) {
       const field = key === 'every' || key === 'cron' || key === 'tz' ? 'schedule' : key === 'retain' ? 'history' : key;
@@ -490,7 +664,12 @@ export class SchedulerManager extends EventEmitter {
     await this.persist(next, definitionPatch, guard);
     live.task = next;
     this.disarm(id);
+    // Only once the write succeeded: a failed update leaves the retry chain as it was.
+    if (patch.retry !== undefined && !(next.retry && next.retry.attempts >= 1)) this.cancelAutoRetries(id);
+    if (wasEnabled && !next.enabled) this.dropQueued(id, false);
     if (next.enabled) this.arm(id);
+    this.armRetry(id);
+    this.syncQueuedAt(id);
     this.emit('changed');
     return next;
   }
@@ -498,7 +677,9 @@ export class SchedulerManager extends EventEmitter {
   private async setEnabledNow(id: string, enabled: boolean): Promise<ScheduledTask | null> {
     const live = this.live.get(id);
     if (!live) return null;
-    return this.updateNow(id, { enabled });
+    const task = await this.updateNow(id, { enabled });
+    await this.drainSafely();
+    return task;
   }
 
   private async removeNow(id: string) {
@@ -512,6 +693,7 @@ export class SchedulerManager extends EventEmitter {
       if (epoch !== this.epoch) throw new Error('Scheduler stopped');
     }
     this.disarm(id);
+    this.forgetTask(id);
     this.clearDeferredClosesForTask(id);
     for (const run of live.task.status.runs) if (run.sessionId) this.releaseSession(run.sessionId);
     this.live.delete(id);
@@ -547,7 +729,9 @@ export class SchedulerManager extends EventEmitter {
     for (const [index, run] of pending.entries()) {
       if (evidence[index] !== 'present') {
         await this.recordRun(live.task.id, { ...run, launchState: 'failed', result: evidence[index] === 'not-started' ? 'skipped' : 'error',
-          finishedAt: new Date().toISOString(), message: evidence[index] === 'not-started'
+          finishedAt: new Date().toISOString(),
+          reasonCode: evidence[index] === 'not-started' ? 'worker-not-started' : 'outcome-unknown',
+          message: evidence[index] === 'not-started'
             ? 'Recovery confirmed the worker never started.' : 'Recovery confirmed the worker exited; its outcome was not recorded.' }, false);
         continue;
       }
@@ -555,6 +739,7 @@ export class SchedulerManager extends EventEmitter {
       this.releaseSession(session.id);
       await this.finishLaunch(live.task.id, run.id, live, { manual: false }, project, session.profile, session, false);
     }
+    await this.drainSafely();
     return true;
   }
 
@@ -579,6 +764,7 @@ export class SchedulerManager extends EventEmitter {
         ...(run.executionId ? {} : { executionId: (record as { executionId?: string }).executionId }),
         launchState: 'running',
         result: record.state === 'FAILED' ? 'error' : record.state === 'COMPLETED' ? 'success' : 'skipped',
+        ...(record.state === 'FAILED' ? { reasonCode: 'squad-failed' as const } : {}),
         ...(record.finalSummary ? { message: record.finalSummary } : {})
       }, false);
     }
@@ -597,6 +783,9 @@ export class SchedulerManager extends EventEmitter {
   private clearLive() {
     for (const id of [...this.live.keys()]) this.disarm(id);
     this.live.clear();
+    this.queue = [];
+    for (const timer of this.retryTimers.values()) clearTimeout(timer);
+    this.retryTimers.clear();
     // Release every fallback watchdog timer (Rule 3). We do NOT force-close the
     // sessions here — stopAll is a scheduler-state reset (boot reload / project
     // change), not an app shutdown; the ptys have their own teardown (killAll).
@@ -722,7 +911,7 @@ export class SchedulerManager extends EventEmitter {
    * ptys for that project — the same `ptys.list(...).status` mechanism the
    * overlap guard uses, just aggregated globally instead of per-schedule. Dedup
    * by session id so an optimistic + exit-time record of the same run counts
-   * once. Backs the {@link MAX_CONCURRENT_SCHEDULED_RUNS} cap in `fire`.
+   * once. Backs the concurrency limit ({@link runLimit}) in `fire` and `drainNow`.
    */
   private countLiveScheduledRuns(): number {
     if (!this.deps) return 0;
@@ -775,14 +964,10 @@ export class SchedulerManager extends EventEmitter {
   }
 
   private retainRuns(task: ScheduledTask, runs: ScheduleRun[]): ScheduleRun[] {
-    let terminalRecords = 0;
-    return runs.filter(run => {
-      // Squad runs are scheduler-owned overlap state until their durable
-      // execution reaches a terminal state. Keep them outside display history.
-      if (run.launchState === 'pending' || (this.runLaunchKind(task, run) === 'team' && this.isLiveSquadRun(run))) return true;
-      terminalRecords += 1;
-      return terminalRecords <= task.history.retain;
-    });
+    // Squad runs are scheduler-owned overlap state until their durable
+    // execution reaches a terminal state, so they sit outside display history.
+    return trimRuns(runs, task.history.retain, Date.now(), run =>
+      run.launchState === 'pending' || (this.runLaunchKind(task, run) === 'team' && this.isLiveSquadRun(run)));
   }
 
   private async observeSquadExecutions() {
@@ -801,11 +986,13 @@ export class SchedulerManager extends EventEmitter {
           const finalRun: ScheduleRun = {
             ...run,
             result: execution.state === 'COMPLETED' ? 'success' : 'error',
+            ...(execution.state === 'FAILED' ? { reasonCode: 'squad-failed' as const } : execution.state === 'STOPPED' ? { reasonCode: 'squad-stopped' as const } : {}),
             finishedAt,
             ...(Number.isFinite(startedAt) ? { durationMs: Math.max(0, Date.now() - startedAt) } : {}),
             ...(execution.finalSummary ? { message: execution.finalSummary } : {})
           };
           await this.recordRun(live.task.id, finalRun);
+          if (finalRun.result === 'success') await this.onFinishedSuccess(live.task.id, run.id);
           if ((live.task.inboxLevel ?? 'quiet') !== 'silent') {
             void this.notifyInboxOnExit(live.task, finalRun, project, finalRun.result === 'error');
           }
@@ -841,6 +1028,8 @@ export class SchedulerManager extends EventEmitter {
           // Squad must not remain pinned solely because one poll failed.
           this.log('observe squads', error);
         }
+        // A finished Squad frees a slot: start what was queued behind it.
+        await this.drainSafely();
         if (epoch === this.epoch) this.scheduleSquadObservation();
       }).catch(error => this.log('observe squads', error));
     }, SQUAD_OBSERVATION_INTERVAL_MS);
@@ -857,14 +1046,31 @@ export class SchedulerManager extends EventEmitter {
     return [...new Set(live.task.status.runs.flatMap(run => run.sessionId && sessions.some(session => session.id === run.sessionId && session.status !== 'exited') ? [run.sessionId] : []))];
   }
 
-  private replaceDefinition(live: Live, task: ScheduledTask) {
+  /** Stamp the accounting floor (and, in Recovery, the timing anchor) at now. */
+  private markDiscontinuity(task: ScheduledTask, nowMs = Date.now()) {
+    const iso = new Date(nowMs).toISOString();
+    task.status.missedFloorAt = iso;
+    if (isRecoveryMode(task)) task.status.slotCursorAt = iso;
+  }
+
+  private async replaceDefinition(live: Live, task: ScheduledTask) {
     this.disarm(task.id);
+    const cadenceChanged = !isDeepStrictEqual(live.task.schedule, task.schedule);
+    if (cadenceChanged) this.markDiscontinuity(task);
     live.task = task;
     live.runIndexBySession = this.makeLive(task).runIndexBySession;
     for (const run of task.status.runs) if (run.id) live.countedRunIds.add(run.id);
     while (live.countedRunIds.size > COUNTED_RUN_IDS_CAP) live.countedRunIds.delete(live.countedRunIds.values().next().value!);
+    if (cadenceChanged && task.enabled) {
+      // Persist the floor so the next poll doesn't see a difference and re-arm.
+      // A disabled schedule isn't rewritten (e.g. a teammate's cadence edit
+      // pulled from git): re-enabling sets its own floor.
+      try { await this.persist(task); } catch (error) { this.log(`persist ${task.id}`, error); }
+    }
     if (task.enabled) this.arm(task.id);
     this.scheduleSquadObservation();
+    this.armRetry(task.id);
+    this.syncQueuedAt(task.id);
   }
 
   private publishRuntime(live: Live, task: ScheduledTask) {
@@ -878,8 +1084,9 @@ export class SchedulerManager extends EventEmitter {
 
   private snapshotSignature(task: ScheduledTask) {
     // File validation supplies optional undefined keys; ignore those as well as
-    // the timer's derived nextRunAt so our own writes never postpone cadence.
-    return JSON.parse(JSON.stringify({ ...task, status: { ...task.status, nextRunAt: undefined } }));
+    // the timer's derived nextRunAt and the runtime-only queuedAt so our own
+    // writes never postpone cadence.
+    return JSON.parse(JSON.stringify({ ...task, status: { ...task.status, nextRunAt: undefined, queuedAt: undefined } }));
   }
 
   private async readCurrent(task: ScheduledTask): Promise<ScheduledTask> {
@@ -906,6 +1113,7 @@ export class SchedulerManager extends EventEmitter {
       if (!live) continue;
       if (live.task.projectId === projectId) {
         this.disarm(id);
+        this.forgetTask(id);
         this.clearDeferredClosesForTask(id);
         for (const run of live.task.status.runs) if (run.sessionId) this.releaseSession(run.sessionId);
         this.live.delete(id);
@@ -948,38 +1156,70 @@ export class SchedulerManager extends EventEmitter {
         Object.assign(task, { ...current, ...definitionPatch, status: task.status });
       }
     }
-    if (this.deps.persistence) await this.deps.persistence.save(record, definitionPatch);
-    else saveSchedule(record, this.deps.store.listProjects(), definitionPatch);
+    // `queuedAt` is runtime-only: it never reaches disk.
+    const { queuedAt: _queuedAt, ...durableStatus } = record.status;
+    const durable = record.status.queuedAt === undefined ? record : { ...record, status: durableStatus };
+    if (this.deps.persistence) await this.deps.persistence.save(durable, definitionPatch);
+    else saveSchedule(durable, this.deps.store.listProjects(), definitionPatch);
     if (epoch !== this.epoch) throw new Error('Scheduler stopped');
   }
 
   /**
-   * Epoch-ms of the next intended fire for a cadence, given the last run (0 if
-   * never) and now. Shared by `arm` and `create`'s initial `nextRunAt`.
+   * Timing anchor (epoch ms): slots at or before it are handled. It's the latest
+   * of the last run, the slot cursor a missed marker advanced, and the newest
+   * queued slot. With none of the newer terms it is exactly the last run.
+   */
+  private anchorMs(live: Live): number {
+    return anchorOf(live.task.status, Math.max(live.queuedThroughMs ?? 0, live.handledThroughMs ?? 0));
+  }
+
+  /** Accounting floor: slots at or before it are never reported missed or late. */
+  private floorMs(live: Live): number {
+    const floor = live.task.status.missedFloorAt ? Date.parse(live.task.status.missedFloorAt) : 0;
+    return Math.max(this.anchorMs(live), Number.isFinite(floor) ? floor : 0);
+  }
+
+  /**
+   * Epoch-ms of the next intended slot, given the timing anchor (0 if none) and now.
+   * Shared by `arm` and `create`'s initial `nextRunAt`.
    *
-   *  - interval: `lastRun + interval`, but re-armed fresh at `now + interval`
-   *    when more than one full interval overdue (schedule sat disabled for days,
-   *    or the laptop slept) — prevents drift compounding + resume stampedes.
-   *  - cron: the first slot strictly after `lastRun` (or after `now` if never
-   *    run). When that slot has already passed (the app was closed across it),
-   *    the returned time is in the past; the grace floor in `arm` fires it once,
-   *    soon — a single boot catch-up, NOT a replay of every missed slot.
+   *  - interval: `anchor + interval`, or `now + interval` with no anchor.
+   *  - cron: the first slot strictly after the anchor (or after `now` with no
+   *    anchor). A slot that has already passed (the app was closed across it)
+   *    yields a time in the past; the grace floor in `arm` fires it soon, and
+   *    `fire` decides what to do about the gap (see {@link fire}).
+   *
+   * The Classic "very stale interval" rule is NOT here; see {@link classicStale}.
    */
   private nextTargetFireMs(
-    schedule: { every?: string; cron?: string; tz?: string },
-    lastRun: number,
-    now: number
+    task: Pick<ScheduledTask, 'schedule'> & { status: Pick<ScheduledTask['status'], 'lastRunAt' | 'slotCursorAt'> },
+    now: number,
+    queuedThroughMs = 0
   ): number {
+    const anchor = anchorOf(task.status, queuedThroughMs);
+    const schedule = task.schedule;
     if (isCronCadence(schedule)) {
-      const from = lastRun > 0 ? new Date(lastRun) : new Date(now);
+      const from = anchor > 0 ? new Date(anchor) : new Date(now);
       const next = nextCronRunAt(schedule.cron!, schedule.tz, from);
       // Validated on create/load, so `next` should exist; degrade to a
       // far-future no-op rather than a tight loop if it somehow doesn't.
       return next ? next.getTime() : now + MAX_INTERVAL_MS;
     }
     const intervalMs = parseEveryShared(schedule.every ?? '') ?? MIN_INTERVAL_MS;
-    const veryStale = lastRun > 0 && lastRun + intervalMs < now - intervalMs;
-    return lastRun && !veryStale ? lastRun + intervalMs : now + intervalMs;
+    return anchor > 0 ? anchor + intervalMs : now + intervalMs;
+  }
+
+  /**
+   * Classic interval policy: more than one full interval overdue (the schedule
+   * sat disabled for days, or Zana was closed) re-arms fresh at `now + interval`
+   * instead of replaying, which prevents drift compounding and resume stampedes.
+   * Judged on `lastRunAt` alone, exactly as before self-healing.
+   */
+  private classicStale(task: ScheduledTask, now: number): boolean {
+    if (isRecoveryMode(task) || isCronCadence(task.schedule)) return false;
+    const lastRun = task.status.lastRunAt ? Date.parse(task.status.lastRunAt) : 0;
+    const intervalMs = parseEveryShared(task.schedule.every ?? '') ?? MIN_INTERVAL_MS;
+    return lastRun > 0 && lastRun + intervalMs < now - intervalMs;
   }
 
   private arm(id: string) {
@@ -987,8 +1227,12 @@ export class SchedulerManager extends EventEmitter {
     if (!live || !live.task.enabled) return;
     this.disarm(id);
     const now = Date.now();
-    const lastRun = live.task.status.lastRunAt ? Date.parse(live.task.status.lastRunAt) : 0;
-    const targetAt = this.nextTargetFireMs(live.task.schedule, lastRun, now);
+    const stale = this.classicStale(live.task, now);
+    const targetAt = stale
+      ? now + (parseEveryShared(live.task.schedule.every ?? '') ?? MIN_INTERVAL_MS)
+      : this.nextTargetFireMs(live.task, now, Math.max(live.queuedThroughMs ?? 0, live.handledThroughMs ?? 0));
+    live.targetAt = targetAt;
+    live.staleSince = stale ? now : undefined;
     const rawDelay = targetAt - now;
     // Chunked re-arm: Node's setTimeout clamps delays > ~24.85d to 1ms, so a
     // monthly/yearly cron would otherwise fire immediately in a tight loop.
@@ -1003,7 +1247,10 @@ export class SchedulerManager extends EventEmitter {
     // catch-up) doesn't fire all at once on app launch.
     const delay = Math.max(rawDelay, 5_000);
     live.task.status.nextRunAt = new Date(now + delay).toISOString();
-    live.timer = setTimeout(() => { void this.serial(() => this.fire(id, { manual: false })).catch(error => this.log(`fire ${id}`, error)); }, delay);
+    live.timer = setTimeout(() => {
+      const firedAt = Date.now();
+      void this.serial(async () => { await this.fire(id, { manual: false, firedAt }); await this.drainNow(); }).catch(error => this.log(`fire ${id}`, error));
+    }, delay);
   }
 
   private disarm(id: string) {
@@ -1015,9 +1262,18 @@ export class SchedulerManager extends EventEmitter {
     }
   }
 
-  private async fire(id: string, opts: { manual: boolean }) {
+  /**
+   * Fire a schedule. `manual` is "Run now" (bypasses overlap and the limit). An
+   * automatic fire carries a `trigger`: absent means the timer (`schedule`);
+   * `retry` / `catch-up` come from {@link retryRuns} and never get late/missed
+   * assessment (only timer fires do).
+   */
+  private async fire(id: string, opts: FireOptions): Promise<'raced' | void> {
     const live = this.live.get(id);
     if (!live || !this.deps) return;
+    // The caller's trigger, before a late gap turns a timer fire into a catch-up:
+    // the overflow policy is judged on this one so Classic stays as before.
+    const originalTrigger = opts.trigger;
     const enabledBeforeRefresh = live.task.enabled;
     const priorCadence = live.task.schedule;
     const current = await this.readCurrent(live.task);
@@ -1030,20 +1286,68 @@ export class SchedulerManager extends EventEmitter {
     if (!opts.manual && enabledBeforeRefresh && !live.task.enabled) { this.emit('changed'); return; }
     // Compare against the definition actually adopted. A deferred reload keeps
     // the prior cadence live, so comparing to `current` would re-arm forever.
-    if (!opts.manual && !isDeepStrictEqual(priorCadence, live.task.schedule)) { this.arm(id); this.emit('changed'); return; }
+    if (!opts.manual && !isDeepStrictEqual(priorCadence, live.task.schedule)) {
+      this.markDiscontinuity(live.task);
+      try { await this.persist(live.task); } catch (error) { this.log(`persist ${id}`, error); }
+      this.arm(id);
+      // A drained retry entry that doesn't start here returns through its timer.
+      if (opts.trigger === 'retry') this.armRetry(id);
+      this.emit('changed'); return;
+    }
     if (live.task.status.runs.some(run => run.launchState === 'pending')) throw new Error('Unconfirmed worker launch');
+
+    // Late / missed assessment: timer fires only (not Run now, not retry).
+    const timerFire = !opts.manual && !opts.fromQueue && (opts.trigger === undefined || opts.trigger === 'schedule');
+    if (timerFire && live.staleSince !== undefined) {
+      const since = live.staleSince;
+      live.staleSince = undefined;
+      // While a previous run is alive it covers the gap; a marker written here
+      // (before the overlap guard) could also push that live record out of history.
+      // Late fires follow a wake, when zombies still look alive: reap first.
+      this.deps.ptys.reapDeadSessions();
+      if (!this.hasUnresolvedRun(live)) {
+        try { await this.recordStaleInterval(id, since); } catch (error) { this.log(`stale ${id}`, error); }
+      }
+    }
+    const late = timerFire ? this.assessLate(live, opts.firedAt ?? Date.now()) : undefined;
+    const plan = late?.late ? this.applyCatchUp(live.task, late) : undefined;
+    if (late && plan && !plan.run) {
+      // Recovery `skip`: record the gap, run nothing, re-arm from the cursor. Not
+      // while a previous run is alive: it covers the gap (see the stale case above).
+      // Whether or not a marker is written, the gap is handled: the runtime-only
+      // anchor makes the re-arm below target the next future slot, never this
+      // one again. (Not `slotCursorAt`: an in-memory status edit would differ from
+      // disk and keep a deferred reload spinning while the run lives.)
+      const handled = () => { live.handledThroughMs = Math.max(live.handledThroughMs ?? 0, late.last); };
+      this.deps.ptys.reapDeadSessions();
+      if (!this.hasUnresolvedRun(live)) {
+        try { await this.writeMissedMarker(id, late, plan.markerCount, late.first); }
+        catch (error) { this.log(`missed marker ${id}`, error); handled(); }
+      } else {
+        handled();
+      }
+      if (live.task.enabled) this.arm(id);
+      return;
+    }
+    const fireOpts: FireOptions = late
+      ? { ...opts, slotAt: opts.slotAt ?? late.last, trigger: opts.trigger ?? (plan && plan.markerCount > 0 ? 'catch-up' : undefined) }
+      : opts;
+    opts = fireOpts;
 
     // Concurrent-duplicate guard: a fire whose launch is async (remote/coordinator
     // commit) hasn't returned yet when the next tick (or a watcher-driven reload's
     // re-arm) calls fire again. `firing` marks an in-flight launch so the second
     // fire records a skip instead of spawning a duplicate session. Manual "Run
     // now" bypasses it — an explicit click is the user's deliberate override.
+    if (!opts.manual && opts.fromQueue && live.firing) { if (live.task.enabled) this.arm(id); return 'raced'; }
     if (!opts.manual && live.firing) {
       this.log(`fire ${id}`, 'skipped: previous fire/launch is already in progress');
       await this.recordRun(id, {
         id: randomUUID(),
         at: new Date().toISOString(),
         result: 'skipped',
+        reasonCode: 'in-flight',
+        ...runMeta(opts),
         message: 'previous fire/launch is already in progress'
       });
       if (live.task.enabled) this.arm(id);
@@ -1075,39 +1379,20 @@ export class SchedulerManager extends EventEmitter {
         id: randomUUID(),
         at: new Date().toISOString(),
         result: 'error',
+        reasonCode: 'project-missing',
+        ...runMeta(opts),
         message: `project ${live.task.projectId} not found`
       });
       if (live.task.enabled) this.arm(id);
       return;
     }
 
-    if (live.task.kind === 'team') {
-      if (!opts.manual) {
-        if (live.task.status.runs.some(run => this.isLiveSquadRun(run))) {
-          live.firing = false;
-          await this.recordRun(id, {
-            id: randomUUID(),
-            at: new Date().toISOString(),
-            result: 'skipped',
-            message: 'previous squad run still active'
-          });
-          if (live.task.enabled) this.arm(id);
-          return;
-        }
-        const liveScheduledRuns = this.countLiveScheduledRuns() + this.pendingLaunches;
-        if (liveScheduledRuns >= MAX_CONCURRENT_SCHEDULED_RUNS) {
-          live.firing = false;
-          await this.recordRun(id, {
-            id: randomUUID(),
-            at: new Date().toISOString(),
-            result: 'skipped',
-            message: `concurrency-cap: ${liveScheduledRuns}/${MAX_CONCURRENT_SCHEDULED_RUNS} scheduled runs active`
-          });
-          if (live.task.enabled) this.arm(id);
-          return;
-        }
-      }
-      await this.fireSquad(live, project, opts);
+    // Recovery `all` with more than one slot to replay: every slot goes through
+    // the queue and runs one after another.
+    if (late?.late && plan?.run && plan.slots && plan.slots.length > 1) {
+      live.firing = false;
+      await this.queueCatchUps(live, late, plan.markerCount, plan.slots);
+      if (live.task.enabled) this.arm(id);
       return;
     }
 
@@ -1136,21 +1421,26 @@ export class SchedulerManager extends EventEmitter {
           .filter((s) => s.status === 'running' || s.status === 'starting')
           .map((s) => s.id)
       );
-      const aliveRunSessionId = live.task.status.runs
+      const squad = live.task.kind === 'team';
+      const aliveRunSessionId = squad ? undefined : live.task.status.runs
         .map((r) => r.sessionId)
         .find((sid): sid is string => !!sid && aliveIds.has(sid));
-      if (aliveRunSessionId) {
+      const liveSquadRun = squad && live.task.status.runs.some(run => this.isLiveSquadRun(run));
+      if (aliveRunSessionId || liveSquadRun) {
         if (!opts.manual) live.firing = false;
+        if (opts.fromQueue) { if (live.task.enabled) this.arm(id); return 'raced'; }
         this.log(
           `fire ${id}`,
-          `skipped: previous run ${aliveRunSessionId} still active`
+          `skipped: previous ${squad ? 'squad run' : `run ${aliveRunSessionId}`} still active`
         );
         await this.recordRun(id, {
           id: randomUUID(),
           at: new Date().toISOString(),
           result: 'skipped',
-          sessionId: aliveRunSessionId,
-          message: 'previous run still active'
+          ...(aliveRunSessionId ? { sessionId: aliveRunSessionId } : {}),
+          reasonCode: 'overlap',
+          ...runMeta(opts),
+          message: squad ? 'previous squad run still active' : 'previous run still active'
         });
         if (live.task.enabled) this.arm(id);
         return;
@@ -1158,32 +1448,60 @@ export class SchedulerManager extends EventEmitter {
 
       // Global concurrency cap: count scheduled runs alive across ALL schedules
       // (not just this one — overlap above already covered self-stacking) and
-      // skip this fire if firing would exceed MAX_CONCURRENT_SCHEDULED_RUNS.
-      // Reuses the exact skip/record path as overlap, with a distinct reason so
-      // the history (and logs) tell the two apart. Manual "Run now" never
+      // skip or queue this fire if firing would exceed the configured limit.
+      // The skip reuses the exact record path as overlap, with a distinct reason
+      // so the history (and logs) tell the two apart. Manual "Run now" never
       // reaches here — it bypasses this whole block, matching how it bypasses
       // overlap: an explicit click is the user's deliberate override.
+      const limit = this.runLimit();
       const liveScheduledRuns = this.countLiveScheduledRuns() + this.pendingLaunches;
-      if (liveScheduledRuns >= MAX_CONCURRENT_SCHEDULED_RUNS) {
-        if (!opts.manual) live.firing = false;
+      if (liveScheduledRuns >= limit) {
+        live.firing = false;
+        // A queued entry that lost a race for the last slot goes back to the head.
+        if (opts.fromQueue) { if (live.task.enabled) this.arm(id); return 'raced'; }
+        if (this.effectiveOverflow(live.task, isRecoveryMode(live.task) ? opts.trigger ?? originalTrigger : originalTrigger) === 'queue') {
+          await this.queueFire(live, opts, late, plan);
+          if (live.task.enabled) this.arm(id);
+          return;
+        }
         this.log(
           `fire ${id}`,
-          `skipped: concurrency cap (${liveScheduledRuns}/${MAX_CONCURRENT_SCHEDULED_RUNS} scheduled runs active)`
+          `skipped: concurrency cap (${liveScheduledRuns}/${limit} scheduled runs active)`
         );
         await this.recordRun(id, {
           id: randomUUID(),
           at: new Date().toISOString(),
           result: 'skipped',
-          message: `concurrency-cap: ${liveScheduledRuns}/${MAX_CONCURRENT_SCHEDULED_RUNS} scheduled runs active`
+          reasonCode: 'concurrency-cap',
+          ...runMeta(opts),
+          message: `concurrency-cap: ${liveScheduledRuns}/${limit} scheduled runs active`
         });
         if (live.task.enabled) this.arm(id);
         return;
       }
     }
 
-    const runId = randomUUID();
-    const reservedSessionId = randomUUID();
+    const runId = opts.runId ?? randomUUID();
     const wasEnabled = live.task.enabled;
+    // This retry is starting: the persisted `pendingRetry` it came from is consumed
+    // (the reservation below writes the task without it).
+    if (opts.trigger === 'retry' && live.task.status.pendingRetry) {
+      delete live.task.status.pendingRetry;
+      const timer = this.retryTimers.get(id);
+      if (timer) clearTimeout(timer);
+      this.retryTimers.delete(id);
+    }
+    // Older missed slots covered by this catch-up run: one marker, closed by it.
+    if (late && plan?.run && plan.markerCount > 0) {
+      try {
+        await this.writeMissedMarker(id, late, plan.markerCount, late.first, runId);
+      } catch (error) { this.log(`missed marker ${id}`, error); }
+    }
+    if (live.task.kind === 'team') {
+      await this.fireSquad(live, project, opts, late, runId, wasEnabled);
+      return;
+    }
+    const reservedSessionId = randomUUID();
     const profile = live.task.profile;
     // Resolve the persona (if the task names one and a resolver is wired). Its
     // `baseProfile` overrides the task's profile for prompt-as-positional-argv
@@ -1239,7 +1557,7 @@ export class SchedulerManager extends EventEmitter {
     // Reserve before any process can start. Persist disabled so a downgrade
     // cannot replay a launch whose acknowledgement was lost.
     await this.recordRun(id, { id: runId, at: new Date().toISOString(), result: 'skipped', sessionId: reservedSessionId, launchKind: 'agent',
-      launchState: 'pending', message: 'Worker launch pending confirmation' }, false);
+      launchState: 'pending', message: 'Worker launch pending confirmation', ...runMeta(opts), ...lateFields(opts, late) }, false);
     this.pendingLaunches++;
     let session: Awaited<ReturnType<LaunchTerminal>>;
     try {
@@ -1254,14 +1572,13 @@ export class SchedulerManager extends EventEmitter {
     await this.finishLaunch(id, runId, live, opts, project, effectiveProfile, session, wasEnabled);
   }
 
-  private async fireSquad(live: Live, project: Project, opts: { manual: boolean }) {
+  private async fireSquad(live: Live, project: Project, opts: FireOptions, late: LateInfo | undefined, runId: string, wasEnabled: boolean) {
     if (!this.deps?.launchSquad) throw new Error('Squad execution service unavailable');
-    const runId = randomUUID();
-    const wasEnabled = live.task.enabled;
     const launchRequestId = `schedule:${live.task.id}:${runId}`;
+    const meta = { ...runMeta(opts), ...lateFields(opts, late) };
     await this.recordRun(live.task.id, {
       id: runId, at: new Date().toISOString(), result: 'skipped', launchKind: 'team', launchState: 'pending',
-      launchRequestId, message: 'Squad launch pending confirmation'
+      launchRequestId, message: 'Squad launch pending confirmation', ...meta
     }, false);
     this.pendingLaunches++;
     let launched: { executionId: string };
@@ -1279,13 +1596,13 @@ export class SchedulerManager extends EventEmitter {
     if (!opts.manual) live.firing = false;
     if (this.live.get(live.task.id) !== live) return;
     await this.recordRun(live.task.id, {
-      id: runId, at: new Date().toISOString(), result: 'success', executionId: launched.executionId, launchRequestId, launchKind: 'team', launchState: 'running'
+      id: runId, at: new Date().toISOString(), result: 'success', executionId: launched.executionId, launchRequestId, launchKind: 'team', launchState: 'running', ...meta
     }, wasEnabled);
     this.scheduleSquadObservation();
     if (live.task.enabled) this.arm(live.task.id);
   }
 
-  private async recordLaunchFailure(id: string, runId: string, live: Live, opts: { manual: boolean }, err: unknown, wasEnabled: boolean) {
+  private async recordLaunchFailure(id: string, runId: string, live: Live, opts: FireOptions, err: unknown, wasEnabled: boolean) {
     if (this.live.get(id) !== live) return;
     if (!opts.manual) live.firing = false;
     this.log(`fire ${id} launch`, err);
@@ -1294,8 +1611,17 @@ export class SchedulerManager extends EventEmitter {
       at: new Date().toISOString(),
       result: 'error',
       launchState: 'failed',
+      reasonCode: 'launch-failed',
       message: err instanceof Error ? err.message : String(err)
     }, wasEnabled);
+    const retryScheduled = await this.scheduleRetryIfDue(id, runId);
+    // The exit path held this chain's notice back (D9). When a retry attempt
+    // can't even start and no further retry follows, the chain ends here: send it.
+    if (!retryScheduled && opts.auto && (live.task.inboxLevel ?? 'quiet') !== 'silent') {
+      const project = this.deps?.store.listProjects().find(candidate => candidate.id === live.task.projectId);
+      const run = live.task.status.runs.find(candidate => candidate.id === runId);
+      if (project && run) void this.notifyInboxOnExit(live.task, run, project, true);
+    }
     if (live.task.enabled) this.arm(id);
   }
 
@@ -1303,7 +1629,7 @@ export class SchedulerManager extends EventEmitter {
     id: string,
     runId: string | undefined,
     live: Live,
-    opts: { manual: boolean },
+    opts: FireOptions,
     project: Project,
     effectiveProfile: Parameters<typeof providerCapabilities>[0],
     session: ReturnType<PtyManager['create']>,
@@ -1423,6 +1749,15 @@ export class SchedulerManager extends EventEmitter {
         result,
         sessionId: session.id,
         durationMs: exitMs - runStartMs,
+        reasonCode: timedOut
+          ? 'timeout'
+          : terminalError
+          ? existingRun?.reasonCode ?? 'subagent-timeout'
+          : exitCode !== 0
+          ? 'exit-nonzero'
+          : result === 'incomplete'
+          ? 'no-report'
+          : undefined,
         message: timedOut
           ? `exceeded maximum duration of ${live.task.maxDurationMinutes} minutes`
           : terminalError
@@ -1434,19 +1769,24 @@ export class SchedulerManager extends EventEmitter {
           : undefined
       };
       await this.recordRun(id, finalRun);
+      if (result === 'success') await this.onFinishedSuccess(id, runId);
+      // A failure that just scheduled an auto-retry is not final: one notice per chain.
+      const retryScheduled = result === 'success' ? false : await this.scheduleRetryIfDue(id, runId);
+      const attempt = live.task.status.runs.find(candidate => candidate.id === runId)?.attempt;
       // `silent` schedules never write a completion summary; `quiet`/`loud`
       // both write one, stamped with the level so the renderer can decide
       // badge counting and inline-vs-grouped placement. An `incomplete` run
       // always escalates the notice to `loud` regardless of the schedule's
       // configured level, so a quiet schedule's silent failure still surfaces.
-      if ((live.task.inboxLevel ?? 'quiet') !== 'silent') {
+      if ((live.task.inboxLevel ?? 'quiet') !== 'silent' && !retryScheduled) {
         void this.notifyInboxOnExit(
           live.task,
-          finalRun,
+          { ...finalRun, ...(attempt !== undefined ? { attempt } : {}) },
           project,
           result === 'incomplete' || result === 'error'
         );
       }
+      await this.drainSafely();
       }).catch(error => this.log(`exit ${sessionId}`, error));
     };
     this.deps?.ptys.on('exit', onExit);
@@ -1486,7 +1826,8 @@ export class SchedulerManager extends EventEmitter {
       const durationStr =
         run.durationMs !== undefined ? ` in ${formatDuration(run.durationMs)}` : '';
       const resultLabel = run.result === 'incomplete' ? '⚠️ incomplete' : run.result;
-      const body = `**${task.name}** — ${resultLabel}${durationStr}`;
+      const afterAttempts = run.result === 'success' && (run.attempt ?? 1) > 1 ? ` · after ${run.attempt} attempts` : '';
+      const body = `**${task.name}** — ${resultLabel}${durationStr}${afterAttempts}`;
       await this.deps.inbox.append({
         projectId: project.id,
         projectLabel: project.name,
@@ -1514,9 +1855,10 @@ export class SchedulerManager extends EventEmitter {
     }
   }
 
-  private async recordRun(id: string, run: ScheduleRun, enabled?: boolean) {
+  private async recordRun(id: string, run: ScheduleRun, enabled?: boolean, options: { marker?: boolean } = {}) {
     const live = this.live.get(id);
     if (!live) return;
+    if (run.message && run.message.length > MAX_RUN_MESSAGE) run = { ...run, message: run.message.slice(0, MAX_RUN_MESSAGE) };
     const next = structuredClone(live.task);
     if (enabled !== undefined) next.enabled = enabled;
     const status = next.status;
@@ -1551,7 +1893,8 @@ export class SchedulerManager extends EventEmitter {
       return;
     } else {
       status.runs = this.retainRuns(live.task, [run, ...status.runs]);
-      status.runCount += 1;
+      // A marker is bookkeeping, not a fire: it must not move runCount.
+      if (!options.marker) status.runCount += 1;
       if (run.id) {
         countedRunIds.add(run.id);
         // Bound the set: drop oldest ids once over cap (insertion-ordered).
@@ -1572,14 +1915,615 @@ export class SchedulerManager extends EventEmitter {
     if (run.result === 'error') {
       this.log(`run ${id}`, run.message ?? 'error (no message)');
     }
-    status.lastRunAt = run.at;
-    status.lastRunResult = run.result;
-    status.lastRunSessionId = run.sessionId;
+    if (options.marker) {
+      // Never touch lastRunAt / lastRunResult / runCount (an older version's
+      // timing maths reads them); advance the slot cursor instead.
+      const to = run.missed ? Date.parse(run.missed.to) : NaN;
+      if (Number.isFinite(to) && to > anchorOf({ slotCursorAt: status.slotCursorAt })) status.slotCursorAt = run.missed!.to;
+    } else {
+      status.lastRunAt = run.at;
+      status.lastRunResult = run.result;
+      status.lastRunSessionId = run.sessionId;
+    }
     await this.persist(next, enabled === undefined ? {} : { enabled });
     this.publishRuntime(live, next);
     live.countedRunIds = countedRunIds;
     live.runIndexBySession = runIndexBySession;
     this.emit('changed');
+  }
+
+  // ----- late / missed handling ----------------------------------------------
+
+  /**
+   * Compare the slot this timer was armed for with the accounting floor and the
+   * clock (design 6.3). Slots at or before the floor are normal fires (a paused
+   * slot a Classic schedule still runs, a cadence edit): no marker, no chip.
+   */
+  private assessLate(live: Live, now: number): LateInfo | undefined {
+    const slotAt = live.targetAt;
+    if (slotAt === undefined) return undefined;
+    let floor = this.floorMs(live);
+    if (slotAt <= floor || now - slotAt <= LATE_THRESHOLD_MS) return undefined;
+    const cron = isCronCadence(live.task.schedule);
+    const intervalMs = cron ? undefined : parseEveryShared(live.task.schedule.every ?? '') ?? MIN_INTERVAL_MS;
+    // A schedule that never ran has no anchor: its gap starts at its own first slot.
+    if (floor === 0) floor = cron ? slotAt - 1 : slotAt - intervalMs!;
+    let first: number;
+    let last: number;
+    let count: number;
+    if (intervalMs !== undefined) {
+      // Interval slots sit on the anchor's grid (anchor + k*interval); count the
+      // ones after the floor, which a re-enable or cadence edit can move off-grid.
+      const anchor = this.anchorMs(live) || floor;
+      const kFloor = Math.max(0, Math.floor((floor - anchor) / intervalMs));
+      const kNow = Math.floor((now - anchor) / intervalMs);
+      count = Math.max(1, kNow - kFloor);
+      first = anchor + (kFloor + 1) * intervalMs;
+      last = Math.max(first, anchor + kNow * intervalMs);
+    } else {
+      const slots = slotsBetween(live.task.schedule, floor, now);
+      first = slots.first ?? slotAt;
+      // The true newest slot even past the 1000-slot count cap.
+      last = slots.last ?? slotAt;
+      count = Math.max(1, slots.count);
+    }
+    return {
+      late: true,
+      first,
+      floor,
+      last,
+      count,
+      lateByMs: Math.max(0, now - last),
+      cause: slotAt < this.startedAtMs ? 'app-closed' : 'asleep',
+      ...(intervalMs !== undefined ? { intervalMs } : {})
+    };
+  }
+
+  /**
+   * What to do about a late gap (design 6.3): whether a run follows and how many
+   * of the oldest slots a marker covers.
+   *  - Recovery `skip`: marker for the whole gap, no run.
+   *  - Recovery `once` and Classic cron: marker for the k-1 older slots (when
+   *    k > 1) and one run for the newest. Classic interval: one run, no marker.
+   *  - Recovery `all`: `n = min(k, max ?? 3)` newest slots each get a run (in
+   *    order, through the queue); a marker covers the k-n older ones.
+   */
+  private applyCatchUp(task: ScheduledTask, late: LateInfo): { run: boolean; markerCount: number; slots?: number[] } {
+    if (task.catchUp?.mode === 'skip') return { run: false, markerCount: late.count };
+    if (task.catchUp?.mode === 'all') {
+      const n = Math.max(1, Math.min(late.count, task.catchUp.max ?? 3));
+      const slots = newestSlots(task.schedule, late, n);
+      const used = slots.length || 1;
+      return { run: true, markerCount: Math.max(0, late.count - used), slots: slots.length ? slots : [late.last] };
+    }
+    const records = isRecoveryMode(task) || isCronCadence(task.schedule);
+    return { run: true, markerCount: records && late.count > 1 ? late.count - 1 : 0 };
+  }
+
+  /**
+   * Write a missed-slots marker (not a fire: runCount and lastRun* are untouched).
+   * `count` oldest slots are covered, ending at the slot before the newest when
+   * a catch-up run follows (`resolvedBy`).
+   */
+  private async writeMissedMarker(id: string, late: LateInfo, count: number, firstMs: number, resolvedBy?: string, beforeMs = late.last) {
+    const live = this.live.get(id);
+    if (!live) return;
+    // The marker ends at the (count)th slot of the gap: the newest slot when the
+    // whole gap is recorded, else the slot just before the newest.
+    const toMs = count >= late.count
+      ? late.last
+      : late.intervalMs !== undefined
+        ? Math.max(firstMs, beforeMs - late.intervalMs)
+        : slotsBetween(live.task.schedule, late.floor, beforeMs - 1).last ?? firstMs;
+    await this.recordRun(id, {
+      id: randomUUID(),
+      at: new Date().toISOString(),
+      result: 'skipped',
+      reasonCode: late.cause === 'app-closed' ? 'missed-app-closed' : 'missed-asleep',
+      marker: true,
+      trigger: 'schedule',
+      slotAt: new Date(toMs).toISOString(),
+      missed: { count, from: new Date(firstMs).toISOString(), to: new Date(toMs).toISOString() },
+      ...(resolvedBy ? { resolvedBy } : {}),
+      message: `${count} scheduled ${count === 1 ? 'run was' : 'runs were'} missed`
+    }, undefined, { marker: true });
+  }
+
+  /**
+   * Classic interval policy at `arm`: more than an interval overdue re-arms at
+   * `now + interval` (see {@link classicStale}) and runs nothing at once. The gap
+   * is recorded as an open marker at the next timer fire (`sinceMs` = the arm),
+   * so merely loading a legacy file never writes.
+   */
+  private async recordStaleInterval(id: string, sinceMs: number) {
+    const live = this.live.get(id);
+    if (!live || !live.task.enabled) return;
+    const now = sinceMs;
+    const slots = slotsBetween(live.task.schedule, this.floorMs(live), now);
+    if (!slots.count || slots.first === undefined || slots.last === undefined) return;
+    await this.writeMissedMarker(id, {
+      late: true,
+      first: slots.first,
+      floor: this.floorMs(live),
+      last: slots.last,
+      count: slots.count,
+      lateByMs: Math.max(0, now - slots.last),
+      cause: slots.first < this.startedAtMs ? 'app-closed' : 'asleep'
+    }, slots.count, slots.first);
+  }
+
+  /** A finished success closes the schedule's earlier open problems (D8). One persist. */
+  /**
+   * A finished success (D8): close the schedule's earlier open problems and end
+   * any automatic retry chain, pending or already queued. Manual retries the
+   * user asked for still run.
+   */
+  private async onFinishedSuccess(id: string, runId: string | undefined) {
+    await this.resolveOpenProblems(id, runId);
+    await this.clearPendingRetry(id);
+    const before = this.queue.length;
+    this.queue = this.queue.filter(entry => entry.taskId !== id || entry.trigger !== 'retry' || !entry.auto);
+    if (this.queue.length !== before) { this.syncQueuedAt(id); this.emit('changed'); }
+  }
+
+  private async resolveOpenProblems(id: string, resolvedBy: string | undefined) {
+    const live = this.live.get(id);
+    if (!live || !resolvedBy) return;
+    const now = Date.now();
+    if (!live.task.status.runs.some(run => run.id !== resolvedBy && isOpenProblem(run, now))) return;
+    const next = structuredClone(live.task);
+    next.status.runs = next.status.runs.map(run => run.id !== resolvedBy && isOpenProblem(run, now) ? { ...run, resolvedBy } : run);
+    await this.persist(next);
+    this.publishRuntime(live, next);
+    this.emit('changed');
+  }
+
+  // ----- limit, queue and drain ------------------------------------------------
+
+  /** The configured ceiling on concurrent scheduled runs, read fresh at each check. */
+  private runLimit(): number {
+    let configured: unknown;
+    try { configured = this.deps?.store.getConfig().scheduledRunConcurrency; } catch { configured = undefined; }
+    const n = typeof configured === 'number' && Number.isFinite(configured) ? Math.round(configured) : DEFAULT_SCHEDULED_RUN_LIMIT;
+    return Math.max(MIN_SCHEDULED_RUN_LIMIT, Math.min(MAX_SCHEDULED_RUN_LIMIT, n));
+  }
+
+  /**
+   * What a fire over the limit does. Retries and catch-up always queue; otherwise
+   * the configured `queue` / `skip`, or for `auto` (absent) queue for Recovery
+   * schedules and skip for Classic ones.
+   */
+  private effectiveOverflow(task: ScheduledTask, trigger?: ScheduleRunTrigger): 'queue' | 'skip' {
+    if (trigger === 'retry' || trigger === 'catch-up') return 'queue';
+    let configured: unknown;
+    try { configured = this.deps?.store.getConfig().scheduledRunOverflow; } catch { configured = undefined; }
+    if (configured === 'queue' || configured === 'skip') return configured;
+    return isRecoveryMode(task) ? 'queue' : 'skip';
+  }
+
+  /** Keep the runtime-only `status.queuedAt` in step with the task's queue entries. */
+  private syncQueuedAt(taskId: string) {
+    const live = this.live.get(taskId);
+    if (!live) return;
+    const oldest = this.queue.find(entry => entry.taskId === taskId);
+    if (oldest) live.task.status.queuedAt = new Date(oldest.enqueuedAt).toISOString();
+    else delete live.task.status.queuedAt;
+  }
+
+  /**
+   * Add an entry within the queue bounds: 200 total; per schedule one `schedule`
+   * entry (a newer slot replaces the older), up to 10 `catch-up`, one `retry`
+   * (newer replaces older). Sets the queued-through anchor for slot entries.
+   */
+  private enqueue(entry: QueueEntry): { ok: true; entry: QueueEntry; replaced?: QueueEntry } | { ok: false } {
+    const sameTask = this.queue.filter(candidate => candidate.taskId === entry.taskId);
+    let stored = entry;
+    let replaced: QueueEntry | undefined;
+    const existing = entry.trigger === 'catch-up' ? undefined : sameTask.find(candidate => candidate.trigger === entry.trigger);
+    if (existing && entry.trigger === 'schedule') {
+      // Coalesce: keep the entry (and its reserved run id), move it to the newer slot.
+      existing.slotAt = Math.max(existing.slotAt ?? 0, entry.slotAt ?? 0) || undefined;
+      if (entry.lateCause) existing.lateCause = entry.lateCause;
+      stored = existing;
+    } else if (existing) {
+      this.queue[this.queue.indexOf(existing)] = entry;
+      replaced = existing;
+    } else {
+      if (entry.trigger === 'catch-up' && sameTask.filter(candidate => candidate.trigger === 'catch-up').length >= MAX_QUEUE_CATCH_UP_PER_TASK) return { ok: false };
+      if (this.queue.length >= MAX_QUEUE_TOTAL) return { ok: false };
+      this.queue.push(entry);
+    }
+    if (entry.trigger !== 'retry' && entry.slotAt !== undefined) {
+      const live = this.live.get(entry.taskId);
+      if (live && entry.slotAt > (live.queuedThroughMs ?? 0)) live.queuedThroughMs = entry.slotAt;
+    }
+    this.syncQueuedAt(entry.taskId);
+    return { ok: true, entry: stored, ...(replaced ? { replaced } : {}) };
+  }
+
+  /** Drop a task's entries (all, or all but retries when it was only disabled). */
+  private dropQueued(taskId: string, includeRetries: boolean) {
+    const live = this.live.get(taskId);
+    // A disable keeps manual retries the user asked for; automatic ones go with the schedule.
+    this.queue = this.queue.filter(entry => entry.taskId !== taskId || (!includeRetries && entry.trigger === 'retry' && !entry.auto));
+    // The slots we gave up on were never run: let the timing anchor forget them.
+    if (live && !this.queue.some(entry => entry.taskId === taskId && entry.trigger !== 'retry')) delete live.queuedThroughMs;
+    this.syncQueuedAt(taskId);
+  }
+
+  /** A schedule left the manager: release its queue entries and retry timer (Rule 3). */
+  private forgetTask(taskId: string) {
+    this.queue = this.queue.filter(entry => entry.taskId !== taskId);
+    const timer = this.retryTimers.get(taskId);
+    if (timer) clearTimeout(timer);
+    this.retryTimers.delete(taskId);
+  }
+
+  private async recordQueueFull(id: string, opts: FireOptions) {
+    await this.recordRun(id, {
+      id: randomUUID(),
+      at: new Date().toISOString(),
+      result: 'skipped',
+      reasonCode: 'queue-full',
+      ...runMeta(opts),
+      message: `queue-full: ${this.queue.length} runs are waiting`
+    });
+  }
+
+  /** Over the limit with overflow `queue`: enqueue this fire (and its older-slot marker). */
+  private async queueFire(live: Live, opts: FireOptions, late: LateInfo | undefined, plan: { run: boolean; markerCount: number } | undefined) {
+    const id = live.task.id;
+    const runId = opts.runId ?? randomUUID();
+    if (late?.late && plan?.run && plan.markerCount > 0) {
+      // No `resolvedBy`: a queued run may never start. Its success closes the marker (D8).
+      try { await this.writeMissedMarker(id, late, plan.markerCount, late.first); }
+      catch (error) { this.log(`missed marker ${id}`, error); }
+    }
+    const trigger = opts.trigger === 'retry' || opts.trigger === 'catch-up' ? opts.trigger : 'schedule';
+    const queued = this.enqueue({
+      taskId: id,
+      trigger,
+      slotAt: opts.slotAt ?? live.targetAt,
+      retryOf: opts.retryOf,
+      attempt: opts.attempt,
+      enqueuedAt: Date.now(),
+      runId,
+      ...(late?.late ? { lateCause: late.cause } : {})
+    });
+    if (!queued.ok) await this.recordQueueFull(id, opts);
+    this.emit('changed');
+  }
+
+  /** Recovery `all`: one `catch-up` entry per slot, oldest first, plus a marker for older gaps. */
+  private async queueCatchUps(live: Live, late: LateInfo, markerCount: number, slots: number[]) {
+    const id = live.task.id;
+    const runIds = slots.map(() => randomUUID());
+    if (markerCount > 0) {
+      try { await this.writeMissedMarker(id, late, markerCount, late.first, undefined, slots[0]); }
+      catch (error) { this.log(`missed marker ${id}`, error); }
+    }
+    for (const [index, slotAt] of slots.entries()) {
+      const queued = this.enqueue({ taskId: id, trigger: 'catch-up', slotAt, enqueuedAt: Date.now(), runId: runIds[index], lateCause: late.cause });
+      if (!queued.ok) {
+        await this.recordQueueFull(id, { manual: false, trigger: 'catch-up', slotAt });
+        break;
+      }
+    }
+    this.emit('changed');
+  }
+
+  private isEligible(entry: QueueEntry): boolean {
+    const live = this.live.get(entry.taskId);
+    if (!live || live.task.external || live.firing) return false;
+    if (!live.task.enabled && entry.trigger !== 'retry') return false;
+    if (!this.deps?.store.listProjects().some(project => project.id === live.task.projectId)) return false;
+    // Covers a live PTY session, a pending launch, and a live Squad run.
+    return !this.hasUnresolvedRun(live);
+  }
+
+  /**
+   * Start queued runs while there is room, FIFO. An entry that cannot start yet
+   * never blocks the ones behind it; entries of removed or disabled schedules
+   * (retries excepted) are dropped. Call inside `serial()`.
+   */
+  private async drainNow() {
+    if (this.draining || !this.deps) return;
+    this.draining = true;
+    let touched = false;
+    try {
+      for (let guard = 0; guard < MAX_QUEUE_TOTAL * 2; guard++) {
+        const stale = this.queue.filter(entry => {
+          const live = this.live.get(entry.taskId);
+          return !live || !!live.task.external || (!live.task.enabled && (entry.trigger !== 'retry' || !!entry.auto));
+        });
+        if (stale.length) {
+          const tasks = new Set(stale.map(entry => entry.taskId));
+          this.queue = this.queue.filter(entry => !stale.includes(entry));
+          touched = true;
+          for (const taskId of tasks) this.dropQueued(taskId, false);
+        }
+        if (!this.queue.length) break;
+        this.deps.ptys.reapDeadSessions();
+        if (this.countLiveScheduledRuns() + this.pendingLaunches >= this.runLimit()) break;
+        const entry = this.queue.find(candidate => this.isEligible(candidate));
+        if (!entry) break;
+        this.queue.splice(this.queue.indexOf(entry), 1);
+        this.syncQueuedAt(entry.taskId);
+        touched = true;
+        let outcome: 'raced' | void;
+        try {
+          outcome = await this.fire(entry.taskId, {
+            manual: false,
+            trigger: entry.trigger,
+            slotAt: entry.slotAt,
+            retryOf: entry.retryOf,
+            attempt: entry.attempt,
+            runId: entry.runId,
+            lateCause: entry.lateCause,
+            ...(entry.auto ? { auto: true as const } : {}),
+            fromQueue: true
+          });
+        } catch (error) {
+          this.log(`drain ${entry.taskId}`, error);
+          this.launchErrors.set(entry, error instanceof Error ? error.message : String(error));
+          continue;
+        }
+        if (outcome === 'raced') {
+          this.queue.unshift(entry);
+          this.syncQueuedAt(entry.taskId);
+          break;
+        }
+      }
+    } finally {
+      this.draining = false;
+      if (touched) this.emit('changed');
+    }
+  }
+
+  private async drainSafely() {
+    try { await this.drainNow(); } catch (error) { this.log('drain', error); }
+  }
+
+  // ----- auto-retry --------------------------------------------------------------
+
+  /**
+   * After a FINAL failed record whose reason allows it, schedule the next attempt
+   * (linear backoff: attempt n+1 is due `delayMinutes * n` after attempt n). The
+   * pending retry is persisted. Returns true when a retry is now pending.
+   */
+  private async scheduleRetryIfDue(id: string, runId: string | undefined): Promise<boolean> {
+    const live = this.live.get(id);
+    if (!live || !runId || !live.task.enabled) return false;
+    const policy = live.task.retry;
+    if (!policy || policy.attempts < 1) return false;
+    const run = live.task.status.runs.find(candidate => candidate.id === runId);
+    if (!run || run.marker) return false;
+    const reason = runReason(run);
+    if (!reason || !SCHEDULE_REASONS[reason].autoRetry) return false;
+    const attempt = Number.isInteger(run.attempt) && run.attempt! >= 1 ? run.attempt! : 1;
+    if (!(policy.attempts > attempt - 1)) return false;
+    const next = structuredClone(live.task);
+    next.status.pendingRetry = {
+      rootRunId: run.retryOf ?? runId,
+      attempt: attempt + 1,
+      dueAt: new Date(Date.now() + policy.delayMinutes * attempt * 60_000).toISOString()
+    };
+    try {
+      await this.persist(next);
+    } catch (error) {
+      this.log(`persist retry ${id}`, error);
+      return false;
+    }
+    this.publishRuntime(live, next);
+    this.armRetry(id);
+    this.emit('changed');
+    return true;
+  }
+
+  /** (Re)arm the one retry timer for a task from its persisted `pendingRetry`. */
+  private armRetry(id: string) {
+    const existing = this.retryTimers.get(id);
+    if (existing) clearTimeout(existing);
+    this.retryTimers.delete(id);
+    const live = this.live.get(id);
+    const pending = live?.task.status.pendingRetry;
+    if (!live || !pending || !live.task.enabled || !(live.task.retry && live.task.retry.attempts >= 1)) return;
+    const due = Date.parse(pending.dueAt);
+    const delay = Math.max(RETRY_MIN_DELAY_MS, (Number.isFinite(due) ? due : 0) - Date.now());
+    const timer: NodeJS.Timeout = setTimeout(() => {
+      void this.serial(async () => {
+        // A newer armRetry replaced this timer while it waited for the serial queue.
+        if (this.retryTimers.get(id) !== timer) return;
+        this.retryTimers.delete(id);
+        await this.retryDue(id);
+        await this.drainNow();
+      }).catch(error => this.log(`retry ${id}`, error));
+    }, delay);
+    timer.unref?.();
+    this.retryTimers.set(id, timer);
+  }
+
+  /**
+   * The pending retry is due: queue it. `pendingRetry` stays persisted until
+   * the retry actually starts (see `fire`), so a quit while it waits in the
+   * in-memory queue re-arms it on the next launch.
+   */
+  private async retryDue(id: string) {
+    const live = this.live.get(id);
+    const pending = live?.task.status.pendingRetry;
+    if (!live || !pending) return;
+    if (!live.task.enabled || !(live.task.retry && live.task.retry.attempts >= 1)) { await this.clearPendingRetry(id); return; }
+    const due = Date.parse(pending.dueAt);
+    if (Number.isFinite(due) && due > Date.now() + 1_000) { this.armRetry(id); return; }
+    // Any retry already queued for this schedule (a manual one included) serves
+    // this chain too: one run re-runs the schedule (D8). Never replace it.
+    if (this.queue.some(entry => entry.taskId === id && entry.trigger === 'retry')) return;
+    if (pending.attempt > live.task.retry.attempts + 1) { await this.clearPendingRetry(id); return; }
+    const root = live.task.status.runs.find(run => run.id === pending.rootRunId);
+    const slot = Date.parse(root?.slotAt ?? '');
+    const queued = this.enqueue({
+      taskId: id,
+      trigger: 'retry',
+      retryOf: pending.rootRunId,
+      attempt: pending.attempt,
+      ...(Number.isFinite(slot) ? { slotAt: slot } : {}),
+      enqueuedAt: Date.now(),
+      auto: true
+    });
+    if (!queued.ok) {
+      await this.recordQueueFull(id, { manual: false, trigger: 'retry', retryOf: pending.rootRunId, attempt: pending.attempt });
+      await this.clearPendingRetry(id);
+    }
+  }
+
+  /** Cancel a task's retry timer and its queued automatic retries (the policy went away). */
+  private cancelAutoRetries(id: string) {
+    const timer = this.retryTimers.get(id);
+    if (timer) clearTimeout(timer);
+    this.retryTimers.delete(id);
+    const before = this.queue.length;
+    this.queue = this.queue.filter(entry => entry.taskId !== id || entry.trigger !== 'retry' || !entry.auto);
+    if (this.queue.length !== before) this.syncQueuedAt(id);
+  }
+
+  /** Drop a pending retry (a success, a disable): persisted, timer cancelled. */
+  private async clearPendingRetry(id: string) {
+    const timer = this.retryTimers.get(id);
+    if (timer) clearTimeout(timer);
+    this.retryTimers.delete(id);
+    const live = this.live.get(id);
+    if (!live?.task.status.pendingRetry) return;
+    const next = structuredClone(live.task);
+    delete next.status.pendingRetry;
+    try { await this.persist(next); } catch (error) { this.log(`persist retry ${id}`, error); return; }
+    this.publishRuntime(live, next);
+    this.emit('changed');
+  }
+
+  // ----- run query / dismiss / retry ------------------------------------------
+
+  /** A pure read of the live list: not queued behind fires and drains (`get`/`list` aren't either). */
+  queryRuns(query?: ScheduleRunQuery): Promise<ScheduleRunQueryResult> {
+    return Promise.resolve().then(() => collectRunRows(this.list(), query, Date.now()));
+  }
+
+  /** Mark runs dismissed (they leave Open). Returns how many changed. */
+  dismissRuns(refs: ScheduleRunRef[]): Promise<number> {
+    return this.serial(async () => {
+      if (!Array.isArray(refs) || refs.length > MAX_REF_DISMISS) throw new Error(`dismissRuns takes at most ${MAX_REF_DISMISS} runs`);
+      const byTask = new Map<string, Set<string>>();
+      for (const ref of refs) {
+        if (!ref || typeof ref.scheduleId !== 'string' || typeof ref.runId !== 'string') continue;
+        const set = byTask.get(ref.scheduleId) ?? new Set<string>();
+        set.add(ref.runId);
+        byTask.set(ref.scheduleId, set);
+      }
+      let dismissed = 0;
+      const dismissedAt = new Date().toISOString();
+      for (const [scheduleId, runIds] of byTask) {
+        const live = this.live.get(scheduleId);
+        if (!live || live.task.external) continue;
+        const next = structuredClone(live.task);
+        let changed = 0;
+        next.status.runs = next.status.runs.map(run => {
+          if (!run.id || !runIds.has(run.id) || run.dismissedAt || run.launchState === 'pending') return run;
+          changed++;
+          return { ...run, dismissedAt };
+        });
+        if (!changed) continue;
+        await this.persist(next);
+        this.publishRuntime(live, next);
+        dismissed += changed;
+      }
+      if (dismissed) this.emit('changed');
+      return dismissed;
+    });
+  }
+
+  /**
+   * Retry problem runs (or catch up a missed marker). Rejected per ref when the
+   * schedule or run is unknown, external, still launching, or not retryable.
+   * A valid ref is queued and the queue drained: `started` when it launched at
+   * once, else `queued` (waiting for a free slot or for the schedule's last run).
+   */
+  retryRuns(refs: ScheduleRunRef[]): Promise<ScheduleRetryResult[]> {
+    type Pending = { entry: QueueEntry; index: number; root: string; attempt: number };
+    return this.serial(async () => {
+      if (!Array.isArray(refs) || refs.length < 1 || refs.length > MAX_REF_RETRY) throw new Error(`retryRuns takes 1-${MAX_REF_RETRY} runs`);
+      const results: ScheduleRetryResult[] = [];
+      const pending: Pending[] = [];
+      for (const ref of refs) {
+        const base = { scheduleId: String(ref?.scheduleId), runId: String(ref?.runId) };
+        const fail = (error: string) => results.push({ ...base, ok: false, error });
+        const live = this.live.get(base.scheduleId);
+        if (!live) { fail('schedule not found'); continue; }
+        if (live.task.external) { fail('external schedules cannot be retried here'); continue; }
+        const run = live.task.status.runs.find(candidate => candidate.id === base.runId);
+        if (!run) { fail('run not found'); continue; }
+        if (run.launchState === 'pending') { fail('run is still launching'); continue; }
+        const reason = runReason(run);
+        const retryable = isProblemRun(run) && (reason ? SCHEDULE_REASONS[reason].manualRetry : true);
+        if (!retryable) { fail('run cannot be retried'); continue; }
+        const root = run.retryOf ?? run.id!;
+        // One retry per chain at a time: a second request while one is queued or
+        // running would only start the same work twice.
+        const chainBusy = this.queue.some(entry => entry.taskId === base.scheduleId && entry.trigger !== 'schedule' && entry.retryOf === root)
+          || live.task.status.runs.some(candidate => candidate.retryOf === root
+            && (candidate.launchState === 'pending' || (candidate.launchState === 'running' && candidate.durationMs === undefined && !candidate.finishedAt)));
+        if (chainBusy) { fail('already retrying'); continue; }
+        const attemptOf = (candidate: ScheduleRun) => (Number.isInteger(candidate.attempt) && candidate.attempt! >= 1 ? candidate.attempt! : 1);
+        const attempt = Math.max(...live.task.status.runs
+          .filter(candidate => candidate.id === root || candidate.retryOf === root)
+          .map(attemptOf), attemptOf(run)) + 1;
+        const slot = Date.parse(run.missed?.to ?? run.slotAt ?? '');
+        if (run.marker && !live.task.enabled) { fail('enable the schedule to catch up missed runs'); continue; }
+        // Manual retries always queue, even when overflow is `skip`.
+        const queued = this.enqueue({
+          taskId: base.scheduleId,
+          trigger: run.marker ? 'catch-up' : 'retry',
+          retryOf: root,
+          attempt,
+          ...(Number.isFinite(slot) ? { slotAt: slot } : {}),
+          enqueuedAt: Date.now()
+        });
+        if (!queued.ok) { fail(SCHEDULE_REASONS['queue-full'].label); continue; }
+        if (queued.replaced) {
+          // Coalesced, not failed: the schedule re-runs once, and that run serves
+          // the earlier ref too (its success closes the earlier problem, D8).
+          for (const item of pending) if (item.entry === queued.replaced) item.entry = queued.entry;
+        }
+        pending.push({ entry: queued.entry, index: results.length, root, attempt });
+        results.push({ ...base, ok: true, status: 'queued' });
+      }
+      return { results, pending };
+    }).then(async ({ results, pending }) => {
+      if (!pending.length) return results;
+      const epoch = this.epoch;
+      // Launch in a separate serial op so this call never holds the scheduler,
+      // and answer within the CLI's control timeout: whatever hasn't started by
+      // then is reported `queued` and starts as soon as the drain gets to it.
+      const drained = this.serial(() => this.drainNow()).catch(error => this.log('retry drain', error));
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([drained, new Promise<void>(resolve => { timer = setTimeout(resolve, RETRY_REPORT_WAIT_MS); timer.unref?.(); })]);
+      if (timer) clearTimeout(timer);
+      if (epoch !== this.epoch) {
+        return results.map(result => result.ok ? { ...result, ok: false, status: undefined, error: 'Scheduler stopped' } : result);
+      }
+      for (const item of pending) {
+        const result = results[item.index];
+        if (!result.ok || this.queue.includes(item.entry)) continue;
+        // The drain consumed the entry: it launched, unless the launch itself failed.
+        const thrown = this.launchErrors.get(item.entry);
+        if (thrown) { results[item.index] = { ...result, ok: false, status: undefined, error: thrown }; continue; }
+        // Match the entry that actually ran: refs merged into one entry share its launch.
+        const newest = this.live.get(result.scheduleId)?.task.status.runs[0];
+        const failed = newest && newest.retryOf === (item.entry.retryOf ?? item.root) && newest.attempt === (item.entry.attempt ?? item.attempt)
+          && (newest.reasonCode === 'launch-failed' || newest.reasonCode === 'project-missing');
+        if (failed) results[item.index] = { ...result, ok: false, status: undefined, error: SCHEDULE_REASONS[newest.reasonCode!].label };
+        else result.status = 'started';
+      }
+      return results;
+    });
   }
 
   /**
@@ -1623,14 +2567,24 @@ export class SchedulerManager extends EventEmitter {
         report: summary,
         reportedAt: new Date().toISOString(),
         reportStatus: status,
-        ...(wasIncomplete ? { result: 'success' as const } : {})
+        // The promoted record must not keep its `no-report` reason or message.
+        ...(wasIncomplete ? { result: 'success' as const, reasonCode: undefined, message: undefined } : {})
       };
       if (wasIncomplete && live.task.status.lastRunSessionId === sessionId) {
         next.status.lastRunResult = 'success';
       }
+      // The exit path held this run's notice back when it scheduled a retry (D9);
+      // the promotion ends that chain, so it gets its one notice here.
+      const heldNotice = wasIncomplete && !!live.task.status.pendingRetry
+        && live.task.status.pendingRetry.rootRunId === (runs[idx].retryOf ?? runs[idx].id);
       await this.persist(next);
       this.publishRuntime(live, next);
       this.emit('changed');
+      if (wasIncomplete) await this.onFinishedSuccess(live.task.id, runs[idx].id);
+      if (heldNotice && (live.task.inboxLevel ?? 'quiet') !== 'silent') {
+        const project = this.deps?.store.listProjects().find(candidate => candidate.id === live.task.projectId);
+        if (project) void this.notifyInboxOnExit(live.task, runs[idx], project, false);
+      }
       return;
     }
     this.log('attachReport', `no run found for session ${sessionId} (report dropped)`);
@@ -1722,6 +2676,7 @@ export class SchedulerManager extends EventEmitter {
         await this.recordRun(deferred.taskId, {
           ...run,
           result: 'error',
+          reasonCode: 'subagent-timeout',
           message: 'background subagent timed out'
         });
       }
@@ -1753,6 +2708,35 @@ export class SchedulerManager extends EventEmitter {
       if (deferred.taskId === taskId) this.clearDeferredClose(sessionId);
     }
   }
+}
+
+/** Latest of the last run, the slot cursor and the queued-through slot (epoch ms, 0 = none). */
+function anchorOf(status: { lastRunAt?: string; slotCursorAt?: string }, queuedThroughMs = 0, now = Date.now()): number {
+  const ms = (iso?: string) => { const v = iso ? Date.parse(iso) : 0; return Number.isFinite(v) ? v : 0; };
+  // `lastRunAt` is used exactly as before (Classic parity). Our own anchors are
+  // ignored when they sit in the future, so clock skew can't silently stop a schedule.
+  const own = (v: number) => (v > now + FUTURE_ANCHOR_TOLERANCE_MS ? 0 : v);
+  return Math.max(ms(status.lastRunAt), own(ms(status.slotCursorAt)), own(queuedThroughMs));
+}
+
+/**
+ * The `n` newest slots of a late gap, oldest first, never at or before its
+ * floor. Walks back from the gap's true newest slot, so a gap longer than the
+ * 1000-slot count cap still replays its newest slots.
+ */
+function newestSlots(cadence: ScheduledTask['schedule'], late: Pick<LateInfo, 'floor' | 'last' | 'intervalMs'>, n: number): number[] {
+  const out: number[] = [];
+  if (late.intervalMs !== undefined) {
+    for (let i = n - 1; i >= 0; i--) {
+      const slot = late.last - i * late.intervalMs;
+      if (slot > late.floor) out.push(slot);
+    }
+    return out;
+  }
+  for (const slot of previousCronSlots(cadence.cron!, cadence.tz, late.last, n)) {
+    if (slot > late.floor) out.push(slot);
+  }
+  return out.length ? out : [late.last];
 }
 
 function clampRetain(n: number): number {

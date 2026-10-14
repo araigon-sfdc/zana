@@ -277,8 +277,9 @@ describe('original-owner scheduler persistence', () => {
     let sequence = 0;
     const launchSquad = vi.fn(async () => ({ executionId: `execution-${++sequence}` }));
     manager.setDeps({ ...deps, launchSquad, getSquadExecution: vi.fn(async () => ({ state: 'RUNNING' })) });
+    // Classic (`catchUp: null`) keeps the original skip-at-the-limit behaviour.
     const tasks = await Promise.all(Array.from({ length: 6 }, (_, index) => manager.create({
-      ...input, name: `squad-${index}`, kind: 'team', teamId: `team-${index}`
+      ...input, name: `squad-${index}`, kind: 'team', teamId: `team-${index}`, catchUp: null
     })));
 
     for (const task of tasks.slice(0, 5)) await manager.runNow(task.id);
@@ -287,8 +288,27 @@ describe('original-owner scheduler persistence', () => {
     expect(launchSquad).toHaveBeenCalledTimes(5);
     expect(manager.get(tasks[5].id).status.runs[0]).toMatchObject({
       result: 'skipped',
+      reasonCode: 'concurrency-cap',
       message: 'concurrency-cap: 5/5 scheduled runs active'
     });
+  });
+  it('queues a Recovery squad schedule at the limit instead of skipping it', async () => {
+    const { manager, input, deps } = fixture();
+    let sequence = 0;
+    const launchSquad = vi.fn(async () => ({ executionId: `execution-${++sequence}` }));
+    manager.setDeps({ ...deps, launchSquad, getSquadExecution: vi.fn(async () => ({ state: 'RUNNING' })) });
+    const tasks = await Promise.all(Array.from({ length: 6 }, (_, index) => manager.create({
+      ...input, name: `squad-${index}`, kind: 'team', teamId: `team-${index}`
+    })));
+
+    for (const task of tasks.slice(0, 5)) await manager.runNow(task.id);
+    await (manager as any).fire(tasks[5].id, { manual: false });
+
+    expect(launchSquad).toHaveBeenCalledTimes(5);
+    const queued = manager.get(tasks[5].id);
+    expect(queued.catchUp).toEqual({ mode: 'once' });
+    expect(queued.status.queuedAt).toEqual(expect.any(String));
+    expect(queued.status.runs.some(run => run.reasonCode === 'concurrency-cap')).toBe(false);
   });
   it('finalizes terminal squad execution before next dispatch and notifies', async () => {
     const { manager, input, deps } = fixture();

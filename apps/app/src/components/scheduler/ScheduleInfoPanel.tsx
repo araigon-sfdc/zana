@@ -16,6 +16,19 @@ import {
   Trash2
 } from 'lucide-react';
 import type { ScheduledTask, ScheduleRun } from '@zana-ai/zcc-domain/product';
+import {
+  SCHEDULE_REASONS,
+  canManualRetry,
+  runManualRetry,
+  isOpenProblem,
+  isProblemRun,
+  isRecoveryMode,
+  newestSuccessMs,
+  runOutcome,
+  runReason
+} from '@zana-ai/zcc-domain/schedule-health';
+import { RunOutcomeBadge } from './RunOutcomeBadge.js';
+import './schedule-runs.css';
 import { product } from '../../lib/product-client.js';
 import { useData, useUi } from '../../store.js';
 import {
@@ -24,6 +37,22 @@ import {
   formatRelative,
   pickLiveRun
 } from './schedulerUtils.js';
+
+/** "14:30", or with the date when not today: linear backoff can wait days. */
+export function retryAtLabel(dueAt: string, now = new Date()): string {
+  const due = new Date(dueAt);
+  if (Number.isNaN(due.getTime())) return '';
+  const time = due.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return due.toDateString() === now.toDateString()
+    ? time
+    : `${due.toLocaleDateString([], { day: 'numeric', month: 'short' })}, ${time}`;
+}
+
+/** The policy's total attempts, unless manual retries took this chain past it. */
+function policyMaxFor(task: ScheduledTask, run: ScheduleRun): number | undefined {
+  const max = task.retry ? task.retry.attempts + 1 : undefined;
+  return max !== undefined && (run.attempt ?? 1) <= max ? max : undefined;
+}
 
 export function ScheduleInfoPanel({
   task,
@@ -39,6 +68,7 @@ export function ScheduleInfoPanel({
   const [tick, setTick] = useState(0);
   const [reportRun, setReportRun] = useState<ScheduleRun | null>(null);
   const [errorRun, setErrorRun] = useState<ScheduleRun | null>(null);
+  const [busyRuns, setBusyRuns] = useState<ReadonlySet<string>>(new Set());
 
   React.useEffect(() => {
     const timer = window.setInterval(() => setTick((n) => n + 1), 1000);
@@ -53,6 +83,8 @@ export function ScheduleInfoPanel({
     );
 
   const runs = task?.status.runs ?? [];
+  // A later finished success closes earlier problems, also for history written before recovery existed.
+  const closedBefore = newestSuccessMs(runs);
   const pending = runs.filter(run => run.launchState === 'pending');
   const liveRun = task ? pickLiveRun(runs, isSessionAlive) : null;
   const liveSessionId = liveRun?.sessionId ?? null;
@@ -87,6 +119,32 @@ export function ScheduleInfoPanel({
     }
     pushToast(`Fired "${task.name}"`, 'info');
   };
+  const actOnRun = async (run: ScheduleRun, action: 'retry' | 'dismiss') => {
+    if (!run.id) return;
+    const key = run.id;
+    setBusyRuns((prev) => new Set(prev).add(key));
+    try {
+      const refs = [{ scheduleId: task.id, runId: run.id }];
+      if (action === 'retry') {
+        const result = await product.scheduler.retryRuns(refs);
+        if (!result.ok) pushToast(`Run failed: ${result.message}`, 'error');
+        else if (result.value[0] && !result.value[0].ok) pushToast(`Run failed: ${result.value[0].error ?? 'not started'}`, 'error');
+        else pushToast(result.value[0]?.status === 'queued' ? `Queued "${task.name}" for a free slot` : `Fired "${task.name}"`, 'info');
+      } else {
+        const result = await product.scheduler.dismissRuns(refs);
+        if (!result.ok) pushToast(`Dismiss failed: ${result.message}`, 'error');
+      }
+    } catch (error) {
+      // A thrown IPC failure must not vanish as an unhandled rejection.
+      pushToast(`${action === 'retry' ? 'Run' : 'Dismiss'} failed: ${error instanceof Error ? error.message : String(error)}`, 'error');
+    } finally {
+      setBusyRuns((prev) => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+    }
+  };
   const stopLive = async () => {
     if (!liveSessionId) return;
     try {
@@ -106,6 +164,21 @@ export function ScheduleInfoPanel({
       {pending.length > 0 && <PendingWorkerRecovery key={task.id} kind="schedule" id={task.id} sessionIds={pending.flatMap(run => run.sessionId ? [run.sessionId] : [])} />}
       <section className="schedule-info-section">
         <h3>Status</h3>
+        {isExternal ? null : (
+          <div className="schedule-chips">
+            {task.status.queuedAt ? (
+              <span className="schedule-chip" title="Waiting for a free slot under the scheduled-run limit">Queued</span>
+            ) : null}
+            {task.status.pendingRetry ? (
+              <span className="schedule-chip" title="An automatic retry is waiting to start">
+                Retry at {retryAtLabel(task.status.pendingRetry.dueAt)}
+              </span>
+            ) : null}
+            {!isRecoveryMode(task) ? (
+              <span className="schedule-chip" title="Missed and over-the-limit runs follow this schedule's original rules. Edit the schedule to choose how missed runs are caught up.">Recovery off</span>
+            ) : null}
+          </div>
+        )}
         <dl className="schedule-info-facts">
           <div>
             <dt>Enabled</dt>
@@ -154,7 +227,14 @@ export function ScheduleInfoPanel({
           <p className="scheduler-run-empty">No runs recorded yet. The first fire will appear here.</p>
         ) : (
           <ul className="scheduler-run-list">
-            {runs.map((run, i) => (
+            {runs.slice(0, Math.max(1, task.history?.retain ?? 10)).map((run, i) => {
+              const reason = runReason(run);
+              // The same predicate the server and Problems use (a paused schedule's
+              // missed marker can't be caught up, so no Run now there).
+              const retryable = !isExternal
+                && canManualRetry({ manualRetry: runManualRetry(task, run), open: isOpenProblem(run, Date.now(), closedBefore) });
+              const busy = !!run.id && busyRuns.has(run.id);
+              return (
               <li
                 key={`${run.at}-${run.sessionId ?? i}`}
                 className={`scheduler-run-row scheduler-run-row--${run.result}`}
@@ -163,7 +243,7 @@ export function ScheduleInfoPanel({
                 <span className="scheduler-run-when" title={new Date(run.at).toLocaleString()}>
                   {formatRelative(new Date(run.at))}
                 </span>
-                <span className="scheduler-run-result">{run.result}</span>
+                <span className="scheduler-run-result"><RunOutcomeBadge run={run} maxAttempts={policyMaxFor(task, run)} /></span>
                 <span className="scheduler-run-duration">
                   {run.durationMs !== undefined ? formatDuration(run.durationMs) : '—'}
                 </span>
@@ -189,8 +269,31 @@ export function ScheduleInfoPanel({
                     <FileText size={13} strokeWidth={1.75} />
                   </button>
                 ) : null}
+                {retryable ? (
+                  <span className="schedule-run-actions">
+                    <button
+                      type="button"
+                      className="settings-btn"
+                      disabled={busy}
+                      aria-label={`${runOutcome(run) === 'missed' ? 'Run now' : 'Retry'} ${task.name} run`}
+                      onClick={() => void actOnRun(run, 'retry')}
+                    >
+                      {runOutcome(run) === 'missed' ? 'Run now' : 'Retry'}
+                    </button>
+                    <button
+                      type="button"
+                      className="settings-btn"
+                      disabled={busy}
+                      aria-label={`Dismiss ${task.name} run`}
+                      onClick={() => void actOnRun(run, 'dismiss')}
+                    >
+                      Dismiss
+                    </button>
+                  </span>
+                ) : null}
               </li>
-            ))}
+              );
+            })}
           </ul>
         )}
       </section>

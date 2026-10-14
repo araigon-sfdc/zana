@@ -20,9 +20,10 @@ const task = {
   updatedAt: '2026-01-01T00:00:00Z'
 } as ScheduledTask;
 
+const terminalState = vi.hoisted(() => ({ terminals: {} as Record<string, Array<{ id: string; status: string }>> }));
 vi.mock('../../store.js', () => ({
-  useData: (selector: (s: { terminals: Record<string, never> }) => unknown) =>
-    selector({ terminals: {} }),
+  useData: (selector: (s: { terminals: typeof terminalState.terminals }) => unknown) =>
+    selector({ terminals: terminalState.terminals }),
   useUi: Object.assign(
     (selector: (s: { pushToast: () => void }) => unknown) => selector({ pushToast: vi.fn() }),
     { getState: () => ({ pushToast: vi.fn() }) }
@@ -113,5 +114,25 @@ describe('ScheduleRow', () => {
     fireEvent.contextMenu(screen.getByTitle('Open schedule'));
     fireEvent.click(screen.getByRole('menuitem', { name: /Open in split/ }));
     expect(onOpenInSplit).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows neutral queued and retry pending indicators', () => {
+    const wrap = (t: ScheduledTask) => <MemoryRouter><ScheduleRow task={t} projectName="Demo" onOpen={vi.fn()} onOpenInSplit={vi.fn()} onDuplicate={vi.fn()} onAskDelete={vi.fn()} /></MemoryRouter>;
+    const queued = render(wrap({ ...task, status: { runCount: 0, runs: [], queuedAt: '2026-01-01T00:00:00Z' } }));
+    expect(queued.getByText('queued').className).toBe('scheduler-pill scheduler-pill--skipped');
+    queued.unmount();
+    const retry = render(wrap({ ...task, status: { runCount: 0, runs: [], pendingRetry: { rootRunId: 'r', attempt: 1, dueAt: '2026-01-01T00:00:00Z' } } }));
+    expect(retry.getByText('retry pending').className).toBe('scheduler-pill scheduler-pill--skipped');
+    expect(retry.queryByText('queued')).toBeNull();
+    retry.unmount();
+    // A catch-up queued behind the schedule's own live run: the row shows it running.
+    terminalState.terminals = { p1: [{ id: 'live', status: 'running' }] };
+    try {
+      const busy = render(wrap({ ...task, status: { runCount: 1, runs: [{ at: new Date().toISOString(), result: 'success', sessionId: 'live' }], queuedAt: '2026-01-01T00:00:00Z' } }));
+      expect(busy.getByText('running')).toBeTruthy();
+      expect(busy.queryByText('queued')).toBeNull();
+    } finally {
+      terminalState.terminals = {};
+    }
   });
 });

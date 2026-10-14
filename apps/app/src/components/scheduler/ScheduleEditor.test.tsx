@@ -353,4 +353,156 @@ describe('ScheduleEditor', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
     await vi.waitFor(() => expect(screen.getByText('conflict')).toBeTruthy());
   });
+
+  describe('missed-run and retry policies', () => {
+    const base = {
+      id: 'sched-1', name: 'Morning digest', enabled: true, projectId: 'p1', profile: 'claude',
+      schedule: { every: '1h' }, overlap: 'skip', history: { retain: 10 }, status: { runCount: 0, runs: [] },
+      createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z'
+    };
+    // Both policies are radio cards (the Inbox notifications pattern).
+    const checkedValue = (name: string) => (document.querySelector(`input[name="${name}"]:checked`) as HTMLInputElement | null)?.value;
+    const missed = () => ({ value: checkedValue('sched-missed') });
+    const retry = () => ({ value: checkedValue('sched-retry') });
+    const pick = (name: string, value: string) => fireEvent.click(document.querySelector(`input[name="${name}"][value="${value}"]`) as HTMLInputElement);
+    const offers = (value: string) => !!document.querySelector(`input[name="sched-missed"][value="${value}"]`);
+    const input = (id: string, value: string) => fireEvent.change(document.querySelector(id) as HTMLInputElement, { target: { value } });
+    const saved = async (task: unknown) => {
+      update.mockResolvedValue({ ok: true, value: { id: 'sched-1' } });
+      const onSaved = vi.fn();
+      render(<ScheduleEditor task={task as never} onSaved={onSaved} />);
+      return onSaved;
+    };
+
+    it('defaults a new schedule to Run once with retry off, and creates it so', async () => {
+      create.mockResolvedValue({ ok: true, value: { id: 'n' } });
+      render(<ScheduleEditor task={null} />);
+      expect(missed().value).toBe('once');
+      expect(retry().value).toBe('off');
+      expect(screen.getByText('When a scheduled time passes while the computer sleeps or Zana is closed.')).toBeTruthy();
+      // A new schedule has no "original rules" to keep: only the three behaviours.
+      expect(offers('original')).toBe(false);
+      expect(screen.getByText('Run once')).toBeTruthy();
+      expect(screen.getByText("Don't retry")).toBeTruthy();
+      fireEvent.change(document.querySelector('#sched-name') as HTMLInputElement, { target: { value: 'N' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Create schedule' }));
+      await vi.waitFor(() => expect(create).toHaveBeenCalled());
+      expect(create.mock.calls[0]![0]).toMatchObject({ catchUp: { mode: 'once' }, retry: null });
+    });
+
+    it('a copy of a schedule on its original rules is a NEW schedule and starts at Run once; a copy of a Recovery one keeps its policy', () => {
+      render(<ScheduleEditor task={null} seed={{ kind: 'duplicate', source: base as never }} />);
+      expect(missed().value).toBe('once');
+      cleanup();
+      render(<ScheduleEditor task={null} seed={{ kind: 'duplicate', source: { ...base, catchUp: { mode: 'skip' } } as never }} />);
+      expect(missed().value).toBe('skip');
+    });
+
+    it('shows an existing schedule without catchUp on its original rules, worded by what it does, saving null', async () => {
+      const onSaved = await saved(base);
+      expect(missed().value).toBe('original');
+      // Interval wording: the original rules wait when several times were missed.
+      expect(screen.getByText('Run once, unless several were missed')).toBeTruthy();
+      expect(screen.queryByText(/Classic|as before/)).toBeNull();
+      fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+      await vi.waitFor(() => expect(onSaved).toHaveBeenCalled());
+      expect(update.mock.calls[0]![1]).toMatchObject({ catchUp: null, retry: null });
+    });
+
+    it.each([['once', { mode: 'once' }], ['skip', { mode: 'skip' }]])('round-trips %s', async (choice, expected) => {
+      const onSaved = await saved(base);
+      pick('sched-missed', choice);
+      expect(document.querySelector('#sched-missed-max')).toBeNull();
+      fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+      await vi.waitFor(() => expect(onSaved).toHaveBeenCalled());
+      expect(update.mock.calls[0]![1].catchUp).toEqual(expected);
+    });
+
+    it('round-trips Run each missed time with a clamped N', async () => {
+      const onSaved = await saved({ ...base, catchUp: { mode: 'all', max: 4 } });
+      expect(missed().value).toBe('all');
+      expect((document.querySelector('#sched-missed-max') as HTMLInputElement).value).toBe('4');
+      const max = document.querySelector('#sched-missed-max') as HTMLInputElement;
+      expect(max.getAttribute('aria-label')).toBe('Missed runs to catch up');
+      expect(max.className).toBe('settings-input');
+      // Typing keeps the raw text (no snapping to the minimum mid-edit); blur clamps.
+      input('#sched-missed-max', '');
+      expect(max.value).toBe('');
+      input('#sched-missed-max', '99');
+      expect(max.value).toBe('99');
+      fireEvent.blur(max);
+      expect(max.value).toBe('10');
+      input('#sched-missed-max', '0');
+      fireEvent.blur(max);
+      expect(max.value).toBe('1');
+      input('#sched-missed-max', '7');
+      fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+      await vi.waitFor(() => expect(onSaved).toHaveBeenCalled());
+      expect(update.mock.calls[0]![1].catchUp).toEqual({ mode: 'all', max: 7 });
+    });
+
+    it('words the original rules for a cron schedule, and can switch back to them', async () => {
+      const onSaved = await saved({ ...base, schedule: { cron: '0 9 * * *' }, catchUp: { mode: 'skip' } });
+      expect(missed().value).toBe('skip');
+      expect(screen.getByText('Run once, skip when busy')).toBeTruthy();
+      pick('sched-missed', 'original');
+      fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+      await vi.waitFor(() => expect(onSaved).toHaveBeenCalled());
+      expect(update.mock.calls[0]![1].catchUp).toBeNull();
+    });
+
+    it('turns retry on with clamped attempts and delay, and off again', async () => {
+      const onSaved = await saved(base);
+      pick('sched-retry', 'on');
+      const attempts = document.querySelector('#sched-retry-attempts') as HTMLInputElement;
+      const delay = document.querySelector('#sched-retry-delay') as HTMLInputElement;
+      // Defaults match the recovery dialog: one retry, ten minutes later.
+      expect(attempts.value).toBe('1');
+      expect(delay.value).toBe('10');
+      expect(attempts.getAttribute('aria-label')).toBe('Retry attempts');
+      expect(delay.getAttribute('aria-label')).toBe('Minutes to wait between retries');
+      input('#sched-retry-attempts', '9');
+      input('#sched-retry-delay', '5000');
+      fireEvent.blur(attempts);
+      fireEvent.blur(delay);
+      expect(attempts.value).toBe('5');
+      expect(delay.value).toBe('1440');
+      input('#sched-retry-attempts', '2');
+      input('#sched-retry-delay', '15');
+      fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+      await vi.waitFor(() => expect(onSaved).toHaveBeenCalled());
+      expect(update.mock.calls[0]![1].retry).toEqual({ attempts: 2, delayMinutes: 15 });
+      cleanup();
+      update.mockClear();
+      // An empty or out-of-range entry is clamped when the field loses focus
+      // (clicking Save blurs it first), so what gets saved is always in range.
+      const typed = await saved(base);
+      pick('sched-retry', 'on');
+      input('#sched-retry-attempts', '');
+      input('#sched-retry-delay', '0');
+      fireEvent.blur(document.querySelector('#sched-retry-attempts')!);
+      fireEvent.blur(document.querySelector('#sched-retry-delay')!);
+      fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+      await vi.waitFor(() => expect(typed).toHaveBeenCalled());
+      expect(update.mock.calls[0]![1].retry).toEqual({ attempts: 1, delayMinutes: 1 });
+      cleanup();
+      update.mockClear();
+      const again = await saved({ ...base, retry: { attempts: 2, delayMinutes: 15 } });
+      expect(retry().value).toBe('on');
+      expect((document.querySelector('#sched-retry-attempts') as HTMLInputElement).value).toBe('2');
+      pick('sched-retry', 'off');
+      fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+      await vi.waitFor(() => expect(again).toHaveBeenCalled());
+      expect(update.mock.calls[0]![1].retry).toBeNull();
+    });
+
+    it('hides both fields for read-only and external rows', () => {
+      const fieldsShown = () => !!document.querySelector('input[name="sched-missed"], input[name="sched-retry"]');
+      render(<ScheduleEditor task={{ ...base, external: { kind: 'claude-loop' } } as never} readOnly />);
+      expect(fieldsShown()).toBe(false);
+      cleanup();
+      render(<ScheduleEditor task={{ ...base, external: { kind: 'claude-loop' } } as never} />);
+      expect(fieldsShown()).toBe(false);
+    });
+  });
 });

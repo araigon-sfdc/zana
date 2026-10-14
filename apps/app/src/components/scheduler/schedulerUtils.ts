@@ -30,6 +30,65 @@ export const INBOX_LEVELS: ReadonlyArray<{ value: 'silent' | 'quiet' | 'loud'; t
   }
 ];
 
+/** A Missed runs choice: a Recovery `catchUp.mode`, or the schedule's original rules (no `catchUp`). */
+export type MissedRunChoiceValue = 'original' | 'once' | 'skip' | 'all';
+export interface PolicyChoice<V extends string> { value: V; title: string; hint: string }
+
+/**
+ * Missed runs choices, worded by what the schedule does. The "original rules"
+ * choice only exists for a schedule that already uses them (one saved before
+ * recovery existed), and its wording depends on the cadence because those
+ * rules differ for interval and cron schedules.
+ */
+export function missedRunChoices(cadence: 'interval' | 'cron', includeOriginal: boolean): ReadonlyArray<PolicyChoice<MissedRunChoiceValue>> {
+  const choices: PolicyChoice<MissedRunChoiceValue>[] = [
+    {
+      value: 'once',
+      title: 'Run once',
+      hint: 'Recommended. Catch up with one run for the latest missed time. If too many runs are going, it waits its turn.'
+    },
+    {
+      value: 'all',
+      title: 'Run each missed time',
+      hint: 'Run every missed time, oldest first, one after another, up to the number below.'
+    },
+    {
+      value: 'skip',
+      title: "Don't catch up",
+      hint: 'Wait for the next scheduled time. Missed times are listed in Problems, where you can run them by hand.'
+    }
+  ];
+  if (includeOriginal) {
+    choices.push(cadence === 'interval'
+      ? {
+          value: 'original',
+          title: 'Run once, unless several were missed',
+          hint: 'Run once if one time was missed; if two or more were missed, wait for the next time. Skipped, not queued, when too many runs are going.'
+        }
+      : {
+          value: 'original',
+          title: 'Run once, skip when busy',
+          hint: 'Run once for the latest missed time, but skip it when too many runs are going. Resuming a paused schedule also runs the time it missed.'
+        });
+  }
+  return choices;
+}
+
+/** Auto-retry choices. */
+export const RETRY_CHOICES: ReadonlyArray<PolicyChoice<'off' | 'on'>> = [
+  {
+    value: 'off',
+    title: "Don't retry",
+    hint: 'A failed run waits for its next scheduled time. You can retry it by hand from Problems.'
+  },
+  {
+    value: 'on',
+    title: 'Retry failed runs',
+    hint: 'Retry failures that are likely temporary (an error exit, a missing report, a run that could not start), waiting longer after each attempt.'
+  }
+];
+
+
 export const PROFILE_LABEL: Record<LaunchProfileId, string> = {
   shell: 'Shell',
   claude: 'claude',

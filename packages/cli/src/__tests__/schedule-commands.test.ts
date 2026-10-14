@@ -29,3 +29,19 @@ it('loads a bounded patch file', async () => {
 it.each([['get'], ['reload'], ['update'], ['update', 'task', '--patch', '{'], ['update', 'task', '--patch', '[]'], ['update', 'task', '--patch-file', '/missing/patch'], ['update', 'task', '--bad', '{}']].map(args => [args]))('rejects invalid input before calling the app: %j', async args => {
   expect((await cli(args)).exitCode).toBe(2); expect(control).not.toHaveBeenCalled();
 });
+it('routes runs, retry and dismiss to the control plane', async () => {
+  control.mockResolvedValueOnce({ ok: true, value: { rows: [], total: 0, truncated: false } } as never);
+  expect((await cli(['runs', '--all'])).exitCode).toBe(0);
+  expect(control).toHaveBeenLastCalledWith(expect.objectContaining({ op: 'sched.runs', args: { query: { state: 'all' } } }));
+  control.mockResolvedValueOnce({ ok: true, value: [] } as never);
+  expect((await cli(['retry', 'a:b'])).exitCode).toBe(0);
+  expect(control).toHaveBeenLastCalledWith(expect.objectContaining({ op: 'sched.retry', args: { refs: [{ scheduleId: 'a', runId: 'b' }] } }));
+  control.mockResolvedValueOnce({ ok: true, value: 1 } as never);
+  expect((await cli(['dismiss', 'a:b'])).exitCode).toBe(0);
+  expect(control).toHaveBeenLastCalledWith(expect.objectContaining({ op: 'sched.dismiss' }));
+  control.mockResolvedValueOnce({ ok: false, code: 'FORBIDDEN_AGENT', message: 'no' } as never);
+  expect((await cli(['dismiss', 'a:b'])).exitCode).toBe(5);
+  control.mockClear();
+  expect((await cli(['runs', '--bogus'])).exitCode).toBe(2);
+  expect(control).not.toHaveBeenCalled();
+});

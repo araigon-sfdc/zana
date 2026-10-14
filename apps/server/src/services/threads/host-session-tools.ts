@@ -74,6 +74,9 @@ import {
   SCHEDULE_LIST_NAME,
   SCHEDULE_RUN_NOW_NAME,
   SCHEDULE_SET_ENABLED_NAME,
+  SCHEDULE_RUNS_NAME,
+  SCHEDULE_RETRY_NAME,
+  SCHEDULE_DISMISS_NAME,
   invokeHostScheduleTool
 } from './host-schedule-tools.js';
 
@@ -97,6 +100,9 @@ export const HOST_SHARE_TOOL_NAMES = [
   SCHEDULE_LIST_NAME,
   SCHEDULE_RUN_NOW_NAME,
   SCHEDULE_SET_ENABLED_NAME,
+  SCHEDULE_RUNS_NAME,
+  SCHEDULE_RETRY_NAME,
+  SCHEDULE_DISMISS_NAME,
   LIST_PROJECTS_NAME,
   REGISTER_PROJECT_NAME,
   CREATE_LOCAL_EXTENSION_NAME
@@ -229,7 +235,10 @@ export async function invokeHostSessionTool(
     name === SCHEDULE_RELOAD_NAME ||
     name === SCHEDULE_LIST_NAME ||
     name === SCHEDULE_RUN_NOW_NAME ||
-    name === SCHEDULE_SET_ENABLED_NAME
+    name === SCHEDULE_SET_ENABLED_NAME ||
+    name === SCHEDULE_RUNS_NAME ||
+    name === SCHEDULE_RETRY_NAME ||
+    name === SCHEDULE_DISMISS_NAME
   ) {
     return invokeHostScheduleTool(ctx, args);
   }

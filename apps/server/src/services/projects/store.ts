@@ -822,6 +822,15 @@ export function normalizeConfig(input: Partial<AppConfig>): Partial<AppConfig> {
   if (input.teamDefaultCoordinationMode === 'freeform' || input.teamDefaultCoordinationMode === 'structured') {
     normalized.teamDefaultCoordinationMode = input.teamDefaultCoordinationMode;
   }
+  if (typeof input.scheduledRunConcurrency === 'number' && Number.isFinite(input.scheduledRunConcurrency)) {
+    normalized.scheduledRunConcurrency = Math.max(1, Math.min(20, Math.round(input.scheduledRunConcurrency)));
+  }
+  if (input.scheduledRunOverflow === 'auto' || input.scheduledRunOverflow === 'queue' || input.scheduledRunOverflow === 'skip') {
+    normalized.scheduledRunOverflow = input.scheduledRunOverflow;
+  }
+  if (input.schedulerRecoveryIntro === 'dismissed' || input.schedulerRecoveryIntro === 'applied') {
+    normalized.schedulerRecoveryIntro = input.schedulerRecoveryIntro;
+  }
   if (input.inboxGrouping === 'project' || input.inboxGrouping === 'time') {
     normalized.inboxGrouping = input.inboxGrouping;
   }

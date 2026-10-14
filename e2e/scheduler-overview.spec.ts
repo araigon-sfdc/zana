@@ -43,7 +43,12 @@ test('scheduler overview: triage, filters, pagination and responsive layout', as
   await expect(inventory.getByRole('checkbox')).toHaveCount(8);
   await inventory.getByRole('button', { name: 'Next', exact: true }).click();
   await expect(inventory.getByRole('status')).toHaveText('9–10 of 10 schedules');
-  await page.getByRole('button', { name: 'Review schedules' }).click();
+  // Open problems are triaged in the Problems workbench; the inventory keeps its attention filter.
+  await page.getByRole('button', { name: 'Review problems' }).click();
+  const problems = win.getByRole('region', { name: 'Problems' });
+  await expect(problems.locator('tbody tr')).toHaveCount(2);
+  await win.locator('.scheduler-subview-toggle button', { hasText: 'Overview' }).click();
+  await inventory.getByRole('combobox').selectOption('attention');
   await expect(inventory.getByRole('combobox')).toHaveValue('attention');
   await expect(inventory.getByRole('checkbox')).toHaveCount(3);
   await inventory.getByRole('searchbox').fill('dependency');

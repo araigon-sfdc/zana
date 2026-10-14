@@ -874,6 +874,38 @@ describe('normalizeConfig — teamDefaultCoordinationMode', () => {
   });
 });
 
+describe('normalizeConfig — scheduler recovery settings', () => {
+  it('rounds and clamps scheduledRunConcurrency to 1-20', () => {
+    expect(normalizeConfig({ scheduledRunConcurrency: 8 }).scheduledRunConcurrency).toBe(8);
+    expect(normalizeConfig({ scheduledRunConcurrency: 7.6 }).scheduledRunConcurrency).toBe(8);
+    expect(normalizeConfig({ scheduledRunConcurrency: 0 }).scheduledRunConcurrency).toBe(1);
+    expect(normalizeConfig({ scheduledRunConcurrency: -3 }).scheduledRunConcurrency).toBe(1);
+    expect(normalizeConfig({ scheduledRunConcurrency: 500 }).scheduledRunConcurrency).toBe(20);
+  });
+
+  it('drops a non-finite or non-numeric scheduledRunConcurrency', () => {
+    expect(normalizeConfig({ scheduledRunConcurrency: Number.NaN }).scheduledRunConcurrency).toBeUndefined();
+    expect(normalizeConfig({ scheduledRunConcurrency: Infinity }).scheduledRunConcurrency).toBeUndefined();
+    expect(normalizeConfig({ scheduledRunConcurrency: '5' as never }).scheduledRunConcurrency).toBeUndefined();
+    expect(normalizeConfig({}).scheduledRunConcurrency).toBeUndefined();
+  });
+
+  it('accepts only auto | queue | skip for scheduledRunOverflow', () => {
+    for (const v of ['auto', 'queue', 'skip'] as const) {
+      expect(normalizeConfig({ scheduledRunOverflow: v }).scheduledRunOverflow).toBe(v);
+    }
+    expect(normalizeConfig({ scheduledRunOverflow: 'drop' as never }).scheduledRunOverflow).toBeUndefined();
+    expect(normalizeConfig({}).scheduledRunOverflow).toBeUndefined();
+  });
+
+  it('accepts only dismissed | applied for schedulerRecoveryIntro', () => {
+    expect(normalizeConfig({ schedulerRecoveryIntro: 'dismissed' }).schedulerRecoveryIntro).toBe('dismissed');
+    expect(normalizeConfig({ schedulerRecoveryIntro: 'applied' }).schedulerRecoveryIntro).toBe('applied');
+    expect(normalizeConfig({ schedulerRecoveryIntro: 'later' as never }).schedulerRecoveryIntro).toBeUndefined();
+    expect(normalizeConfig({}).schedulerRecoveryIntro).toBeUndefined();
+  });
+});
+
 describe('normalizeConfig — executionPlanStartupGraceMs', () => {
   it('keeps 0 as disabled', () => {
     expect(normalizeConfig({ executionPlanStartupGraceMs: 0 }).executionPlanStartupGraceMs).toBe(0);

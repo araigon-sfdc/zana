@@ -10,5 +10,15 @@ export type {
   ScheduleTemplate,
   QuickPrompt,
   ScheduleUpdateInput,
-  ScheduleReloadResult
+  ScheduleReloadResult,
+  ScheduleRunReasonCode,
+  ScheduleRunTrigger,
+  ScheduleRunOutcome,
+  ScheduleCatchUp,
+  ScheduleRetryPolicy,
+  ScheduleRunRef,
+  ScheduleRunQuery,
+  ScheduleRunRow,
+  ScheduleRunQueryResult,
+  ScheduleRetryResult
 } from './product.js';

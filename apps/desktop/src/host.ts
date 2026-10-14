@@ -294,6 +294,7 @@ import { FollowUpManager } from '@zana-ai/zcc-server/services/followups/followup
 import { ProjectRecordStore } from '@zana-ai/zcc-server/services/projects/project-record-store';
 import { listAllSchedules, saveSchedule, readSchedule, deleteSchedule } from '@zana-ai/zcc-server/services/scheduler/scheduler-store';
 import { validateScheduleFile } from '@zana-ai/zcc-server/services/scheduler/schedule-validation';
+import { slimRunQueryResult } from '@zana-ai/zcc-server/services/scheduler/schedule-run-schemas';
 import { listAllGoals, saveGoal, deleteGoal, validateGoalFile } from '@zana-ai/zcc-server/services/goals/goal-store';
 import { listAllFollowUps, saveFollowUp, deleteFollowUp, validateFollowUpFile } from '@zana-ai/zcc-server/services/followups/followup-store';
 import { readClaudeLoops } from '@zana-ai/zcc-server/services/misc/claude-loops-store';
@@ -454,6 +455,10 @@ import type {
   OpenCodeSettingsResult,
   ScheduleCreateInput,
   ScheduleUpdateInput,
+  ScheduleRunQuery,
+  ScheduleRunQueryResult,
+  ScheduleRunRef,
+  ScheduleRetryResult,
   ScheduledTask,
   ScheduleGroup,
   ScheduleGroupInput,
@@ -1345,9 +1350,12 @@ export const scheduleAgentApi = {
   update: (id: string, patch: ScheduleUpdateInput) => scheduler.update(id, patch),
   reload: (id: string) => scheduler.reload(id),
   runNow: (id: string) => scheduler.runNow(id),
+  queryRuns: async (query: ScheduleRunQuery) => slimRunQueryResult(await scheduler.queryRuns(query)),
+  retryRuns: (refs: ScheduleRunRef[]) => scheduler.retryRuns(refs),
+  dismissRuns: (refs: ScheduleRunRef[]) => scheduler.dismissRuns(refs),
   setEnabled: (id: string, enabled: boolean) => scheduler.setEnabled(id, enabled)
 };
-export const scheduleControlApi: Pick<ControlPlaneDeps, 'getSchedule' | 'reloadSchedule' | 'updateSchedule'> = {
+export const scheduleControlApi: Pick<ControlPlaneDeps, 'getSchedule' | 'reloadSchedule' | 'updateSchedule' | 'queryScheduleRuns' | 'retryScheduleRuns' | 'dismissScheduleRuns'> = {
   getSchedule: async (id) => {
     try { return { ok: true, value: scheduler.get(id) }; }
     catch (error) { return { ok: false, code: 'GET_FAILED', message: String(error) }; }
@@ -1359,6 +1367,18 @@ export const scheduleControlApi: Pick<ControlPlaneDeps, 'getSchedule' | 'reloadS
   updateSchedule: async (id, patch) => {
     try { return { ok: true, value: await scheduler.update(id, patch) }; }
     catch (error) { return { ok: false, code: 'UPDATE_FAILED', message: String(error) }; }
+  },
+  queryScheduleRuns: async (query) => {
+    try { return { ok: true, value: slimRunQueryResult(await scheduler.queryRuns(query)) }; }
+    catch (error) { return { ok: false, code: 'QUERY_FAILED', message: String(error) }; }
+  },
+  retryScheduleRuns: async (refs) => {
+    try { return { ok: true, value: await scheduler.retryRuns(refs) }; }
+    catch (error) { return { ok: false, code: 'RETRY_FAILED', message: String(error) }; }
+  },
+  dismissScheduleRuns: async (refs) => {
+    try { return { ok: true, value: await scheduler.dismissRuns(refs) }; }
+    catch (error) { return { ok: false, code: 'DISMISS_FAILED', message: String(error) }; }
   }
 };
 // Persistent project goals: an event-driven loop that spawns a worker, evaluates
@@ -7806,9 +7826,10 @@ async function bootstrapNormal() {
   } catch (err) {
     logMainError('tray.start', err);
   }
-  // Wake-from-sleep can leave many schedules well past their armed delay;
-  // a re-load triggers our `arm()` drift fix so each one re-arms fresh
-  // rather than firing in a stampede the moment the laptop wakes up.
+  // Wake-from-sleep can leave many schedules well past their armed delay.
+  // loadAll only re-arms a schedule whose file changed, so overdue timers fire
+  // on their own right after wake (the scheduler's global limit keeps that
+  // from becoming a stampede) and each late fire records what was missed.
   try {
     powerMonitor.on('resume', () => {
       // Sleep/wake is the documented trigger for a lost node-pty `onExit`

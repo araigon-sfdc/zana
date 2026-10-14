@@ -20,6 +20,8 @@
 .scheduler-overview .overview-item-actions { opacity: 1; }
 .scheduler-overview .overview-item-actions button { min-width: 32px; min-height: 32px; }
 .scheduler-overview .overview-kpi { padding: 16px; gap: 6px; }
+/* Five cards: fill one row when there is room instead of leaving the fifth alone. */
+.scheduler-overview .overview-kpis { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
 .schedule-attention { display: flex; align-items: center; gap: 14px; border: 1px solid color-mix(in srgb, var(--warning, #b77900) 35%, var(--border)); border-radius: 10px; padding: 16px; background: color-mix(in srgb, var(--warning, #b77900) 6%, var(--bg-panel)); }
 .schedule-attention > svg { flex-shrink: 0; color: var(--warning, #b77900); }
 .schedule-attention > div { flex: 1; min-width: 0; }
@@ -49,6 +51,7 @@
   .scheduler-panel .scheduler-header-actions { width: 100%; }
   .scheduler-overview .overview-columns { grid-template-columns: minmax(0, 1fr); }
   .scheduler-overview .overview-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .scheduler-overview .overview-kpis > :last-child:nth-child(odd) { grid-column: 1 / -1; }
   .schedule-attention { flex-wrap: wrap; }
   .schedule-attention .settings-btn { margin-left: 34px; }
 }

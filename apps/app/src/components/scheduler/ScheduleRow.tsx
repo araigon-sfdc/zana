@@ -194,6 +194,11 @@ export const ScheduleRow = React.memo(function ScheduleRow({
             >
               done
             </span>
+          ) : task.status.queuedAt ? (
+            // Waiting, not failing: a live run outranks it, and it uses the amber waiting pill.
+            <span className="scheduler-pill scheduler-pill--skipped" title="Waiting for a free slot under the scheduled-run limit">queued</span>
+          ) : task.status.pendingRetry ? (
+            <span className="scheduler-pill scheduler-pill--skipped" title="An automatic retry is waiting to start">retry pending</span>
           ) : task.enabled && nextRun ? (
             <span className="scheduler-card-compact-next" title="Next fire">
               in {formatCountdown(nextRun)}

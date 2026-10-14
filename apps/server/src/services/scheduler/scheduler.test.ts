@@ -410,14 +410,15 @@ async function makeMultiScheduleManager(count: number): Promise<{
       profile: 'claude',
       every: '5m',
       enabled: false,
-      prompt: 'work'
+      prompt: 'work',
+      catchUp: null // Classic: a fire over the limit is skipped
     })
   ));
   return { manager, ptys, tasks };
 }
 
 describe('SchedulerManager.fire — global concurrency cap', () => {
-  const CAP = 5; // mirrors MAX_CONCURRENT_SCHEDULED_RUNS in scheduler.ts
+  const CAP = 5; // the default scheduled-run limit in scheduler.ts
 
   it('skips the (cap+1)th simultaneous auto fire with the concurrency reason', async () => {
     const { manager, ptys, tasks } = await makeMultiScheduleManager(CAP + 1);
