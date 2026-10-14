@@ -77,7 +77,7 @@ import { cleanExtraArgs } from '../argv-utils.js';
 import { isLiveListedModelTargetId, resolveExecutionState, resolveModelTarget, resolveRoleTarget } from '../target-resolution.js';
 
 const OPENCODE_MIN_VERSION = '1.18.0';
-const OPENCODE_REVIEWED_AT = '2026-09-02';
+const OPENCODE_REVIEWED_AT = '2026-10-13';
 const OPENCODE_VERIFIED_SCOPES = ['local', 'remote'] as const;
 const OPENCODE_MODEL_IDS = [
   'llmgw/gpt-6-luna',
@@ -138,8 +138,8 @@ const OPENCODE_ADAPTER: TrustedHarnessAdapter = {
         { id: 'llmgw/gemini-3.5-flash', label: 'Gemini Flash', provider: 'google', level: 'low', scope: [...OPENCODE_VERIFIED_SCOPES], evidenceVersion: OPENCODE_MIN_VERSION },
         { id: 'llmgw/grok-4.6', label: 'Grok', provider: 'xai', level: 'medium', scope: [...OPENCODE_VERIFIED_SCOPES], evidenceVersion: OPENCODE_MIN_VERSION }
       ],
-      // Monotonic OpenAI ladder. Gemini + Grok stay catalog-selectable but off
-      // the default level mapping.
+      // Reviewed gateway ladder: Luna / Terra / Sol span the three tiers.
+      // gemini + grok stay catalog-selectable but off the default ladder.
       modelLevelMapping: {
         low: 'llmgw/gpt-6-luna',
         medium: 'llmgw/gpt-5.6-terra-1M',

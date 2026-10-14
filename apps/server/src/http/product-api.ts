@@ -11,6 +11,7 @@ import { projectGit } from './project-git.js';
 import { usesConnect } from '../services/hosts/connect-enrollment.js';
 import { handleSharedProductApi } from './shared-product-api.js';
 import { projectSources } from '@zana-ai/zcc-domain/project';
+import { projectConfigCompatibility } from '@zana-ai/zcc-domain/harness-config-compatibility';
 import { getPrimaryHost, countConversationThreadsForQuit } from '@zana-ai/zcc-db';
 import { handleProjectSourcesApi } from './project-sources-api.js';
 import { handleNotificationsApi } from './notifications-api.js';
@@ -19,6 +20,7 @@ import { resolveProjectHost } from './project-host.js';
 import { mutateProjectFile } from './project-file-mutations.js';
 import { invalidateHarnessModelCatalog } from '@zana-ai/zcc-host-daemon/harness/registry';
 import { productServerHasDesktopCredential } from './cli-agent-ops.js';
+import { setProductConfig } from './product-config.js';
 import { assertPlanRevision, planImplementationMode, planImplementationPrompt } from '../services/threads/conversation-plan-implementation.js';
 import { readPluginHttpBody, PluginHttpBodyTooLarge } from './plugin-http-body.js';
 import { conversationHistoryAsync } from '../services/threads/conversation-history.js';
@@ -600,14 +602,14 @@ export async function handleProductHttp(
     }
 
     if (path === '/api/v1/config' && method === 'GET') {
-      sendJson(response, 200, { config: presentAppConfig(ctx.config.getConfig()) });
+      sendJson(response, 200, { config: presentAppConfig(projectConfigCompatibility(ctx.config.getConfig())) });
       return true;
     }
 
     if (path === '/api/v1/config' && (method === 'PATCH' || method === 'POST')) {
       const patch = (await readJsonBody(request)) as Partial<AppConfig>;
       const previousSafeMode = ctx.config.getConfig().pluginSafeMode === true;
-      const config = presentAppConfig(ctx.config.setConfig(patch));
+      const config = presentAppConfig(await setProductConfig(ctx, patch));
       if (previousSafeMode !== (config.pluginSafeMode === true)) await ctx.plugins?.refreshSafeMode();
       ctx.pairingRelay?.refresh();
       ctx.hub.emit('config:changed', config);

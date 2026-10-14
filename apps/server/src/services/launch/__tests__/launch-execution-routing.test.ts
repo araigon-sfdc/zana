@@ -430,6 +430,16 @@ describe('production execution routing preflight', () => {
     }, { ...services, provider })).resolves.toEqual({ decision: 'blocked', reason: 'model target unavailable' });
   });
 
+  it('blocks a retired OpenCode model when the live probe is unavailable', async () => {
+    const provider = new OpenCodeProvider();
+    provider.discoverModelTargets = vi.fn(async () => undefined);
+    await expect(preflightTerminalExecution({
+      config: config(), profile: 'opencode', projectId: 'p1', projectPath: '/tmp/p1', scope: 'local',
+      mode: 'interactive', idempotencyKey: 'retired-model',
+      harnessRouting: { schemaVersion: 1, byAdapter: { opencode: { modelTargetId: 'llmgw/gpt-5.6-sol-1M' } } }
+    }, { ...deps(), provider })).resolves.toEqual({ decision: 'blocked', reason: 'model target unavailable' });
+  });
+
   it('falls back to snapshot evidence for a snapshot-present model when the live probe is unavailable', async () => {
     // A transient probe failure returns undefined — do not block a valid snapshot
     // id on it; fall back to the reviewed-evidence rule (which allows it).
