@@ -28,6 +28,11 @@ If one is explicitly requested, put it under `.worktrees/<branch-name>` so repo 
 - Dev output is `out-dev/`, production `out/`. The shared build lock covers preparation and snapshots, not test runs. Each Playwright invocation owns `e2e/.artifacts/runs/<id>`; never clear another run's files.
 - E2E homes are isolated by bootstrap; never write or restore the real user's config from a fixture. Regression checks: `docs/native-runtime-isolation.md`.
 
+## Local verification
+
+- Day-to-day changed-code verification: `pnpm verify:fast`. It runs typecheck, `vitest run --changed origin/main`, and source-text guard tests. Full CI remains merge authority.
+- Pre-push verifies feature branches in an isolated snapshot with typecheck, changed tests, and source-text guards. Protected refs and unsafe push shapes run `pnpm verify:full`. Policy: `docs/native-runtime-isolation.md`.
+
 ## Product Design Rules
 
 - **A project has a fixed local or remote target.** Local projects browse their local checkout, remote projects their registered remote checkout. Explorer must not expose a Machine selector or a separate machine/path header, even when backend source mappings exist; thread explorers keep their recorded environment scope internally.

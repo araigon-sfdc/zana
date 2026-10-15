@@ -35,12 +35,13 @@ export async function historyQueryWorker<T>(file: string, sql: string, params: u
     let settled = false;
     const settle = (error?: Error, rows?: T[]) => {
       if (settled) return; settled = true; clearTimeout(timer);
+      releaseSlot();
       if (error) reject(error); else resolve(rows ?? []);
       void worker.terminate();
     };
     const timer = setTimeout(() => settle(new Error('History search timed out')), 5000);
     worker.once('message', (reply: { rows?: T[]; error?: string }) => settle(reply.error ? new Error(reply.error) : undefined, reply.rows));
     worker.once('error', error => settle(error instanceof Error ? error : new Error(String(error))));
-    worker.once('exit', () => { releaseSlot(); settle(new Error('History search worker stopped')); });
+    worker.once('exit', () => settle(new Error('History search worker stopped')));
   });
 }
