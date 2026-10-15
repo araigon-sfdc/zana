@@ -57,19 +57,10 @@ describe('PersonaStore', () => {
     expect(reviewer?.source).toBe('builtin');
     expect(reviewer?.baseProfile).toBeUndefined();
     expect(reviewer?.modelLevel).toBe('high');
-    expect(reviewer?.executionState).toBe('plan');
-    expect(reviewer?.allowedTools).toContain('Read');
+    expect(reviewer?.executionState).toBeUndefined();
+    expect(reviewer?.allowedTools).toBeUndefined();
     expect(reviewer?.appendSystemPrompt).toContain('senior code reviewer');
     expect(reviewer?.initialPrompt).toContain('diff');
-
-    const architect = personas.find((p) => p.id === 'builtin:architect');
-    expect(architect).toBeDefined();
-    expect(architect?.name).toBe('Architect');
-    expect(architect?.icon).toBe('Compass');
-    expect(architect?.source).toBe('builtin');
-    expect(architect?.baseProfile).toBeUndefined();
-    expect(architect?.executionState).toBe('plan');
-    expect(architect?.appendSystemPrompt).toContain('systems architect');
 
     const engineer = personas.find((p) => p.id === 'builtin:software-engineer');
     expect(engineer).toBeDefined();
@@ -80,8 +71,22 @@ describe('PersonaStore', () => {
 
     const orchestrator = personas.find((p) => p.id === 'builtin:orchestrator');
     expect(orchestrator).toBeDefined();
-    expect(orchestrator?.name).toBe('ZCC Agent');
+    expect(orchestrator?.name).toBe('Orchestrator');
     expect(orchestrator?.source).toBe('builtin');
+    expect(orchestrator?.baseProfile).toBeUndefined();
+    expect(orchestrator?.modelLevel).toBe('medium');
+    expect(orchestrator?.permissionMode).toBeUndefined();
+    expect(orchestrator?.allowedTools).toBeUndefined();
+    expect(orchestrator?.deniedTools).toBeUndefined();
+
+    expect(personas.find((p) => p.id === 'builtin:squad-worker-low')).toMatchObject({ modelLevel: 'low' });
+    expect(personas.find((p) => p.id === 'builtin:squad-worker-medium')).toMatchObject({ modelLevel: 'medium' });
+    expect(personas.find((p) => p.id === 'builtin:squad-worker-high')).toMatchObject({ modelLevel: 'high' });
+
+    expect(personas.find((p) => p.id === 'builtin:architect')).toMatchObject({
+      modelLevel: 'high',
+      description: expect.stringContaining('Deprecated compatibility')
+    });
 
     // The old per-stack engineer personas were consolidated away.
     const removed = [

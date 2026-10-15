@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { main } from './run-electron-e2e.mjs';
 
+/* c8 ignore next -- package script only selects Playwright specs; E2E validates execution. */
 process.exitCode = await main([
   '--build',
   'e2e/job-team-launch-ui.spec.ts',
@@ -14,5 +15,6 @@ process.exitCode = await main([
   'e2e/job-team-wedge-recovery.spec.ts',
   'e2e/job-team-streaming-worker-no-reclaim.spec.ts',
   'e2e/job-team-flow-activity-indicator.spec.ts',
+  'e2e/squad-routing-control.spec.ts',
   ...process.argv.slice(2)
 ]);
