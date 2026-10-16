@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
 import type { GroupStatus, PeerLifecycleReason, RepairResult } from '../shared/peer-group.js';
+import { syncedWith } from '../shared/peer-group.js';
 import { experimental_requestApproval, useRealtime, useZccDeepLinks, type PluginApprovalResult } from '@zana-ai/zcc-plugin-sdk/app';
 import { PEER_STATE_CHANNEL, PLUGIN_ID } from '../shared/contract.js';
 import { errorMessage, toast, useApi, type InviteItem, type InviteView, type PeerLink, type PeerStatus } from './api.js';
@@ -466,9 +467,10 @@ function computerStatus({ link, member }: Computer, status: GroupStatus | null):
   if (link) {
     const reason = link.reason ? LINK_REASON_TEXT[link.reason] : '';
     const sentence = reason ? `${reason[0]!.toUpperCase()}${reason.slice(1)}` : '';
-    // Linked but not in the sync group (and the group state is known): the link works, database sync was never set up.
-    if (link.state === 'connected' && link.phase === 'linked' && status && !member) {
-      return { state: 'unsynced', label: 'Linked, sync not set up',
+    // Core shows this link as Connected; say so, and say database sync is missing unless this computer actually syncs
+    // with it (the same definition Repair and the server use, so the badge and Repair can never disagree).
+    if (link.state === 'connected' && link.phase === 'linked' && status && !syncedWith(status, link.peerInstanceId)) {
+      return { state: 'unsynced', label: 'Connected, sync not set up',
         detail: status.lifecycleAvailable ? 'The connection works but database sync is not set up with this computer. Repair retries setup.' : lifecycleText(status.lifecycleReason) };
     }
     if (link.state === 'connected') return { state: 'connected', label: 'Connected' };

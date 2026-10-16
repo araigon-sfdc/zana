@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { PluginApprovalRequest, PluginInvitationDecision, PluginInvitationReason, PluginInvitationState, PluginInvitationStatus, PluginPeerLink, PluginPeerRequest, PluginSdkPeers, ZccPluginApi } from '@zana-ai/zcc-plugin-sdk/server';
 import { canonicalPeerHash, PeerProtocolError } from '../shared/peer-contract.js';
-import type { GroupRoster, GroupStatus, PeerLifecycleReason, RepairResult } from '../shared/peer-group.js';
+import { syncedWith, type GroupRoster, type GroupStatus, type PeerLifecycleReason, type RepairResult } from '../shared/peer-group.js';
 import { PEER_CALL_TIMEOUT_MS, PEER_PENDING_TICK_MS } from '../shared/peer-limits.js';
 import { admissionSchema, capacityRequestId, capacitySchema, DesignDocPeerGroup, parseRoster, retirementJobSchema, rosterCovers, type Admission } from './peer-group.js';
 import { historicalMembers, isRetiring, ownedSeats, retirementEvidence } from './peer-slots.js';
@@ -86,6 +86,33 @@ function inviteItem(status: PluginInvitationStatus): InviteItem {
     awaitingMyApproval: inviter && status.state === 'reserved' && myDecision === 'pending', expiresAt: status.expiresAt, consentExpiresAt: status.consentExpiresAt ?? null };
 }
 
+/**
+ * Every peer this owner paired through an invitation whose link is still linked, with the keys a Disable Link remembers:
+ * each ready invitation and each linked link. A new invitation or a new link brings a new key.
+ */
+function pairedPeers(list: PluginInvitationStatus[], links: PluginPeerLink[]): Array<{ peerId: string; keys: string[] }> {
+  const peers = new Map<string, string[]>();
+  for (const link of links) {
+    if (link.phase !== 'linked' || !id.safeParse(link.peerInstanceId).success) continue;
+    peers.set(link.peerInstanceId, [...(peers.get(link.peerInstanceId) ?? []), `link:${link.pairingId}`]);
+  }
+  // Core commits a link before it marks the invitation ready, and a cancel in that window tears the link down: wait for
+  // an attempt still in flight with that peer to settle instead of racing it.
+  const settling = new Set(list.filter((item) => ACTIVE_INVITATION.has(item.state) && item.peer).map((item) => item.peer!.instanceId));
+  for (const item of list) {
+    const peerId = item.peer?.instanceId;
+    if (item.state === 'ready' && peerId && peers.has(peerId)) peers.get(peerId)!.push(item.invitationId);
+  }
+  return [...peers].filter(([peerId]) => !settling.has(peerId)).map(([peerId, keys]) => ({ peerId, keys }));
+}
+
+/** The other side's roster only while it is a current member of it (`hello.replicaId`); a roster it left is history. */
+function liveRemote(hello: z.infer<typeof helloSchema>): GroupRoster | null {
+  if (hello.roster === null) return null;
+  const roster = parseRoster(hello.roster);
+  return roster.members.some((member) => member.replicaId === hello.replicaId && member.machineId === hello.peerId && !isRetiring(roster, member.replicaId)) ? roster : null;
+}
+
 export class DesignDocPairing {
   private readonly abort = new AbortController();
   private lifecycleWarning: string | null = null;
@@ -102,9 +129,9 @@ export class DesignDocPairing {
   private lastSnapshot: InviteSnapshot | null = null;
   /** The shareable token of this owner's open invitation. The host returns it once, so it lives here (memory only, never logged) until the invitation stops being open. */
   private openInvite: { invitationId: string; token: string; expiresAt: number } | null = null;
-  /** Peers the owner disabled locally -> invitations that were ready then. Only a different (new) ready invitation re-pairs them. */
+  /** Peers the owner disabled locally -> pairing keys (ready invitations, linked links) live then. Only a new one re-pairs them. */
   private readonly disabledPeers = new Map<string, Set<string>>();
-  private readyInvitations = new Map<string, string[]>();
+  private pairingKeys = new Map<string, string[]>();
   /** Invitation peers this (higher-id) side waits on; see `initiatorReady`. */
   private readonly following = new Map<string, { attempts: number; nextAt: number; scope: string | null; failedAt: string | null }>();
   /** Initiator side: earliest next grant restore per member peer (bounded like `following`). */
@@ -264,10 +291,8 @@ export class DesignDocPairing {
       ? peers.invitationStatus({ invitationId: item.invitationId, refresh: true, signal }).catch(() => item) : item));
     const links = await peers.peerLinks({ signal }).catch(() => [] as PluginPeerLink[]);
     this.trackOpenInvite(list);
-    this.readyInvitations = new Map();
-    for (const item of list) {
-      if (item.state === 'ready' && item.peer) this.readyInvitations.set(item.peer.instanceId, [...(this.readyInvitations.get(item.peer.instanceId) ?? []), item.invitationId]);
-    }
+    this.pairingKeys = new Map();
+    for (const peer of pairedPeers(list, links)) this.pairingKeys.set(peer.peerId, peer.keys);
     const snapshot = { list, links };
     this.lastSnapshot = snapshot;
     // Best effort and independent: a failure of one step (e.g. a re-key in flight) must not fail the read or skip the other, and is retried next tick.
@@ -287,20 +312,16 @@ export class DesignDocPairing {
    */
   private async restoreGrants(list: PluginInvitationStatus[], links: PluginPeerLink[]): Promise<void> {
     if (this.enabling || this.revoking || this.group.consent()) return;
-    const roster = this.group.roster(), local = this.group.sync.localRepository(), self = this.group.localPeerId();
+    const roster = this.group.liveRoster(), local = this.group.sync.localRepository(), self = this.group.localPeerId();
     if (!roster || !local?.groupId || roster.repoId !== local.repoId || !self) return;
     const now = Date.now();
-    const due = list.filter((item) => {
-      const peerId = item.peer?.instanceId;
-      return item.state === 'ready' && !!peerId && self < peerId && !this.disabledPeers.get(peerId)?.has(item.invitationId) &&
-        roster.members.some((member) => member.machineId === peerId && !isRetiring(roster, member.replicaId)) &&
-        links.some((link) => link.peerInstanceId === peerId && link.phase === 'linked' && link.state === 'connected') &&
-        (this.restoring.get(peerId) ?? 0) <= now;
-    });
+    const due = pairedPeers(list, links).filter(({ peerId, keys }) => self < peerId && !this.isDisabled(peerId, keys) &&
+      roster.members.some((member) => member.machineId === peerId && !isRetiring(roster, member.replicaId)) &&
+      links.some((link) => link.peerInstanceId === peerId && link.phase === 'linked' && link.state === 'connected') &&
+      (this.restoring.get(peerId) ?? 0) <= now);
     if (!due.length) return;
     const grants = await this.peers.list({ signal: this.abort.signal });
-    for (const item of due) {
-      const peerId = item.peer!.instanceId;
+    for (const { peerId } of due) {
       if (grants.some((grant) => grant.id === peerId && grant.scope === roster.repoId)) continue;
       if (this.restoring.size >= INVITATION_LIST_LIMIT) this.restoring.clear();
       this.restoring.set(peerId, now + PEER_PENDING_TICK_MS);
@@ -312,30 +333,27 @@ export class DesignDocPairing {
   }
 
   /**
-   * The invitation was the pairing consent. Once it is ready, its link is live and the peer is connected, run the
-   * existing mutual-proof `enable` so group-hello / group-join negotiate as before. Removed or disabled links never re-enable.
+   * The invitation was the pairing consent, and the linked link it founded carries it: a ready invitation can fall out of
+   * the bounded invitation list, and core commits the link before it marks the invitation ready. So once a link is live and
+   * the peer is connected but not in this computer's sync group, run the existing mutual-proof `enable` so group-hello /
+   * group-join negotiate as before. Removed or disabled links never re-enable.
    */
   private async autoEnable(list: PluginInvitationStatus[], links: PluginPeerLink[]): Promise<void> {
     if (this.enabling || this.revoking || this.group.consent()) return;
-    const roster = this.group.roster(), seen = new Set<string>();
-    const candidates = list.filter((item) => {
-      if (item.state !== 'ready' || !item.peer || !id.safeParse(item.peer.instanceId).success) return false;
-      const peerId = item.peer.instanceId;
-      if (seen.has(peerId) || !links.some((link) => link.peerInstanceId === peerId && link.phase === 'linked')) return false;
+    const roster = this.group.liveRoster();
+    const candidates = pairedPeers(list, links).filter(({ peerId, keys }) =>
       // An already-enrolled member must not occupy the single enable slot of this tick.
-      if (roster?.members.some((member) => member.machineId === peerId && !isRetiring(roster, member.replicaId))) return false;
+      !roster?.members.some((member) => member.machineId === peerId && !isRetiring(roster, member.replicaId)) &&
       // A peer the owner disabled stays off until a newer invitation re-pairs it.
-      const disabled = this.disabledPeers.get(peerId);
-      if (disabled?.has(item.invitationId)) return false;
-      seen.add(peerId);
-      return true;
-    });
+      !this.isDisabled(peerId, keys));
     if (!candidates.length) return;
     const enrolled = await this.peers.enrolled({ signal: this.abort.signal });
     const self = id.parse((await this.peers.localIdentity()).id);
-    for (const candidate of candidates) {
-      const peerId = candidate.peer!.instanceId;
+    for (const { peerId } of candidates) {
       if (!enrolled.some((peer) => peer.id === peerId && peer.connected)) continue;
+      // Governance left from an earlier removal is archived before either side negotiates, so the other side never
+      // joins (or waits on) a group this computer already left. A blocked one is skipped; Repair states why.
+      if (!this.prepareRejoin(self, peerId)) continue;
       if (self > peerId && !(await this.initiatorReady(self, peerId, links))) continue;
       if (this.enabling || this.revoking || this.group.consent()) return;
       this.following.delete(peerId);
@@ -409,6 +427,23 @@ export class DesignDocPairing {
     return this.hasGrant(peerId, wait.scope);
   }
 
+  private isDisabled(peerId: string, keys: string[]): boolean {
+    const disabled = this.disabledPeers.get(peerId);
+    return !!disabled && keys.every((key) => disabled.has(key));
+  }
+
+  /** Archive leftover governance that blocks pairing again with `peerId` (see `rejoinState`). False when it cannot be. */
+  private prepareRejoin(self: string, peerId: string): boolean {
+    const state = this.group.rejoinState(peerId);
+    if (state.kind === 'blocked') { this.logOnce(`rejoin:${peerId}`, `pairing again is blocked: ${state.reason}`); return false; }
+    if (state.kind === 'detach') {
+      this.group.detachForRejoin(self, peerId);
+      this.following.delete(peerId);
+      this.logOnce(`rejoin-detach:${peerId}`, 'archived the sync group left over from an earlier removal to pair again');
+    }
+    return true;
+  }
+
   private async hasGrant(peerId: string, scope: string): Promise<boolean> {
     return this.grant(peerId, scope).then(() => true, () => false);
   }
@@ -459,12 +494,8 @@ export class DesignDocPairing {
     if (!links.some((link) => link.peerInstanceId === peerId && link.phase === 'linked')) {
       throw new PeerProtocolError('invalid', 'no linked connection to that computer; add the peer again');
     }
-    const roster = this.group.roster();
-    const member = !!roster && roster.members.some((entry) => entry.machineId === peerId && !isRetiring(roster, entry.replicaId));
     const status = await this.status();
-    if (member && status.members.some((entry) => entry.machineId === peerId && entry.authorized)) {
-      return { outcome: 'already-synced', detail: null, reason: null };
-    }
+    if (syncedWith(status, peerId)) return { outcome: 'already-synced', detail: null, reason: null };
     if (!status.lifecycleAvailable) {
       // Re-linking cannot help while the key is unusable; say why instead of churning the connection.
       return { outcome: 'unavailable', detail: null, reason: status.lifecycleReason ?? 'unknown' };
@@ -476,11 +507,13 @@ export class DesignDocPairing {
         detail: 'The connection exists but this computer was never fully enrolled (the pairing was cancelled part-way). Remove it, then use Add peer to pair again.' };
     }
     if (!enrolled.connected) return { outcome: 'unavailable', reason: null, detail: 'That computer is offline. Open Zana there, then press Repair again.' };
+    const rejoin = this.group.rejoinState(peerId);
+    if (rejoin.kind === 'blocked') return { outcome: 'unavailable', reason: null, detail: rejoin.reason };
     const attempt = async (): Promise<unknown> => { this.disabledPeers.delete(peerId); await this.enableNow(peerId); return null; };
     // `negotiate` records a half-finished setup as a pending consent instead of throwing, so success means the peer joined the roster.
     const settled = async (outcome: 'sync-enabled' | 'relinked'): Promise<RepairResult> => {
       this.enableError = null;
-      const joined = this.group.roster(), consent = this.group.consent();
+      const joined = this.group.liveRoster(), consent = this.group.consent();
       if (joined?.members.some((entry) => entry.machineId === peerId && !isRetiring(joined, entry.replicaId))) return { outcome, detail: null, reason: null };
       return { outcome: 'pending', reason: null, detail: consent?.peerId === peerId && consent.error ? `Sync setup started but has not finished: ${consent.error}`
         : 'Sync setup started on this computer and is waiting for the other computer to join. If it does not finish in a minute, open Design Docs settings on the other computer and press Repair on this computer\'s card.' };
@@ -536,7 +569,7 @@ export class DesignDocPairing {
 
   /** Other, non-retiring group members with exactly one connected grant for this group's scope. */
   async connectedMembers(): Promise<string[]> {
-    const roster = this.group.roster(), local = this.group.sync.localRepository();
+    const roster = this.group.liveRoster(), local = this.group.sync.localRepository();
     if (!roster || !local) return [];
     let grants: Awaited<ReturnType<PluginSdkPeers['list']>>;
     try { grants = await this.peers.list({ signal: this.abort.signal }); } catch { return []; }
@@ -564,7 +597,7 @@ export class DesignDocPairing {
     if (available) this.lifecycleWarning = null;
     this.lifecycleReason = available ? null : reason;
     const local = this.group.sync.localRepository()!, roster = this.group.roster(), consent = this.group.consent();
-    return { configured: !!roster && !!local.groupId, repoId: local.repoId, replicaId: local.replicaId, roster,
+    return { configured: !!this.group.liveRoster(), repoId: local.repoId, replicaId: local.replicaId, roster,
       members: (roster?.members ?? []).map((member) => {
         const grants = peers.filter((peer) => peer.id === member.machineId && peer.scope === local.repoId);
         const grant = grants.length === 1 ? grants[0] : undefined, self = member.replicaId === local.replicaId;
@@ -598,11 +631,15 @@ export class DesignDocPairing {
     const self = id.parse((await this.peers.localIdentity()).id), scope = bootstrapScope(self, peerId);
     const enrolled = await this.peers.enrolled({ signal: this.abort.signal });
     if (!enrolled.some((peer) => peer.id === peerId && peer.connected)) throw new PeerProtocolError('invalid', 'mutually enrolled peer unavailable');
+    const rejoin = this.group.rejoinState(peerId);
+    if (rejoin.kind === 'blocked') throw new PeerProtocolError('conflict', rejoin.reason);
+    if (rejoin.kind === 'detach') this.prepareRejoin(self, peerId);
     await this.peers.enable(peerId, { scope, signal: this.abort.signal });
     const before = await this.grant(peerId, scope);
     const hello = helloSchema.parse(await this.peers.call(peerId, 'group-hello', {}, this.options(scope)));
     if (hello.peerId !== peerId || hello.scope !== scope) throw new PeerProtocolError('invalid', 'setup peer identity or scope changed');
-    const remote = hello.roster === null ? null : parseRoster(hello.roster), local = this.group.sync.localRepository()!, roster = this.group.roster();
+    // A roster the other side has left is its history, not a group to combine with or join.
+    const remote = liveRemote(hello), local = this.group.sync.localRepository()!, roster = this.group.roster();
     if (remote && remote.repoId !== hello.repoId) throw new PeerProtocolError('invalid', 'peer database scope mismatch');
     if (remote && roster && remote.groupId !== roster.groupId) throw new PeerProtocolError('conflict', 'cannot combine existing groups');
     const chosen = roster?.repoId ?? remote?.repoId ?? (self < peerId ? local.repoId : hello.repoId);
@@ -647,10 +684,11 @@ export class DesignDocPairing {
   private async disable(peerId: string): Promise<GroupStatus> {
     const self = id.parse((await this.peers.localIdentity()).id);
     bootstrapScope(self, peerId);
-    const known = new Set(this.readyInvitations.get(peerId) ?? []);
+    const known = new Set(this.pairingKeys.get(peerId) ?? []);
     if (inviteCapability(this.peers).available) {
       const listed = await this.invitePeers().listInvitations({ limit: INVITATION_LIST_LIMIT, signal: this.abort.signal }).catch(() => []);
-      for (const item of listed) if (item.state === 'ready' && item.peer?.instanceId === peerId) known.add(item.invitationId);
+      const links = await this.invitePeers().peerLinks({ peerId, signal: this.abort.signal }).catch(() => [] as PluginPeerLink[]);
+      for (const peer of pairedPeers(listed, links)) if (peer.peerId === peerId) peer.keys.forEach((key) => known.add(key));
     }
     this.disabledPeers.set(peerId, known);
     await this.enabling?.catch(() => {});
@@ -687,14 +725,21 @@ export class DesignDocPairing {
         }
         const before = await this.grant(consent.peerId, consent.repoId);
         const hello = helloSchema.parse(await this.peers.call(consent.peerId, 'group-hello', {}, this.options(consent.repoId)));
-        if (hello.replicaId !== consent.replicaId || hello.repoId !== consent.repoId || hello.peerId !== consent.peerId) {
+        const roster = hello.roster === null ? null : parseRoster(hello.roster), local = this.group.sync.localRepository()!;
+        if (hello.repoId !== consent.repoId || hello.peerId !== consent.peerId) throw new PeerProtocolError('invalid', 'waiting for remote database enablement');
+        // Never freeze a join into a group the other side left, or one that removed this computer: no admission can come
+        // of it and a frozen request never moves. The other side archives that history once it pairs again.
+        if (roster && !consent.request && (!liveRemote(hello) || historicalMembers(roster).some((member) => member.machineId === this.group.localPeerId() && member.replicaId !== local.replicaId))) {
+          throw new PeerProtocolError('invalid', 'waiting for the other computer to set aside the sync group from an earlier removal');
+        }
+        // The other side detached to pair again: an unfrozen consent follows its new replica.
+        if (hello.replicaId !== consent.replicaId && !(roster === null && this.group.repinConsent(consent.peerId, consent.repoId, hello.replicaId))) {
           throw new PeerProtocolError('invalid', 'waiting for remote database enablement');
         }
-        const roster = hello.roster === null ? null : parseRoster(hello.roster), local = this.group.sync.localRepository()!;
         if (!roster && this.group.localPeerId()! < consent.peerId) return;
         const request = this.group.freezeJoin({ requestId: consent.requestId, repoId: consent.repoId, groupId: roster?.groupId ?? null,
-          sponsorReplicaId: consent.replicaId, member: { replicaId: local.replicaId, machineId: this.group.localPeerId()!,
-            joinedAt: 0, sponsorReplicaId: consent.replicaId } });
+          sponsorReplicaId: hello.replicaId, member: { replicaId: local.replicaId, machineId: this.group.localPeerId()!,
+            joinedAt: 0, sponsorReplicaId: hello.replicaId } });
         let installed: GroupRoster;
         if (roster && (this.group.containsAdmission(roster, request) || isRetiring(roster, request.sponsorReplicaId))) {
           const result = z.object({ receipt: z.unknown(), roster: z.unknown() }).strict().parse(

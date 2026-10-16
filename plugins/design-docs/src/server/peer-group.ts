@@ -50,6 +50,69 @@ export class DesignDocPeerGroup {
       const control = this.control(), previous = control.local_peer_id;
       // `force`: the database is a restored backup or rolled-back copy on this same app; its writer state is stale.
       if (!options.force && (!previous || previous === currentPeerId)) return { restored: false };
+      this.detach(previous, currentPeerId);
+      return { restored: true };
+    });
+  }
+
+  /**
+   * The roster only while this computer is a current member of it. After this computer leaves (or is removed) the roster
+   * it keeps is terminal history: it must not count as membership of anyone, for the badge, Repair or automatic setup.
+   */
+  liveRoster(): GroupRoster | null {
+    const roster = this.roster(), local = this.sync.localRepository()!;
+    return roster && local.groupId === roster.groupId && roster.members.some((member) => member.replicaId === local.replicaId) ? roster : null;
+  }
+
+  /**
+   * Whether governance left over from an earlier removal blocks pairing again with `peerId`. Admission is per computer, so
+   * a group never re-admits a computer it removed. A dissolved two-member pairing leaves exactly two such states: this
+   * computer left (it keeps a roster it is no longer in), or it is the only member left and `peerId` is a former member.
+   * Both are history once their teardown is delivered, so a new pairing starts from a fresh replica (`detachForRejoin`).
+   * Pending teardown of `peerId` itself is superseded by the new pairing; any other pending work must finish first.
+   */
+  rejoinState(peerId: string): { kind: 'clear' } | { kind: 'detach' } | { kind: 'blocked'; reason: string } {
+    id.parse(peerId);
+    const roster = this.roster();
+    if (!roster || this.consent()) return { kind: 'clear' };
+    const live = this.liveRoster();
+    const former = historicalMembers(roster).some((member) => member.machineId === peerId) && !roster.members.some((member) => member.machineId === peerId);
+    if (live && !former) return { kind: 'clear' };
+    if (live && roster.members.length > 1) {
+      return { kind: 'blocked', reason: 'That computer was removed from this sync group earlier, and a group cannot take a removed computer back. Remove the other computers from this group (or leave it), then pair again.' };
+    }
+    // Only this peer's teardown may be dropped: the leaver's own roster delivery must reach the others first.
+    const pending = this.jobs().filter((job) => job.state !== 'done' && !(job.kind === 'local-revoke' && (job.payload as { peerId?: string }).peerId === peerId) &&
+      !(live && job.kind === 'roster' && job.peerId === peerId));
+    if (pending.length) {
+      const job = pending[0]!;
+      return { kind: 'blocked', reason: `An earlier removal is still being delivered${job.peerId === this.localPeerId() ? '' : ` to ${job.peerId}`}${job.error ? ` (${job.error})` : ''}. Keep both computers open and online, then press Repair again.` };
+    }
+    return { kind: 'detach' };
+  }
+
+  /** Archive leftover governance (see `rejoinState`) and continue as a fresh standalone replica; documents and history stay. */
+  detachForRejoin(currentPeerId: string, peerId: string): void {
+    id.parse(currentPeerId);
+    this.db.transaction(() => {
+      if (this.rejoinState(peerId).kind !== 'detach') throw new PeerProtocolError('conflict', 'leftover sync group changed');
+      this.detach(this.localPeerId(), currentPeerId);
+    });
+  }
+
+  /** A not yet frozen consent follows the same peer's new replica (it detached to pair again); a frozen join never moves. */
+  repinConsent(peerId: string, repoId: string, replicaId: string): boolean {
+    id.parse(replicaId);
+    const consent = this.consent();
+    if (!consent || consent.peerId !== peerId || consent.repoId !== repoId || consent.request || consent.capacity || this.roster()) return false;
+    if (consent.replicaId === replicaId) return true;
+    this.db.prepare('UPDATE sync_group_control SET consent_json = ? WHERE singleton = 1').run(canonicalJson({ ...consent, replicaId }));
+    return true;
+  }
+
+  private detach(previous: string | null, currentPeerId: string): void {
+    this.db.transaction(() => {
+      const control = this.control();
       const local = this.sync.localRepository()!, replicaId = randomUUID(), at = this.now();
       this.db.prepare(`INSERT INTO sync_restore_events (at, previous_peer_id, current_peer_id, repo_id, previous_replica_id, new_replica_id, roster_json)
         VALUES (?, ?, ?, ?, ?, ?, ?)`).run(at, previous ?? '', currentPeerId, local.repoId, local.replicaId, replicaId, control.roster_json);
@@ -60,7 +123,6 @@ export class DesignDocPeerGroup {
       this.db.prepare("UPDATE sync_intents SET state = 'blocked', updated_at = ? WHERE state = 'pending'").run(at);
       for (const table of ['sync_group_jobs', 'sync_group_admissions', 'sync_retry', 'sync_outgoing_sessions', 'sync_transfer_chunks',
         'sync_transfers', 'sync_manual_sessions', 'sync_peer_known', 'sync_peer_protocols', 'sync_receipts']) this.db.prepare(`DELETE FROM ${table}`).run();
-      return { restored: true };
     });
   }
 
@@ -95,6 +157,8 @@ export class DesignDocPeerGroup {
         if (member.machineId !== peerId || member.replicaId !== replicaId) throw new PeerProtocolError('conflict', 'member app identity mismatch');
         return;
       }
+      // The same peer detached to pair again: an unfrozen consent follows its new replica.
+      if (this.consent()?.replicaId !== replicaId) this.repinConsent(peerId, repoId, replicaId);
       const prior = this.consent();
       if (prior && (prior.peerId !== peerId || prior.repoId !== repoId || prior.replicaId !== replicaId)) {
         throw new PeerProtocolError('conflict', 'another database setup is pending');

@@ -1107,7 +1107,8 @@ describe('DD invitation pairing', () => {
 
   it.each([
     ['invitation not ready', () => invitation({ state: 'connecting', peer: { instanceId: 'b', name: 'b', fingerprint: 'F' } }), [link()], false],
-    ['no discovered peer', () => invitation({ state: 'ready' }), [link()], false],
+    // A linked link carries the consent on its own (see 'pairing again'); without one an undiscovered ready peer stays off.
+    ['no discovered peer and no link', () => invitation({ state: 'ready' }), [], false],
     ['malformed peer id', () => ready('bad id'), [link({ peerInstanceId: 'bad id' })], false],
     ['link removed', () => ready('b'), [link({ phase: 'removed' })], false],
     ['link still pending', () => ready('b'), [link({ phase: 'enrolled' })], false],
@@ -1280,6 +1281,99 @@ describe('DD invitation pairing', () => {
     a.peers.enable.mockClear();
     await a.pairing.inviteState();
     expect(a.peers.enable).not.toHaveBeenCalled();
+  });
+
+  describe('pairing again after a two-member group dissolved', () => {
+    /**
+     * The real-machine state: one computer pressed Remove on the other (so it left; it keeps a roster it is no longer in),
+     * then the two paired again. The new link is linked and connected, core enrolls the peer, the initiator's enable
+     * imported a database grant, and no ready invitation remains in the list (it was cancelled or fell out of it).
+     */
+    async function dissolvedThenRelinked(leaver: 'a' | 'b') {
+      const net = network(), a = net.app('a'), b = net.app('b'); await net.found(a, b);
+      const [left, stayed] = leaver === 'a' ? [a, b] : [b, a];
+      await left.pairing.remove(stayed.group.sync.localRepository()!.replicaId);
+      await stayed.pairing.retry(true); await left.pairing.retry(true);
+      const cancelled = invitation({ state: 'cancelled', reason: 'cancelled', peer: null });
+      withInvites(a, { list: [cancelled], links: [link({ peerInstanceId: 'b' })] });
+      withInvites(b, { list: [cancelled], links: [link({ peerInstanceId: 'a', pairingId: 'pair-1' })] });
+      // Core imported the initiator's database grant on the leaver: the leftover roster then looks authorized.
+      await stayed.peers.enable(left.peerId, { scope: stayed.group.sync.localRepository()!.repoId });
+      return { net, a, b, left, stayed };
+    }
+    const formed = async (x: InviteApp, y: InviteApp) => {
+      for (const side of [x, y]) {
+        expect(side.group.roster()?.members.map((member) => member.machineId).sort()).toEqual(['a', 'b']);
+        expect(side.group.sync.localRepository()!.groupId).toBe(side.group.roster()!.groupId);
+      }
+      expect(x.group.roster()!.groupId).toBe(y.group.roster()!.groupId);
+      expect((await x.pairing.status()).configured).toBe(true);
+    };
+    const poll = async (...sides: InviteApp[]) => {
+      for (let round = 0; round < 8; round++) {
+        for (const side of sides) { await side.pairing.inviteState(); await new Promise((resolve) => setTimeout(resolve, 5)); await side.pairing.retry(true); }
+      }
+    };
+
+    it.each(['a', 'b'] as const)('leaver %s: Repair never says already-synced for a leftover roster', async (leaver) => {
+      const { left, stayed } = await dissolvedThenRelinked(leaver);
+      const status = await left.pairing.status();
+      expect(status.configured).toBe(false);
+      await expect(left.pairing.repair(stayed.peerId)).resolves.not.toMatchObject({ outcome: 'already-synced' });
+    });
+
+    it.each(['a', 'b'] as const)('leaver %s: both sides converge to a new group by polling, without a ready invitation', async (leaver) => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const { a, b, left } = await dissolvedThenRelinked(leaver);
+        const replica = left.group.sync.localRepository()!.replicaId;
+        await poll(a, b);
+        await formed(a, b);
+        // The leaver continues as a fresh replica (a group never re-admits a removed one); history is archived.
+        expect(left.group.sync.localRepository()!.replicaId).not.toBe(replica);
+        expect(left.db.prepare('SELECT COUNT(*) AS n FROM sync_restore_events').get()).toEqual({ n: 1 });
+        await expect(a.pairing.repair('b')).resolves.toEqual({ outcome: 'already-synced', detail: null, reason: null });
+      } finally { warn.mockRestore(); }
+    });
+
+    it('Repair on the leaver converges once the other side polls', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const { a, b } = await dissolvedThenRelinked('b');
+        const first = await b.pairing.repair('a');
+        expect(first.outcome).not.toBe('already-synced');
+        await poll(a, b);
+        await formed(a, b);
+      } finally { warn.mockRestore(); }
+    });
+
+    it('states the concrete cause while the earlier removal is still being delivered', async () => {
+      const { left, stayed } = await dissolvedThenRelinked('a');
+      left.group.queueJob(stayed.peerId, 'roster', left.group.roster()!.rosterEpoch, left.group.roster());
+      left.db.prepare("UPDATE sync_group_jobs SET state = 'blocked', error = 'peer offline' WHERE kind = 'roster'").run();
+      const result = await left.pairing.repair(stayed.peerId);
+      expect(result).toMatchObject({ outcome: 'unavailable', detail: expect.stringContaining('earlier removal is still being delivered') });
+      expect(result.detail).toContain('peer offline');
+      expect(left.group.roster()).not.toBeNull();
+    });
+
+    it('a removed computer in a group that still has other members is refused with the reason, not re-admitted', async () => {
+      const net = network(), a = net.app('a'), b = net.app('b'), c = net.app('c'); await net.found(a, b);
+      net.link(a, c); await a.pairing.enable('c'); await c.pairing.enable('a'); await a.pairing.retry(true);
+      await a.pairing.remove(b.group.sync.localRepository()!.replicaId); await a.pairing.retry(true); await b.pairing.retry(true); await a.pairing.retry(true);
+      expect(a.group.roster()!.members.map((member) => member.machineId).sort()).toEqual(['a', 'c']);
+      withInvites(a, { links: [link({ peerInstanceId: 'b' })] });
+      await expect(a.pairing.repair('b')).resolves.toMatchObject({ outcome: 'unavailable', detail: expect.stringContaining('cannot take a removed computer back') });
+    });
+
+    it('a local Disable Link of the new link is not undone by the next tick', async () => {
+      const { a, b } = await dissolvedThenRelinked('b');
+      await a.pairing.revoke('b');
+      const calls = a.peers.enable.mock.calls.length;
+      await a.pairing.inviteState(); await new Promise((resolve) => setTimeout(resolve, 5));
+      expect(a.peers.enable.mock.calls).toHaveLength(calls);
+      void b;
+    });
   });
 
   it('local revoke survives a failed link lookup', async () => {

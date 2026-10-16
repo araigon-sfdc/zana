@@ -529,7 +529,7 @@ describe('invitation pairing UI', () => {
     const list = await screen.findByRole('list', { name: 'Computers' });
     const rows = within(list).getAllByRole('listitem').map((row) => row.textContent);
     expect(rows).toEqual([
-      'LaptopLinked, sync not set upRepairRemoveThe connection works but database sync is not set up with this computer. Repair retries setup.', 'DeskReconnectingReconnectRemoveThe other computer is offline',
+      'LaptopConnected, sync not set upRepairRemoveThe connection works but database sync is not set up with this computer. Repair retries setup.', 'DeskReconnectingReconnectRemoveThe other computer is offline',
       'StudioDisconnectedReconnectRemoveThe link credential expired. Sync resumes when the link is back.',
       'MiniDisconnectedReconnectRemoveThe secure connection to the other computer is down. Sync resumes when the link is back.',
       'OldDisconnectedRemoveThe link was revoked. Add peer to pair again.', 'TowerDisconnectedReconnectRemoveSync resumes when the link is back.',
@@ -544,7 +544,7 @@ describe('invitation pairing UI', () => {
   it('Repair on a linked computer outside the sync group retries setup and reports success', async () => {
     const repair = vi.fn(async () => ({ outcome: 'sync-enabled', detail: null, reason: null }));
     mount({ inviteState: async () => view({ links: [lnk({ peerName: 'Laptop' })] }), repairPeer: repair });
-    expect(await screen.findByText('Linked, sync not set up')).toBeTruthy();
+    expect(await screen.findByText('Connected, sync not set up')).toBeTruthy();
     expect(screen.queryByText('Connected')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Repair' }));
     await waitFor(() => expect(repair).toHaveBeenCalledExactlyOnceWith({ peerId: 'app-b' }));
@@ -591,7 +591,7 @@ describe('invitation pairing UI', () => {
     expect(new Set(reasons.map((reason) => lifecycleText(reason))).size).toBe(reasons.length);
     mount({ inviteState: async () => view({ links: [lnk()] }), groupStatus: async () => ({ ...EMPTY, lifecycleAvailable: false, lifecycleReason: 'storage-permissions' }) });
     const card = await screen.findByRole('listitem');
-    expect(within(card).getByText('Linked, sync not set up')).toBeTruthy();
+    expect(within(card).getByText('Connected, sync not set up')).toBeTruthy();
     expect(within(card).getByText(/private to your user/)).toBeTruthy();
     cleanup();
     const members = [{ replicaId: 'r-a', machineId: 'app-a', joinedAt: 1, sponsorReplicaId: null, retiring: false, connected: true, authorized: true, grantEpoch: null },
@@ -599,6 +599,15 @@ describe('invitation pairing UI', () => {
     mount({ inviteState: async () => view({ links: [lnk()] }), groupStatus: async () => ({ ...EMPTY, configured: true, roster: { rosterEpoch: 1 }, members }) });
     expect(await screen.findByText('Connected')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Repair' })).toBeNull();
+  });
+
+  it('a connected link to a rostered computer without a database grant is not shown as synced (same rule as Repair)', async () => {
+    const members = [{ replicaId: 'r-a', machineId: 'app-a', joinedAt: 1, sponsorReplicaId: null, retiring: false, connected: true, authorized: true, grantEpoch: null },
+      { replicaId: 'r-b', machineId: 'app-b', joinedAt: 2, sponsorReplicaId: 'r-a', retiring: false, connected: true, authorized: false, grantEpoch: null }];
+    mount({ inviteState: async () => view({ links: [lnk()] }), groupStatus: async () => ({ ...EMPTY, replicaId: 'r-a', configured: true, roster: { rosterEpoch: 1 }, members }) });
+    const card = await screen.findByRole('listitem');
+    expect(within(card).getByText('Connected, sync not set up')).toBeTruthy();
+    expect(within(card).getByRole('button', { name: 'Repair' })).toBeTruthy();
   });
 
   it('name falls back from the link to the enrolled name, the invitation and finally Unnamed computer; an id is never a label', async () => {

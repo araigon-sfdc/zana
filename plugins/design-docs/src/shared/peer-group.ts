@@ -82,3 +82,13 @@ export interface GroupStatus {
   introductionsAvailable: boolean;
   installerAvailable: false;
 }
+
+/**
+ * The one definition of "this computer syncs its database with `peerId`", shared by the computer card badge, Repair and
+ * the server: this computer is in a sync group (a roster it left is history), the peer is a current, non-retiring member
+ * of it, and core holds exactly one database grant for it.
+ */
+export function syncedWith(status: Pick<GroupStatus, 'configured' | 'members' | 'replicaId'>, peerId: string): boolean {
+  return status.configured && status.members.some((member) => member.replicaId === status.replicaId) &&
+    status.members.some((member) => member.machineId === peerId && member.replicaId !== status.replicaId && !member.retiring && member.authorized);
+}
