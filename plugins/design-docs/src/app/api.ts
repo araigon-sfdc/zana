@@ -20,7 +20,7 @@ import type {
 import type { PageFile } from '../shared/frame-protocol.js';
 import type { PublishFolder } from '../shared/publish.js';
 import type { PageRenderReport, RenderedPage, SiteFile } from '../shared/page.js';
-import type { GroupStatus } from '../shared/peer-group.js';
+import type { GroupStatus, RepairResult } from '../shared/peer-group.js';
 import type { InviteItem, InviteView } from '../server/pairing.js';
 
 export type { InviteItem, InviteView };
@@ -97,6 +97,8 @@ export interface DesignDocsApi {
   decideInvitation(args: { invitationId: string; decision: 'approved' | 'denied'; ownerProof?: string }): Promise<InviteItem>;
   cancelInvitation(invitationId: string): Promise<void>;
   reconnectPeer(peerId: string): Promise<PeerLink[]>;
+  /** Re-try sync setup for one linked computer; re-links only that connection if needed. */
+  repairPeer(peerId: string): Promise<RepairResult>;
   /** Only whether a connected peer's database differs; never names or counts. */
   peersOutOfSync(): Promise<{ outOfSync: boolean }>;
   removePeer(replicaId: string): Promise<GroupStatus>;
@@ -178,6 +180,7 @@ export function createApi(call: Call): DesignDocsApi {
     decideInvitation: (args) => typed('decideInvitation', args),
     cancelInvitation: (invitationId) => done(typed('cancelInvitation', { invitationId })),
     reconnectPeer: (peerId) => typed('reconnectPeer', { peerId }),
+    repairPeer: (peerId) => typed('repairPeer', { peerId }),
     peersOutOfSync: () => typed('peersOutOfSync'),
     removePeer: (replicaId) => typed('removePeer', { replicaId }),
     revokePeer: (peerId) => typed('revokePeer', { peerId }),

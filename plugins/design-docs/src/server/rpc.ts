@@ -164,6 +164,8 @@ export function createRpcHandlers(deps: RpcDeps): Record<string, (args: unknown)
 
     reconnectPeer: (raw) => requirePairing(deps).reconnect(requiredString(onlyKeys(raw, ['peerId']), 'peerId')),
 
+    repairPeer: (raw) => requirePairing(deps).repair(requiredString(onlyKeys(raw, ['peerId']), 'peerId')),
+
     peersOutOfSync: async () => ({ outOfSync: await requirePairing(deps).outOfSync() }),
 
     retryIntroductions: async () => {

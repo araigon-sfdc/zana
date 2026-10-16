@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { SERVER_RUNTIME_PROTOCOL_VERSION as protocolVersion } from '@zana-ai/zcc-contracts/runtime';
-import { PEER_BOOT_KEY_ENV } from '@zana-ai/zcc-server/services/peers/protected-key';
+import { PEER_BOOT_KEY_ENV, PEER_KEY_REASON_ENV } from '@zana-ai/zcc-server/services/peers/protected-key';
 
 const mocks = vi.hoisted(() => ({ fork: vi.fn(), available: vi.fn(), encrypt: vi.fn(), decrypt: vi.fn(), backend: vi.fn() }));
 vi.mock('electron', () => ({ utilityProcess: { fork: mocks.fork }, safeStorage: {
@@ -78,9 +78,18 @@ it.each(['unavailable', 'e2e', 'backend-error', ...(process.platform === 'linux'
   if (mode === 'basic_text' || mode === 'unknown') mocks.backend.mockReturnValue(mode);
   if (mode === 'e2e') vi.stubEnv('ZCC_E2E_HOME', dir);
   if (mode === 'backend-error') mocks.available.mockImplementation(() => { throw new Error('private Keychain detail'); });
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
   await start(dir);
   expect(mocks.fork.mock.calls[0][2].env[PEER_BOOT_KEY_ENV]).toBeUndefined();
   expect(mocks.fork.mock.calls[1][2].env[PEER_BOOT_KEY_ENV]).toBe('');
+  const reason = mocks.fork.mock.calls[1][2].env[PEER_KEY_REASON_ENV];
+  if (mode === 'e2e') { expect(reason).toBe(''); expect(warn).not.toHaveBeenCalled(); }
+  else {
+    expect(reason).toBe({ unavailable: 'encryption-unavailable', 'backend-error': 'keychain-denied' }[mode] ?? 'insecure-backend');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(`unavailable: ${reason}`));
+    expect(JSON.stringify(warn.mock.calls)).not.toContain('private Keychain detail');
+  }
+  warn.mockRestore();
   expect(mocks.encrypt).not.toHaveBeenCalled();
   expect(existsSync(join(dir, 'peer-key'))).toBe(false);
   if (mode === 'e2e') expect(mocks.available).not.toHaveBeenCalled();

@@ -60,7 +60,7 @@ test('Design Docs peer setup exposes lifecycle, enrolled peers and refuses fabri
   await expect(peers.getByRole('button', { name: 'Enable Database Sync' })).toHaveCount(0);
   // Isolated E2E HOME has no OS-protected peer key; installed SDK must remain fail-closed.
   expect(status).toMatchObject({ configured: false, lifecycleAvailable: false, introductionsAvailable: false, installerAvailable: false, enrolled: [], members: [], jobs: [] });
-  await expect(peers).toContainText('Database sync cannot start on this app yet');
+  await expect(peers).toContainText('Database sync cannot start on this app');
   const error = await window.evaluate(async () => {
     try {
       await window.cc.pluginApps.callRpc('design-docs', 'enablePeer', { peerId: 'fake', members: [{ machineId: 'fake' }] });

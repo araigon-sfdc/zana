@@ -66,9 +66,9 @@ async function joinPeer(app: AppHandle, token: string): Promise<void> {
   await panel.getByRole('button', { name: 'Join peer', exact: true }).click();
 }
 
-/** The pairing row's peer fingerprint, shown while the owner decides. */
-async function pairingFingerprint(app: AppHandle): Promise<string> {
-  const row = (await openPeers(app)).getByLabel('Pairing').locator('li').filter({ hasText: /^Approve pairing with / });
+/** The pairing row's peer fingerprint: on the inviter while its owner decides, on the redeemer while it waits for that. */
+async function pairingFingerprint(app: AppHandle, row_: RegExp = /^Approve pairing with /): Promise<string> {
+  const row = (await openPeers(app)).getByLabel('Pairing').locator('li').filter({ hasText: row_ });
   await expect(row).toBeVisible({ timeout: 60_000 });
   return (await row.locator('code').innerText()).trim();
 }
@@ -156,18 +156,19 @@ test('two fresh apps pair over a private sshd, sync both ways, heal a killed ssh
     await joinPeer(a, token);
     await expect((await openPeers(a)).getByLabel('Pair a peer').getByRole('alert')).toContainText('This invitation was created on this computer');
 
-    step('B joins, bilateral approve with fingerprint compare');
+    step('B joins (no approval of its own), A approves with fingerprint compare');
     await joinPeer(b, token);
-    const bFingerprint = await pairingFingerprint(b);
+    // Pasting the invitation is B's consent: it waits on A's owner and is never offered an Approve button or sheet.
+    const bFingerprint = await pairingFingerprint(b, /^Awaiting the other owner's approval for /);
     console.log('[invite-pair] B sees inviter fingerprint', bFingerprint);
     expect(bFingerprint).toMatch(/\S{8,}/);
-    await approveInUi(b);
     const bList = (await openPeers(b)).getByLabel('Pairing');
-    await expect(bList).toContainText(/Awaiting the other owner's approval for |Approved\. Connecting to /, { timeout: 60_000 });
+    await expect(bList.getByRole('button', { name: 'Approve', exact: true })).toHaveCount(0);
     const aFingerprint = await pairingFingerprint(a);
     console.log('[invite-pair] A sees redeemer fingerprint', aFingerprint);
     expect(aFingerprint).not.toBe(bFingerprint);
     await approveInUi(a);
+    await expect(bList).toContainText(/Approved\. Connecting to |Ready: paired with /, { timeout: 60_000 }).catch(() => undefined);
     // A finished pairing hands over to its computer card (the Ready row clears itself once the link exists).
     await expect((await openPeers(a)).getByLabel('Computers').locator('.dd-peers-badge', { hasText: /^Connected$/ })).toHaveCount(1, { timeout: 120_000 }).catch(error => { dumpLogs(a); dumpLogs(b); throw error; });
     await expect((await openPeers(b)).getByLabel('Computers').locator('.dd-peers-badge', { hasText: /^Connected$/ })).toHaveCount(1, { timeout: 120_000 });

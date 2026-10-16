@@ -3,7 +3,7 @@ import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
-import { consumePeerBootKey, createProtectedPeerKeyProvider, PEER_BOOT_KEY_ENV, type PeerCryptoProvider } from './protected-key.js';
+import { consumePeerBootKey, PeerKeyReasonError, peerKeyReasonSuffix, createProtectedPeerKeyProvider, PEER_BOOT_KEY_ENV, PEER_KEY_REASON_ENV, type PeerCryptoProvider } from './protected-key.js';
 
 const roots: string[] = [];
 const root = () => { const dir = mkdtempSync(join(tmpdir(), 'zcc-peer-key-')); roots.push(dir); return dir; };
@@ -46,7 +46,7 @@ it.each(['absent', 'unavailable', 'basic_text', 'unknown'])('fails closed withou
   const dir = root(), encrypt = vi.fn(cryptoProvider.encryptString);
   const provider = mode === 'absent' ? undefined : { ...cryptoProvider, encryptString: encrypt,
     isEncryptionAvailable: () => mode !== 'unavailable', getSelectedStorageBackend: () => mode };
-  await expect(createProtectedPeerKeyProvider(dir, provider).getKey()).resolves.toBeNull();
+  await expect(createProtectedPeerKeyProvider(dir, provider).getKey()).rejects.toMatchObject({ reason: mode === 'absent' || mode === 'unavailable' ? 'encryption-unavailable' : 'insecure-backend' });
   expect(encrypt).not.toHaveBeenCalled();
   expect(readdirSync(dir)).toEqual([]);
 });
@@ -82,13 +82,13 @@ it.each(['throw', 'empty', 'huge', 'invalid-key', 'noncanonical-key'])('redacts 
     },
     decryptString: () => mode === 'invalid-key' ? 'secret' : 'A'.repeat(42) + 'B'
   };
-  await expect(createProtectedPeerKeyProvider(root(), provider).getKey()).rejects.toThrow(/^protected peer storage key unavailable$/);
+  await expect(createProtectedPeerKeyProvider(root(), provider).getKey()).rejects.toThrow(/^protected peer storage key unavailable: (keychain-denied|key-corrupt)$/);
 });
 
 it('checks availability again after initialization; never decrypts when OS protection disappears', async () => {
   const dir = root(); await createProtectedPeerKeyProvider(dir, cryptoProvider).getKey();
   const decrypt = vi.fn(cryptoProvider.decryptString);
-  await expect(createProtectedPeerKeyProvider(dir, { ...cryptoProvider, isEncryptionAvailable: () => false, decryptString: decrypt }).getKey()).resolves.toBeNull();
+  await expect(createProtectedPeerKeyProvider(dir, { ...cryptoProvider, isEncryptionAvailable: () => false, decryptString: decrypt }).getKey()).rejects.toMatchObject({ reason: 'encryption-unavailable' });
   expect(decrypt).not.toHaveBeenCalled();
 });
 
@@ -130,4 +130,42 @@ it.each([undefined, '', 'plaintext', 'A'.repeat(42) + 'B'])('rejects invalid boo
   expect(env).toEqual({});
   await expect(provider.getKey()).resolves.toBeNull();
   provider.dispose();
+});
+
+it.each([
+  ['encryption unavailable', { ...cryptoProvider, isEncryptionAvailable: () => false }, 'encryption-unavailable'],
+  ['no provider', undefined, 'encryption-unavailable'],
+  ['keychain throws on availability', { ...cryptoProvider, isEncryptionAvailable: () => { throw new Error('denied'); } }, 'keychain-denied'],
+  ['basic_text backend', { ...cryptoProvider, getSelectedStorageBackend: () => 'basic_text' }, 'insecure-backend'],
+  ['encrypt denied', { ...cryptoProvider, encryptString: () => { throw new Error('locked'); } }, 'keychain-denied'],
+  ['oversized wrapped key', { ...cryptoProvider, encryptString: () => Buffer.alloc(4097) }, 'keychain-denied'],
+  ['decrypt garbage', { ...cryptoProvider, decryptString: () => 'secret' }, 'key-corrupt']
+] as const)('reports reason code for %s', async (_name, provider, reason) => {
+  const error = await createProtectedPeerKeyProvider(root(), provider as PeerCryptoProvider | undefined).getKey().catch(e => e);
+  expect(error.reason).toBe(reason);
+  expect(error.message).toBe(`protected peer storage key unavailable: ${reason}`);
+});
+
+it('reports storage-permissions and key-missing reasons', async () => {
+  const dir = root(); chmodSync(dir, 0o777);
+  await expect(createProtectedPeerKeyProvider(dir, cryptoProvider).getKey()).rejects.toMatchObject({ reason: 'storage-permissions' });
+  chmodSync(dir, 0o700); mkdirSync(join(dir, 'peer-pairs'), { mode: 0o700 });
+  await expect(createProtectedPeerKeyProvider(dir, cryptoProvider).getKey()).rejects.toMatchObject({ reason: 'key-missing' });
+  await expect(createProtectedPeerKeyProvider(join(dir, 'missing'), cryptoProvider).getKey()).rejects.toMatchObject({ reason: 'storage-permissions' });
+});
+
+it('boot provider throws the supplied reason (never a secret), scrubs the env, and ignores unknown codes', async () => {
+  const env: NodeJS.ProcessEnv = { [PEER_BOOT_KEY_ENV]: '', [PEER_KEY_REASON_ENV]: 'keychain-denied' };
+  const provider = consumePeerBootKey(env);
+  expect(env[PEER_KEY_REASON_ENV]).toBeUndefined();
+  await expect(provider.getKey()).rejects.toMatchObject({ reason: 'keychain-denied' });
+  await expect(consumePeerBootKey({ [PEER_KEY_REASON_ENV]: '../etc/passwd' }).getKey()).resolves.toBeNull();
+  await expect(consumePeerBootKey({}).getKey()).resolves.toBeNull();
+});
+
+it('tags unavailable-key errors with a parseable reason and never with free text', () => {
+  expect(peerKeyReasonSuffix(new PeerKeyReasonError('keychain-denied'))).toBe(' [reason=keychain-denied]');
+  expect(peerKeyReasonSuffix(new Error('plain'))).toBe('');
+  expect(peerKeyReasonSuffix({ reason: 'Bad Value; rm -rf' })).toBe('');
+  expect(peerKeyReasonSuffix(null)).toBe('');
 });

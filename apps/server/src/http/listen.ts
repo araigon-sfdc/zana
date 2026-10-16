@@ -29,7 +29,7 @@ const enrollToken = process.env.ZCC_HOST_ENROLL_TOKEN && process.env.ZCC_HOST_EN
 writeFileSync(join(dataDir, 'host-enroll.token'), enrollToken, { encoding: 'utf8', mode: 0o600 });
 
 const peerKeyProvider = consumePeerBootKey();
-const peerKey = await peerKeyProvider.getKey();
+const peerKey = await peerKeyProvider.getKey().catch(() => null);
 const peerKeyPresent = peerKey !== null;
 peerKey?.fill(0);
 process.stdout.write(`zcc-server peer key: ${peerKeyPresent ? 'present' : 'absent (peer links and invitations unavailable)'}\n`);

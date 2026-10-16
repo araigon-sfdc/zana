@@ -6,6 +6,7 @@ import { INVITE_POLL_MS, INVITE_WAITING_POLL_MS, PeerSettings } from './PeerSett
 import type { InviteItem, InviteView, PeerLink } from './api.js';
 import { createHarness } from './test-harness.js';
 import { createApi } from './api.js';
+import { lifecycleText } from './PeerSettings.js';
 
 afterEach(() => { vi.useRealTimers(); });
 // These tests run without a link scheme, so the code is the one format; links are covered in invite-links.test.tsx.
@@ -121,9 +122,9 @@ describe('database peer settings UI', () => {
     const harness = createHarness();
     installTestPluginRuntime({ deepLinkBase: null, rpc: { groupStatus: async () => ({ configured: false, repoId: 'database', replicaId: 'r-a', roster: null,
       members: [], jobs: [], setup: null, peers: [], enrolled: [{ id: 'app-b', name: 'Laptop', connected: true }],
-      lifecycleAvailable: false, introductionsAvailable: false, installerAvailable: false }) } });
+      lifecycleAvailable: false, lifecycleReason: 'keychain-denied', introductionsAvailable: false, installerAvailable: false }) } });
     harness.render(<PeerSettings />);
-    await screen.findByText(/Database sync cannot start on this app yet: Core peer lifecycle needs protected key storage/);
+    await screen.findByText(/Allow Zana access to the keychain \(or unlock it\), then restart Zana/);
     expect(screen.queryByText(/Automatic introductions are unavailable/)).toBeNull();
     fireEvent.change(screen.getByLabelText('Enrolled peer'), { target: { value: 'app-b' } });
     expect(screen.getByRole('button', { name: 'Enable Database Sync' })).toHaveProperty('disabled', true);
@@ -208,11 +209,11 @@ describe('database peer settings UI', () => {
     const call = vi.fn(async () => ({})); const api = createApi(call);
     await api.inviteState(); await api.createInvitation(); await api.openInvitation(); await api.redeemInvitation('zccinv1.x'); await api.invitationApproval('i');
     await api.decideInvitation({ invitationId: 'i', decision: 'approved', ownerProof: 'p' }); await api.decideInvitation({ invitationId: 'i', decision: 'denied', ownerProof: undefined });
-    await api.cancelInvitation('i'); await api.reconnectPeer('app'); await api.peersOutOfSync();
+    await api.cancelInvitation('i'); await api.reconnectPeer('app'); await api.repairPeer('app'); await api.peersOutOfSync();
     expect(call.mock.calls).toEqual([['inviteState', undefined], ['createInvitation', undefined], ['openInvitation', undefined], ['redeemInvitation', { token: 'zccinv1.x' }],
       ['invitationApproval', { invitationId: 'i' }], ['decideInvitation', { invitationId: 'i', decision: 'approved', ownerProof: 'p' }],
       ['decideInvitation', { invitationId: 'i', decision: 'denied' }], ['cancelInvitation', { invitationId: 'i' }],
-      ['reconnectPeer', { peerId: 'app' }], ['peersOutOfSync', undefined]]);
+      ['reconnectPeer', { peerId: 'app' }], ['repairPeer', { peerId: 'app' }], ['peersOutOfSync', undefined]]);
   });
 });
 
@@ -335,6 +336,12 @@ describe('invitation pairing UI', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Join peer' }));
     expect((await screen.findByRole('alert')).textContent).toBe('This invitation was already used');
     expect(field.value).toBe('zccinv1.again');
+  });
+
+  it('Dismiss uses the secondary button style and is disabled while busy', async () => {
+    mount({ inviteState: async () => view({ invitations: [item({ state: 'denied', reason: 'denied', peer })] }) });
+    const dismiss = await screen.findByRole('button', { name: 'Dismiss' });
+    expect(dismiss.className).toBe('btn dd-btn-secondary');
   });
 
   it('older hosts: only the new action is blocked, with the stable reason; an existing group still renders and syncs', async () => {
@@ -522,7 +529,7 @@ describe('invitation pairing UI', () => {
     const list = await screen.findByRole('list', { name: 'Computers' });
     const rows = within(list).getAllByRole('listitem').map((row) => row.textContent);
     expect(rows).toEqual([
-      'LaptopConnectedRemove', 'DeskReconnectingReconnectRemoveThe other computer is offline',
+      'LaptopLinked, sync not set upRepairRemoveThe connection works but database sync is not set up with this computer. Repair retries setup.', 'DeskReconnectingReconnectRemoveThe other computer is offline',
       'StudioDisconnectedReconnectRemoveThe link credential expired. Sync resumes when the link is back.',
       'MiniDisconnectedReconnectRemoveThe secure connection to the other computer is down. Sync resumes when the link is back.',
       'OldDisconnectedRemoveThe link was revoked. Add peer to pair again.', 'TowerDisconnectedReconnectRemoveSync resumes when the link is back.',
@@ -532,6 +539,52 @@ describe('invitation pairing UI', () => {
     expect(list.textContent).not.toMatch(/app-[a-j]/);
     fireEvent.click(within(list).getAllByRole('button', { name: 'Reconnect' })[1]!);
     await waitFor(() => expect(reconnect).toHaveBeenCalledExactlyOnceWith({ peerId: 'app-d' }));
+  });
+
+  it('Repair on a linked computer outside the sync group retries setup and reports success', async () => {
+    const repair = vi.fn(async () => ({ outcome: 'sync-enabled', detail: null, reason: null }));
+    mount({ inviteState: async () => view({ links: [lnk({ peerName: 'Laptop' })] }), repairPeer: repair });
+    expect(await screen.findByText('Linked, sync not set up')).toBeTruthy();
+    expect(screen.queryByText('Connected')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Repair' }));
+    await waitFor(() => expect(repair).toHaveBeenCalledExactlyOnceWith({ peerId: 'app-b' }));
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Repair' }) as HTMLButtonElement).disabled).toBe(false));
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('Repair that cannot finish shows the real cause and next step; a thrown error is shown too', async () => {
+    const repair = vi.fn()
+      .mockResolvedValueOnce({ outcome: 'unavailable', detail: null, reason: 'keychain-denied' })
+      .mockResolvedValueOnce({ outcome: 'unavailable', detail: 'mutually enrolled peer unavailable', reason: null })
+      .mockRejectedValueOnce(new Error('no linked connection to that computer'));
+    mount({ inviteState: async () => view({ links: [lnk()] }), repairPeer: repair });
+    const click = async () => { fireEvent.click(await screen.findByRole('button', { name: 'Repair' })); };
+    await click();
+    expect((await screen.findByRole('alert')).textContent).toMatch(/Repair could not finish: .*Allow Zana access to the keychain/);
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Repair' }) as HTMLButtonElement).disabled).toBe(false));
+    await click();
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/mutually enrolled peer unavailable.*Next step: use Reconnect/));
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Repair' }) as HTMLButtonElement).disabled).toBe(false));
+    await click();
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/no linked connection/));
+  });
+
+  it('lifecycle failure explains the real cause on the card and in the hint; a group member keeps Connected', async () => {
+    const reasons = ['keychain-denied', 'encryption-unavailable', 'insecure-backend', 'storage-permissions', 'key-missing', 'key-corrupt', 'core-unsupported', null] as const;
+    for (const reason of reasons) {
+      expect(lifecycleText(reason)).toMatch(/\w/);
+    }
+    expect(new Set(reasons.map((reason) => lifecycleText(reason))).size).toBe(reasons.length);
+    mount({ inviteState: async () => view({ links: [lnk()] }), groupStatus: async () => ({ ...EMPTY, lifecycleAvailable: false, lifecycleReason: 'storage-permissions' }) });
+    const card = await screen.findByRole('listitem');
+    expect(within(card).getByText('Linked, sync not set up')).toBeTruthy();
+    expect(within(card).getByText(/private to your user/)).toBeTruthy();
+    cleanup();
+    const members = [{ replicaId: 'r-a', machineId: 'app-a', joinedAt: 1, sponsorReplicaId: null, retiring: false, connected: true, authorized: true, grantEpoch: null },
+      { replicaId: 'r-b', machineId: 'app-b', joinedAt: 2, sponsorReplicaId: 'r-a', retiring: false, connected: true, authorized: true, grantEpoch: 1 }];
+    mount({ inviteState: async () => view({ links: [lnk()] }), groupStatus: async () => ({ ...EMPTY, configured: true, roster: { rosterEpoch: 1 }, members }) });
+    expect(await screen.findByText('Connected')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Repair' })).toBeNull();
   });
 
   it('name falls back from the link to the enrolled name, the invitation and finally Unnamed computer; an id is never a label', async () => {
@@ -639,9 +692,21 @@ describe('invitation pairing UI', () => {
     expect(await screen.findByText(/Ready: paired with Laptop/)).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Dismiss' })).toBeTruthy();
     cleanup();
-    mount({ inviteState: async () => view({ links: [lnk()], invitations: [item({ state: 'denied', reason: 'denied', peer })] }) });
+    mount({ inviteState: async () => view({ invitations: [item({ state: 'denied', reason: 'denied', peer })] }) });
     expect(await screen.findByText(/Pairing was declined/)).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Dismiss' })).toBeTruthy();
+    cleanup();
+    // A stale terminal attempt next to a live linked connection to the same computer is history and is hidden.
+    for (const state of ['denied', 'cancelled', 'expired', 'failed'] as const) {
+      mount({ inviteState: async () => view({ links: [lnk()], invitations: [item({ state, reason: state === 'denied' ? 'denied' : null, peer })] }) });
+      await screen.findByText(/No sync group/);
+      expect(screen.queryByRole('button', { name: 'Dismiss' })).toBeNull();
+      expect(screen.queryByRole('list', { name: 'Pairing' })).toBeNull();
+      cleanup();
+    }
+    // A failed link does not count as live, so its attempt keeps Dismiss.
+    mount({ inviteState: async () => view({ links: [lnk({ phase: 'failed', state: 'disconnected' })], invitations: [item({ state: 'failed', peer })] }) });
+    expect(await screen.findByRole('button', { name: 'Dismiss' })).toBeTruthy();
   });
 
   it('reports a failed reconnect', async () => {

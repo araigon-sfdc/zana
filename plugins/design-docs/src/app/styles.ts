@@ -163,7 +163,7 @@ export const DESIGN_DOCS_STYLES = `
 .dd-peers-badge { --dd-dot: var(--text-muted); display: inline-flex; align-items: center; gap: 6px; font-size: 11px; line-height: 1.4; color: var(--text-muted); cursor: default; user-select: none; }
 .dd-peers-badge::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--dd-dot); flex: none; }
 .dd-peers-badge[data-state='connected'] { --dd-dot: var(--success); color: var(--success); }
-.dd-peers-badge[data-state='reconnecting'], .dd-peers-badge[data-state='paused'], .dd-peers-badge[data-state='removing'] { --dd-dot: var(--warning, #b7791f); color: var(--warning, #b7791f); }
+.dd-peers-badge[data-state='unsynced'], .dd-peers-badge[data-state='reconnecting'], .dd-peers-badge[data-state='paused'], .dd-peers-badge[data-state='removing'] { --dd-dot: var(--warning, #b7791f); color: var(--warning, #b7791f); }
 .dd-peers-badge[data-state='disconnected'], .dd-peers-badge[data-state='not-syncing'] { --dd-dot: var(--danger, #d33); color: var(--danger, #d33); }
 .dd-peers-card-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-end; margin-left: auto; padding-left: 12px; border-left: 1px solid var(--border); }
 .dd-btn-remove.btn { color: var(--danger, #d33); border-color: var(--danger, #d33); background: transparent; font-weight: 500; }
@@ -172,6 +172,12 @@ export const DESIGN_DOCS_STYLES = `
 .dd-peers-summary .btn { margin-left: auto; }
 @media (max-width: 560px) { .dd-peers-card-actions { margin-left: 0; padding-left: 0; border-left: 0; width: 100%; justify-content: flex-start; } }
 .dd-peers-hint { color: var(--text-muted); }
+.dd-peers-confirm { line-height: 1.6; overflow-wrap: anywhere; }
+.dd-peers code.dd-fp { display: inline; padding: 1px 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-base); color: var(--text-primary); word-break: break-all; overflow-wrap: anywhere; white-space: normal; }
+.dd-peers-member > .dd-actions { margin-left: auto; flex: none; }
+.dd-peers .btn.dd-btn-secondary { border: 1px solid var(--border); border-radius: 6px; background: var(--bg-elevated); color: var(--text-primary); font-weight: 500; cursor: pointer; }
+.dd-peers .btn.dd-btn-secondary:hover:not(:disabled) { background: var(--bg-hover); border-color: var(--border-strong, var(--border)); }
+.dd-peers .btn.dd-btn-secondary:disabled { opacity: 0.5; cursor: default; }
 .dd-peers-note { font-size: 12px; line-height: 1.5; }
 
 /* ── Banners, empty states ──────────────────────────────────────────── */

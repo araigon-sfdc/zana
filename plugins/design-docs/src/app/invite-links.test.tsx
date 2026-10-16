@@ -117,6 +117,17 @@ describe('invitation delivery: copy', () => {
 describe('invitation format: join side', () => {
   const field = () => screen.findByLabelText('Paste invitation') as Promise<HTMLInputElement>;
 
+  it('Join confirmation keeps the fingerprint inline in a wrapping chip with no stray period', async () => {
+    const { harness } = mount();
+    harness.render(<PeerSettings />);
+    fireEvent.change(await field(), { target: { value: TOKEN } });
+    const note = await screen.findByRole('status');
+    expect(note.className).toBe('dd-peers-confirm');
+    const chip = note.querySelector('code.dd-fp')!;
+    expect(chip.textContent).toBe('ABCD-1234');
+    expect(note.textContent).toBe('Join Work Mac? Its fingerprint is ABCD-1234 Check that it matches the other computer, then choose Join peer.');
+  });
+
   it('shows the helper and accepts a raw code, a link, and an opaque code the server will judge', async () => {
     const { harness, redeem } = mount();
     harness.render(<PeerSettings />);

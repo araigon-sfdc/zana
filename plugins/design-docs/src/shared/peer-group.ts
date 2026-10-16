@@ -55,6 +55,17 @@ export interface GroupJob {
   error: string | null;
 }
 
+/** Why peer lifecycle is unavailable. Codes only; the UI turns them into an actionable sentence. */
+export type PeerLifecycleReason = 'encryption-unavailable' | 'insecure-backend' | 'keychain-denied' | 'storage-permissions'
+  | 'key-missing' | 'key-corrupt' | 'core-unsupported' | 'unknown';
+
+/** Result of the per-computer Repair action. `detail` is a non-secret sentence for the owner. */
+export interface RepairResult {
+  outcome: 'already-synced' | 'sync-enabled' | 'relinked' | 'unavailable';
+  detail: string | null;
+  reason: PeerLifecycleReason | null;
+}
+
 export interface GroupStatus {
   configured: boolean;
   repoId: string;
@@ -66,6 +77,8 @@ export interface GroupStatus {
   enrolled: Array<{ id: string; name: string; connected: boolean }>;
   setup: { peerId: string; repoId: string; state: 'pending' | 'joining'; error: string | null } | null;
   lifecycleAvailable: boolean;
+  /** Set when `lifecycleAvailable` is false: the real cause, when core reported one. */
+  lifecycleReason?: PeerLifecycleReason | null;
   introductionsAvailable: boolean;
   installerAvailable: false;
 }

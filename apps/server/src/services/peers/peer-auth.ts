@@ -18,6 +18,11 @@ export interface PeerKeyProvider {
 
 /** Key backend may become available later; authenticated storage failures are not availability. */
 export class PeerKeyUnavailableError extends Error {}
+/** Machine-readable cause suffix (a code from protected-key, never a secret) so plugins can show a truthful message. */
+export const peerKeyReasonSuffix = (error: unknown): string => {
+  const reason = (error as { reason?: unknown } | null)?.reason;
+  return typeof reason === 'string' && /^[a-z-]{1,40}$/.test(reason) ? ` [reason=${reason}]` : '';
+};
 
 export interface PeerRequestFields {
   protocolVersion: 2;
@@ -152,7 +157,7 @@ export class PrivatePeerStorage<T> {
     return serializePeerStorage(this.directory, async () => {
       if (this.disposed) throw new Error('peer storage disposed');
       let supplied;
-      try { supplied = await this.provider?.getKey(); } catch { throw new PeerKeyUnavailableError('peer encryption key unavailable'); }
+      try { supplied = await this.provider?.getKey(); } catch (error) { throw new PeerKeyUnavailableError(`peer encryption key unavailable${peerKeyReasonSuffix(error)}`); }
       if (!supplied || supplied.byteLength !== 32) throw new PeerKeyUnavailableError('peer encryption key or local identity unavailable');
       if (!PEER_ID.test(this.identity)) throw new Error('peer local identity unavailable');
       const key = Buffer.from(supplied);

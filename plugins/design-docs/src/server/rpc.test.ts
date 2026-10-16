@@ -453,7 +453,7 @@ describe('Design Docs RPC', () => {
     expect(method.mock.calls.map(([name]) => name)).not.toContain('agentSettings');
     expect(method.mock.calls.map(([name]) => name)).not.toContain('setAgentSettings');
     expect(method.mock.calls.map(([name]) => name)).not.toContain('agentHarnesses');
-    expect(method).toHaveBeenCalledTimes(51);
+    expect(method).toHaveBeenCalledTimes(52);
   });
 });
 
@@ -470,6 +470,7 @@ describe('Design Docs invitation RPC handlers', () => {
       decideInvitation: vi.fn(async () => ({ invitationId: 'inv-1', state: 'consented' })),
       cancelInvitation: vi.fn(async () => undefined),
       reconnect: vi.fn(async () => [{ pairingId: 'p' }]),
+      repair: vi.fn(async () => ({ outcome: 'sync-enabled', detail: null, reason: null })),
       outOfSync: vi.fn(async () => true),
       notifyStateChanged: vi.fn(async () => undefined)
     };
@@ -483,7 +484,7 @@ describe('Design Docs invitation RPC handlers', () => {
     const handlers = createRpcHandlers({ store: new DesignDocStore(createTestDatabase()), changed: vi.fn(), sdk: {} as never });
     const calls: Array<[string, unknown]> = [['inviteState', undefined], ['createInvitation', undefined], ['openInvitation', undefined], ['redeemInvitation', { token: TOKEN }],
       ['invitationApproval', { invitationId: 'i' }], ['decideInvitation', { invitationId: 'i', decision: 'denied' }], ['cancelInvitation', { invitationId: 'i' }],
-      ['reconnectPeer', { peerId: 'p' }], ['peersOutOfSync', undefined]];
+      ['reconnectPeer', { peerId: 'p' }], ['repairPeer', { peerId: 'p' }], ['peersOutOfSync', undefined]];
     for (const [name, args] of calls) expect(await reject(() => handlers[name]!(args)), name).toBe('database group setup is unavailable');
   });
 
@@ -518,7 +519,9 @@ describe('Design Docs invitation RPC handlers', () => {
     expect(pairing.invitationApproval).toHaveBeenCalledExactlyOnceWith('inv-1');
     expect(pairing.cancelInvitation).toHaveBeenCalledExactlyOnceWith('inv-1');
     expect(pairing.reconnect).toHaveBeenCalledExactlyOnceWith('app-b');
-    for (const [name, key] of [['invitationApproval', 'invitationId'], ['cancelInvitation', 'invitationId'], ['reconnectPeer', 'peerId']] as const) {
+    await expect(handlers.repairPeer!({ peerId: 'app-b' })).resolves.toMatchObject({ outcome: 'sync-enabled' });
+    expect(pairing.repair).toHaveBeenCalledExactlyOnceWith('app-b');
+    for (const [name, key] of [['invitationApproval', 'invitationId'], ['cancelInvitation', 'invitationId'], ['reconnectPeer', 'peerId'], ['repairPeer', 'peerId']] as const) {
       expect(await reject(() => handlers[name]!({}))).toBe(`${key} is required`);
       expect(await reject(() => handlers[name]!({ [key]: ' ' }))).toBe(`${key} is required`);
       expect(await reject(() => handlers[name]!({ [key]: 'x', token: TOKEN }))).toBe(`accepts only ${key}`);

@@ -226,9 +226,14 @@ pairing.
   Settings → Peers → **Add peer**. Copy the generated invitation code. On the other
   computer, go to Design Docs → Settings → Peers → **Join peer** and paste it.
   The remote side connects directly to the first computer's SSH server using
-  a restricted per-link key that is generated for just this pair. Both owners
-  see an approval prompt showing the other computer's name and fingerprint. Compare the fingerprints; if they match, click **Approve**. An
-  invitation works once and expires after **10 minutes**.
+  a restricted per-link key that is generated for just this pair. Only the
+  owner of the computer that clicked **Add peer** approves: that computer shows an
+  approval prompt with the other computer's name and fingerprint. Compare the
+  fingerprints; if they match, click **Approve**. The computer that pastes the
+  invitation shows no approval prompt, because pasting it is that owner's consent
+  (it can still **Cancel**). The invitation code is a bearer token, so treat it like
+  a password; the approval is the check on who actually redeemed it, and a pairing
+  never grants execution authority. An invitation works once and expires after **10 minutes**.
 - **Invitation formats.** An invitation is handed over either as a **code** (paste)
   or as a **link** (clickable), and both carry the same content. After **Add peer**
   the panel shows **Copy link** (`zana://plugin/design-docs/join?d=<code>`; `zana-dev://`
@@ -238,8 +243,8 @@ pairing.
   scheme (E2E, older hosts) or the code is too long for a link (4096 characters).
   Opening a link, or pasting one into **Join peer**, never joins by itself: it opens
   Settings → Peers with the field filled in and asks **Join &lt;computer&gt;?** with the
-  computer name and fingerprint; you still click **Join peer**, and both owners
-  still approve. A malformed or expired link shows an error and changes nothing.
+  computer name and fingerprint; you still click **Join peer**, and the owner who
+  created the invitation still approves. A malformed or expired link shows an error and changes nothing.
   The field accepts a raw code or a full link ("Paste an invitation code or link.").
   Dev testing: macOS cannot register a scheme for an unpackaged dev Electron, so
   run `pnpm dev:open-link "zana-dev://plugin/design-docs/join?d=<code>"` to deliver
@@ -250,8 +255,8 @@ pairing.
   to it and opens a reverse tunnel, so the first computer never needs SSH access to
   the second. The invitation contains the first computer's hostname, port, SSH host
   key (pinned, so there is no trust prompt) and a temporary key valid for 10 minutes.
-  Those keys only allow port forwarding to Zana's peer port; no shell. After both
-  owners approve, the temporary key is replaced by a key generated for just this
+  Those keys only allow port forwarding to Zana's peer port; no shell. After the
+  inviting owner approves, the temporary key is replaced by a key generated for just this
   link. Your own SSH keys and `~/.ssh/config` are never used or changed. Removing
   the peer removes its key line.
 - **Security limits.** The key line restricts TCP forwarding and runs no shell, but
@@ -276,7 +281,14 @@ pairing.
   with its name, one status line (Connected, Reconnecting, Paused or Disconnected with
   the reason), **Reconnect** when it is down, and **Remove**. A finished invitation
   disappears once the computer is linked. Group-wide **Remove Member** and **Leave
-  Group** appear only when the group has three or more computers. The **Sync** button
+  Group** appear only when the group has three or more computers.
+  A card reads **Linked, sync not set up** when the connection works but the
+  computer is not in the sync group. It shows the real cause when sync cannot start
+  (for example the system keychain denied access: allow Zana access or unlock it, then
+  restart Zana) and has a **Repair** button. **Repair** retries database sync setup for
+  that one computer and, if that fails, re-links only that connection; it never touches
+  other computers and grants no execution access. Cancelled, denied, expired or failed
+  invitations for a computer that is linked are hidden. The **Sync** button
   in the doc list shows how many computers are syncing, including this one.
 - **Where links appear.** **Settings → Machines** lists execution machines only.
   **Settings → Peers** lists every peer link and its state (Connected, Connecting,

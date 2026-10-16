@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PluginInvitationStatus, PluginPeerLink, PluginPeerRequest, PluginSdkPeers } from '@zana-ai/zcc-plugin-sdk/server';
-import { bootstrapScope, DesignDocPairing, INVITE_UNSUPPORTED_REASON, inviteCapability } from './pairing.js';
+import { bootstrapScope, DesignDocPairing, INVITE_UNSUPPORTED_REASON, inviteCapability, lifecycleReasonOf } from './pairing.js';
 import { capacityRequestId, DesignDocPeerGroup } from './peer-group.js';
 import { DesignDocStore } from './store.js';
 import { createTestDatabase } from './test-db.js';
@@ -688,12 +688,109 @@ describe('DD invitation pairing', () => {
     const [item] = (await a.pairing.inviteState()).invitations;
     expect(item).toMatchObject({ awaitingMyApproval: false, state: 'consented' });
     calls.invitationStatus.mockRejectedValue(new Error('poll failed'));
-    expect((await a.pairing.inviteState()).invitations[0]).toMatchObject({ state: 'reserved', awaitingMyApproval: true, peer: { name: 'Laptop', fingerprint: 'FFFF' }, consentExpiresAt: 5 });
+    // A redeemer never owes an approval, even before its implicit decision is recorded.
+    expect((await a.pairing.inviteState()).invitations[0]).toMatchObject({ state: 'reserved', awaitingMyApproval: false, peer: { name: 'Laptop', fingerprint: 'FFFF' }, consentExpiresAt: 5 });
     calls.peerLinks.mockRejectedValue(new Error('links down'));
     expect((await a.pairing.inviteState()).links).toEqual([]);
     const inviter = invitation({ state: 'reserved', redeemerDecision: 'approved' });
     calls.listInvitations.mockResolvedValue([inviter]);
     expect((await a.pairing.inviteState()).invitations[0]).toMatchObject({ awaitingMyApproval: true, theirDecision: 'approved' });
+  });
+
+  it('lifecycle failure carries the real cause code and is logged with it', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const net = network(), a = net.app('a');
+      a.peers.list = vi.fn(async () => { throw new Error('peer encryption key unavailable [reason=keychain-denied]'); });
+      expect(await a.pairing.status()).toMatchObject({ lifecycleAvailable: false, lifecycleReason: 'keychain-denied' });
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('peer lifecycle unavailable (keychain-denied)'));
+      await a.pairing.status();
+      expect(warn).toHaveBeenCalledTimes(1);
+      a.peers.list = vi.fn(async () => { throw new Error('something odd'); });
+      expect(await a.pairing.status()).toMatchObject({ lifecycleReason: 'unknown' });
+      a.peers.list = vi.fn(async () => { throw new Error('x [reason=../../etc]'); });
+      expect(await a.pairing.status()).toMatchObject({ lifecycleReason: 'unknown' });
+      const net2 = network(), c = net2.app('c');
+      c.peers.features = async () => ({ lifecycle: false, introductions: false, installer: false });
+      expect(await c.pairing.status()).toMatchObject({ lifecycleAvailable: false, lifecycleReason: 'core-unsupported' });
+      expect(lifecycleReasonOf('plain string')).toBe('unknown');
+    } finally { warn.mockRestore(); }
+  });
+
+  it('logs an automatic enable failure once and shows it as enableError', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const net = network(), a = net.app('a'), b = net.app('b'); net.link(a, b);
+      withInvites(a, { list: [ready('b')], links: [link()] });
+      vi.spyOn(a.peers, 'enable').mockRejectedValue(new Error('keychain locked'));
+      await a.pairing.inviteState();
+      await vi.waitFor(async () => expect((await a.pairing.inviteState()).enableError).toBe('keychain locked'));
+      await a.pairing.inviteState();
+      expect(warn.mock.calls.filter(([text]) => String(text).includes('automatic database sync enable failed: keychain locked'))).toHaveLength(1);
+    } finally { warn.mockRestore(); }
+  });
+
+  describe('repair', () => {
+    it('refuses a computer without a live linked connection and needs the invite surface', async () => {
+      const net = network(), a = net.app('a'); net.link(a, net.app('b'));
+      await expect(a.pairing.repair('b')).rejects.toThrow('host cannot invite peers');
+      withInvites(a, { links: [link({ phase: 'failed', state: 'disconnected' })] });
+      await expect(a.pairing.repair('b')).rejects.toThrow('no linked connection');
+      await expect(a.pairing.repair('bad id')).rejects.toThrow();
+    });
+
+    it('re-tries enabling sync, then is idempotent', async () => {
+      const net = network(), a = net.app('a'), b = net.app('b'); net.link(a, b);
+      const calls = withInvites(a, { links: [link()] });
+      await expect(a.pairing.repair('b')).resolves.toEqual({ outcome: 'sync-enabled', detail: null, reason: null });
+      expect(calls.reconnectPeer).not.toHaveBeenCalled();
+      expect(a.group.consent()).toMatchObject({ peerId: 'b' });
+      await expect(a.pairing.repair('b')).resolves.toMatchObject({ outcome: 'sync-enabled' });
+      expect(calls.reconnectPeer).not.toHaveBeenCalled();
+      // An established member is left alone.
+      const net2 = network(), c = net2.app('c'), d = net2.app('d'); await net2.found(c, d);
+      const calls2 = withInvites(c, { links: [link({ peerInstanceId: 'd' })] });
+      await expect(c.pairing.repair('d')).resolves.toEqual({ outcome: 'already-synced', detail: null, reason: null });
+      expect(calls2.reconnectPeer).not.toHaveBeenCalled();
+    });
+
+    it('re-links only that connection when enabling fails, then retries once', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const net = network(), a = net.app('a'), b = net.app('b'); net.link(a, b);
+        const calls = withInvites(a, { links: [link()] });
+        vi.spyOn(a.peers, 'enable').mockRejectedValueOnce(new Error('pair store busy'));
+        await expect(a.pairing.repair('b')).resolves.toMatchObject({ outcome: 'relinked' });
+        expect(calls.reconnectPeer).toHaveBeenCalledExactlyOnceWith('b', { signal: expect.any(AbortSignal) });
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('repair: enable failed, re-linking: pair store busy'));
+      } finally { warn.mockRestore(); }
+    });
+
+    it('reports the cause when re-linking fails too, without touching other computers', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const net = network(), a = net.app('a'), b = net.app('b'); net.link(a, b);
+        const calls = withInvites(a, { links: [link()] });
+        vi.spyOn(a.peers, 'enable').mockRejectedValue(new Error('pair store busy'));
+        calls.reconnectPeer.mockRejectedValueOnce(new Error('ssh down'));
+        await expect(a.pairing.repair('b')).resolves.toEqual({ outcome: 'unavailable', detail: 'ssh down', reason: null });
+        calls.reconnectPeer.mockResolvedValueOnce([link()]);
+        await expect(a.pairing.repair('b')).resolves.toMatchObject({ outcome: 'unavailable', detail: 'pair store busy' });
+        expect(calls.reconnectPeer.mock.calls.every(([peerId]) => peerId === 'b')).toBe(true);
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('repair: re-link failed: ssh down'));
+      } finally { warn.mockRestore(); }
+    });
+
+    it('does not re-link while the protected key is unusable; it returns the cause', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const net = network(), a = net.app('a'), b = net.app('b'); net.link(a, b);
+        const calls = withInvites(a, { links: [link()] });
+        a.peers.list = vi.fn(async () => { throw new Error('peer encryption key unavailable [reason=key-missing]'); });
+        await expect(a.pairing.repair('b')).resolves.toEqual({ outcome: 'unavailable', detail: null, reason: 'key-missing' });
+        expect(calls.reconnectPeer).not.toHaveBeenCalled();
+      } finally { warn.mockRestore(); }
+    });
   });
 
   it('passes owner actions through with the plugin scope and owner proof only for approval', async () => {

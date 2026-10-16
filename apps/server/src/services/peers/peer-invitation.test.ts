@@ -120,7 +120,9 @@ async function world() {
     return node;
   };
 
+  /** Inviter: owner approval with proof. Redeemer: no approval exists (pasting the invitation is consent); just flush its implicit decision. */
   const approve = async (node: Node, invitationId: string) => {
+    if ((await node.svc.status({ pluginId: PLUGIN, invitationId })).role === 'redeemer') return node.svc.poll({ pluginId: PLUGIN, invitationId });
     const request = await node.svc.approvalRequest({ pluginId: PLUGIN, invitationId });
     return node.svc.decide({ pluginId: PLUGIN, invitationId, decision: 'approved', ownerProof: owner.sign(PLUGIN, request.binding) });
   };
@@ -131,6 +133,8 @@ async function world() {
     const first = await redeemer.svc.redeem({ pluginId: PLUGIN, token: created.token });
     redeemer.refs.set(created.invitationId, { hostId: randomUUID(), recipientId: inviter.id });
     await redeemer.svc.nudge(created.invitationId);
+    // The redeemer's implicit decision is queued as soon as it is reserved; flush it instead of waiting for the pump timer.
+    await redeemer.svc.poll({ pluginId: PLUGIN, invitationId: created.invitationId });
     return { created, first, view: () => redeemer.svc.status({ pluginId: PLUGIN, invitationId: created.invitationId }) };
   };
 
@@ -273,12 +277,18 @@ describe('PeerInvitations v3', () => {
 
     red.refs.set(created.invitationId, { hostId: randomUUID(), recipientId: inv.id });
     await red.svc.nudge(created.invitationId);
+    await red.svc.poll({ pluginId: PLUGIN, invitationId: created.invitationId });
     const reservedRed = await w.status(red, created.invitationId);
     const reservedInv = await w.status(inv, created.invitationId);
     expect(reservedRed).toMatchObject({ role: 'redeemer', state: 'reserved', peer: { instanceId: inv.id, name: 'Computer inv' } });
     expect(reservedInv).toMatchObject({ role: 'inviter', state: 'reserved', peer: { instanceId: red.id }, pairingId: reservedRed.pairingId, consentDigest: reservedRed.consentDigest });
     expect(reservedInv.consentExpiresAt).toBe(w.clock.now + INVITATION_LIMITS.consentWindowMs);
     expect(await inv.svc.listConsented()).toEqual([]);
+    // The redeemer pasted the invitation: that is its consent, so it has no approval to give and no sheet to show.
+    expect(reservedRed).toMatchObject({ redeemerDecision: 'approved', inviterDecision: 'pending' });
+    expect(reservedInv.redeemerDecision).toBe('approved');
+    expect(await code(red.svc.approvalRequest({ pluginId: PLUGIN, invitationId: created.invitationId }))).toBe('not_ready');
+    expect(await code(red.svc.decide({ pluginId: PLUGIN, invitationId: created.invitationId, decision: 'approved', ownerProof: w.owner.sign(PLUGIN, { action: 'peer.invitation.approve' }) }))).toBe('not_ready');
 
     // Approve needs an owner proof bound to this record.
     expect(await code(inv.svc.decide({ pluginId: PLUGIN, invitationId: created.invitationId, decision: 'approved' }))).toBe('owner_proof_required');
@@ -290,11 +300,11 @@ describe('PeerInvitations v3', () => {
     const proof = w.owner.sign(PLUGIN, request.binding);
     expect((await inv.svc.decide({ pluginId: PLUGIN, invitationId: created.invitationId, decision: 'approved', ownerProof: proof })).inviterDecision).toBe('approved');
     expect(await code(inv.svc.decide({ pluginId: PLUGIN, invitationId: created.invitationId, decision: 'approved', ownerProof: proof }))).toBe('not_ready');
-    expect((await w.status(inv, created.invitationId)).state).toBe('reserved');
+    // The redeemer's implicit decision was already delivered, so the inviter's approval completes consent on its own side.
+    expect((await w.status(inv, created.invitationId)).state).toBe('consented');
 
-    // Redeemer polls (learns inviter approved), approves; the decision is delivered immediately.
-    expect((await red.svc.poll({ pluginId: PLUGIN, invitationId: created.invitationId })).inviterDecision).toBe('approved');
-    const done = await w.approve(red, created.invitationId);
+    // Redeemer polls and learns the inviter approved; it never approves anything itself.
+    const done = await red.svc.poll({ pluginId: PLUGIN, invitationId: created.invitationId });
     expect(done).toMatchObject({ state: 'consented', inviterDecision: 'approved', redeemerDecision: 'approved' });
     expect((await w.status(inv, created.invitationId)).state).toBe('consented');
     expect(inv.consented).toHaveLength(1);
@@ -591,22 +601,23 @@ describe('PeerInvitations v3', () => {
       expect(red.terminated).toHaveLength(1);
     });
 
-    it('redeemer deny ends locally, remote abort ends the inviter once, extra aborts are no-ops', async () => {
+    it('redeemer cancel ends locally, remote abort ends the inviter once, extra aborts are no-ops', async () => {
       const w = await world();
       const inv = w.make('inv'), red = w.make('red');
       const r = await w.reserve(inv, red);
       const id = r.created.invitationId;
       const sent = red.sent.length;
-      const denied = await red.svc.decide({ pluginId: PLUGIN, invitationId: id, decision: 'denied' });
-      expect(denied).toMatchObject({ state: 'denied', redeemerDecision: 'denied' });
-      expect(red.terminated).toEqual([[id, 'redeemer', 'denied']]);
+      // Pasting the invitation already consented, so a redeemer-side deny is not offered: cancel is its way out.
+      expect(await code(red.svc.decide({ pluginId: PLUGIN, invitationId: id, decision: 'denied' }))).toBe('not_ready');
+      const cancelled = await red.svc.cancel({ pluginId: PLUGIN, invitationId: id });
+      expect(cancelled).toMatchObject({ state: 'cancelled', reason: 'cancelled' });
+      expect(red.terminated).toEqual([[id, 'redeemer', 'cancelled']]);
       expect(red.sent.length).toBe(sent);
-      await inv.svc.terminateRemote(id, 'denied');
-      expect(await w.status(inv, id)).toMatchObject({ state: 'denied', reason: 'denied' });
       await inv.svc.terminateRemote(id, 'cancelled');
+      expect(await w.status(inv, id)).toMatchObject({ state: 'cancelled', reason: 'cancelled' });
+      await inv.svc.terminateRemote(id, 'denied');
       await inv.svc.terminateRemote('missing', 'cancelled');
-      expect(inv.terminated).toEqual([[id, 'inviter', 'denied']]);
-      expect(await code(red.svc.decide({ pluginId: PLUGIN, invitationId: id, decision: 'denied' }))).toBe('denied');
+      expect(inv.terminated).toEqual([[id, 'inviter', 'cancelled']]);
     });
 
     it('cancel is owner-local, idempotent, and the redeemer learns the real reason from a stale decision', async () => {
@@ -620,7 +631,6 @@ describe('PeerInvitations v3', () => {
 
       const r = await w.reserve(inv, red);
       const id = r.created.invitationId;
-      await w.approve(inv, id);
       await inv.svc.cancel({ pluginId: PLUGIN, invitationId: id });
       // Redeemer still thinks reserved: its approval delivery is answered with the signed cancelled receipt.
       const after = await w.approve(red, id);
@@ -1010,16 +1020,17 @@ describe('PeerInvitations v3', () => {
       expect(await code(red.svc.refresh({ pluginId: PLUGIN, invitationId: 'missing' }))).toBe('not_found');
     });
 
-    it('an undelivered decision is requeued and ends in consent after the inviter catches up', async () => {
+    it('an undelivered implicit decision is requeued and ends in consent after the inviter catches up', async () => {
       const w = await world();
       const inv = w.make('inv'), red = w.make('red');
+      red.intercept = async (kind, _body, real) => (kind === 'exchange' ? { status: 500, body: null } : real());
       const c = await w.reserve(inv, red);
       const id = c.created.invitationId;
-      red.offline = true;
-      const pending = await w.approve(red, id);
+      const pending = await red.svc.poll({ pluginId: PLUGIN, invitationId: id });
       expect(pending).toMatchObject({ state: 'reserved', redeemerDecision: 'approved', reason: 'unreachable' });
+      expect((await w.status(inv, id)).redeemerDecision).toBe('pending');
       await w.approve(inv, id);
-      red.offline = false;
+      red.intercept = undefined;
       w.clock.now += 60_000;
       const after = await red.svc.poll({ pluginId: PLUGIN, invitationId: id });
       expect(after.state).toBe('consented');

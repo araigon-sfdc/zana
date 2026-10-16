@@ -78,13 +78,12 @@ async function approveInUi(app: AppHandle): Promise<void> {
   await expect.poll(() => sheet<boolean>(`(() => { const button = document.getElementById('approve'); if (!button.disabled) setTimeout(() => button.click(), 0); return true; })()`), { timeout: 15_000 }).toBeNull();
 }
 
-/** Redeemer joins and approves first; the inviter approves once the redeemer is waiting on it; both reach Ready. */
+/** Redeemer joins (pasting is its consent, no approval); only the inviter approves; both reach Ready. */
 async function pair(inviter: AppHandle, redeemer: AppHandle, label: string, sshd: { port: number; hostKey: string }, inviterConnected: number): Promise<void> {
   await joinPeer(redeemer, await addPeer(inviter, sshd));
   const redeemerList = (await openPeers(redeemer)).getByLabel('Pairing');
-  await expect(redeemerList).toContainText(/Pending: contacting the other computer\.|Approve pairing with /, { timeout: 60_000 });
-  await approveInUi(redeemer);
-  await expect(redeemerList).toContainText(/Awaiting the other owner's approval for |Approved\. Connecting to /, { timeout: 60_000 });
+  await expect(redeemerList).toContainText(/Pending: contacting the other computer\.|Awaiting the other owner's approval for |Approved\. Connecting to /, { timeout: 60_000 });
+  await expect(redeemerList.getByRole('button', { name: 'Approve', exact: true })).toHaveCount(0);
   // Both Peers views stay open: concurrent automatic Enable is resolved by the initiator tie-break.
   await approveInUi(inviter);
   // The Ready row clears itself once the link exists; the inviter's computer cards carry the result.
@@ -152,7 +151,7 @@ test('three apps pair by invitation over a private sshd; C joins via an invitati
     await expectForwardOnly(a, forwardAB.a);
     await expectForwardOnly(b, forwardAB.b);
 
-    // C pastes an invitation copied from B; B and C approve. B is the sponsor: C joins the existing group.
+    // C pastes an invitation copied from B; only B (the inviter) approves. B is the sponsor: C joins the existing group.
     step('C joins via B');
     await pair(b, c, 'B-C', sshd, 2);
     await expect.poll(async () => (await Promise.all([a, b, c].map(members))).join(','), { timeout: 180_000 }).toBe('3,3,3').catch(async error => {

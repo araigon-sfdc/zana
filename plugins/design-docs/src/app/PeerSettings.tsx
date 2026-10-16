@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
-import type { GroupStatus } from '../shared/peer-group.js';
+import type { GroupStatus, PeerLifecycleReason, RepairResult } from '../shared/peer-group.js';
 import { experimental_requestApproval, useRealtime, useZccDeepLinks, type PluginApprovalResult } from '@zana-ai/zcc-plugin-sdk/app';
 import { PEER_STATE_CHANNEL, PLUGIN_ID } from '../shared/contract.js';
 import { errorMessage, toast, useApi, type InviteItem, type InviteView, type PeerLink, type PeerStatus } from './api.js';
@@ -183,6 +183,20 @@ const LINK_REASON_TEXT: Record<NonNullable<PeerLink['reason']>, string> = {
   paused: 'Disconnected on this computer. Reconnect from Settings → Peers.',
   revoked: 'the link was revoked'
 };
+/** Actionable sentence for why database sync cannot start, from the reason core reported (never a guess). */
+export function lifecycleText(reason: PeerLifecycleReason | null | undefined): string {
+  switch (reason) {
+    case 'keychain-denied': return 'Zana could not use the system keychain. Allow Zana access to the keychain (or unlock it), then restart Zana.';
+    case 'encryption-unavailable': return 'Secure key storage is not available on this computer. Unlock or enable the system keychain, then restart Zana.';
+    case 'insecure-backend': return 'This computer only offers plain-text key storage, which Zana will not use. Install and unlock a keyring (libsecret or KWallet), then restart Zana.';
+    case 'storage-permissions': return 'Zana cannot safely read its peer key folder. Make the Zana data folder private to your user (no group or world write access), then restart Zana.';
+    case 'key-missing': return 'Zana has existing paired computers but its protected key is missing, so it will not create a new one. Remove the links and pair again.';
+    case 'key-corrupt': return 'Zana\'s protected peer key could not be read. Remove the links and pair again.';
+    case 'core-unsupported': return 'This Zana version does not support database sync between computers. Update Zana.';
+    default: return 'Database sync cannot start on this app. The reason was not reported; see the Zana log for "[design-docs] peer lifecycle unavailable".';
+  }
+}
+
 const TERMINAL = new Set(['ready', 'denied', 'cancelled', 'expired', 'failed']);
 /** Terminal outcomes a fresh invitation fixes: offer it in one click. */
 const RENEWABLE = new Set(['expired', 'attempt_limit', 'already_redeemed']);
@@ -249,8 +263,11 @@ function InvitePanel({ invites, onChanged, requestApproval, joinRequest, onJoinR
   // A finished pairing clears itself once its link exists (the computer card carries it from there); Dismiss stays only
   // for a 'ready' row that has no link to take over.
   const linked = new Set((invites?.links ?? []).filter((link) => link.phase !== 'failed').map((link) => link.peerInstanceId));
+  // A cancelled / denied / expired / failed attempt is history once that computer has a live linked connection.
+  const connected = new Set((invites?.links ?? []).filter((link) => link.phase === 'linked').map((link) => link.peerInstanceId));
   const items = (invites?.invitations ?? []).filter((item) => !dismissed.includes(item.invitationId)
-    && !(item.state === 'ready' && item.peer && linked.has(item.peer.instanceId)));
+    && !(item.state === 'ready' && item.peer && linked.has(item.peer.instanceId))
+    && !(TERMINAL.has(item.state) && item.state !== 'ready' && item.peer && connected.has(item.peer.instanceId)));
   // The token is shown only while the invitation is open; any later state (or expiry) clears it.
   const live = created ? invites?.invitations.find((item) => item.invitationId === created.invitationId) : undefined;
   useEffect(() => { if (created && live && live.state !== 'open') setCreated(null); }, [created, live]);
@@ -327,7 +344,7 @@ function InvitePanel({ invites, onChanged, requestApproval, joinRequest, onJoinR
   return (
     <div className="dd-peers-guide" aria-label="Pair a peer">
       <h5 className="dd-peers-heading">Pair another computer</h5>
-      <p>Pair two Zana apps without any machine setup. On one computer choose <strong>Add peer</strong>, then send the link (clickable) or the code to the other computer; there choose <strong>Join peer</strong> and paste either one. On the computer that clicked Add peer, Remote Login must be on (macOS: {REMOTE_LOGIN_PATH}). An invitation works once and must be pasted on the other computer within 10 minutes. After it is pasted, both owners have longer to approve. This invitation is only for setting up the pairing. Once paired, the connection stays up and reconnects by itself.</p>
+      <p>Pair two Zana apps without any machine setup. On one computer choose <strong>Add peer</strong>, then send the link (clickable) or the code to the other computer; there choose <strong>Join peer</strong> and paste either one. On the computer that clicked Add peer, Remote Login must be on (macOS: {REMOTE_LOGIN_PATH}). An invitation works once and must be pasted on the other computer within 10 minutes. After it is pasted, the owner of the computer that clicked Add peer has longer to approve; the pasting computer needs no approval. This invitation is only for setting up the pairing. Once paired, the connection stays up and reconnects by itself.</p>
       <p className="dd-peers-hint">{SAME_NETWORK_NOTE}</p>
       {unavailable ? <p role="note" className="dd-peers-hint">{invites?.reason ? `${invites.reason[0]!.toUpperCase()}${invites.reason.slice(1)}` : 'Host cannot invite peers'}. Your existing sync group keeps working.</p> : null}
       <div className="dd-actions">
@@ -357,7 +374,7 @@ function InvitePanel({ invites, onChanged, requestApproval, joinRequest, onJoinR
       </div>
       <p className="dd-peers-hint">Paste an invitation code or link.</p>
       {pasted?.kind === 'token' ? (
-        <p role="status" className="dd-peers-block">Join {pasted.summary.name}? Its fingerprint is <code>{pasted.summary.fingerprint}</code>. Check that it matches the other computer, then choose Join peer.</p>
+        <p role="status" className="dd-peers-confirm">Join {pasted.summary.name}? Its fingerprint is <code className="dd-fp">{pasted.summary.fingerprint}</code> Check that it matches the other computer, then choose Join peer.</p>
       ) : null}
       {sshGuideFor(error) ? <SshGuideCard guide={sshGuideFor(error)!} /> : error ? <p role="alert" className="dd-banner dd-banner-error">{error}</p> : null}
       {items.length ? (
@@ -391,7 +408,7 @@ function InviteRow({ item, busy, cancelShown, onApprove, onDeny, onCancel, onDis
       <span className="dd-peers-member-name">
         <span role={blocked ? 'alert' : 'status'}>{text}</span>
         {item.state === 'reserved' && item.peer ? (
-          <span className="dd-peers-hint"> {item.peer.name} fingerprint <code>{item.peer.fingerprint}</code>. Confirm this matches the other machine's screen.
+          <span className="dd-peers-hint"> {item.peer.name} fingerprint <code className="dd-fp">{item.peer.fingerprint}</code> Confirm this matches the other machine's screen.
             {item.awaitingMyApproval ? ' Approving allows Design Docs database sync with this peer only.' : ''}
             {item.consentExpiresAt ? ` Approve by ${clockTime(item.consentExpiresAt)}.` : ''}</span>
         ) : null}
@@ -408,7 +425,7 @@ function InviteRow({ item, busy, cancelShown, onApprove, onDeny, onCancel, onDis
           <button type="button" className="btn dd-btn-remove" disabled={busy} onClick={onCancel}>Cancel</button>
         ) : null}
         {renewable(item) ? <button type="button" className="btn" disabled={busy || !canRenew} onClick={onRenew}>Start new invitation</button> : null}
-        {TERMINAL.has(item.state) ? <button type="button" className="btn" onClick={onDismiss}>Dismiss</button> : null}
+        {TERMINAL.has(item.state) ? <button type="button" className="btn dd-btn-secondary" disabled={busy} onClick={onDismiss}>Dismiss</button> : null}
       </span>
     </li>
   );
@@ -442,13 +459,18 @@ function computersOf(links: PeerLink[], status: GroupStatus | null, names: Map<s
 }
 
 /** A computer card's status badge (dot + short label) and, when there is more to say, one detail line. */
-interface ComputerBadge { state: 'connected' | 'reconnecting' | 'paused' | 'disconnected' | 'not-syncing' | 'offline' | 'removing'; label: string; detail?: string }
+interface ComputerBadge { state: 'unsynced' | 'connected' | 'reconnecting' | 'paused' | 'disconnected' | 'not-syncing' | 'offline' | 'removing'; label: string; detail?: string }
 
-function computerStatus({ link, member }: Computer): ComputerBadge {
+function computerStatus({ link, member }: Computer, status: GroupStatus | null): ComputerBadge {
   if (member?.retiring) return { state: 'removing', label: 'Being removed', detail: 'Waiting for committed frontier; data sync disabled' };
   if (link) {
     const reason = link.reason ? LINK_REASON_TEXT[link.reason] : '';
     const sentence = reason ? `${reason[0]!.toUpperCase()}${reason.slice(1)}` : '';
+    // Linked but not in the sync group (and the group state is known): the link works, database sync was never set up.
+    if (link.state === 'connected' && link.phase === 'linked' && status && !member) {
+      return { state: 'unsynced', label: 'Linked, sync not set up',
+        detail: status.lifecycleAvailable ? 'The connection works but database sync is not set up with this computer. Repair retries setup.' : lifecycleText(status.lifecycleReason) };
+    }
     if (link.state === 'connected') return { state: 'connected', label: 'Connected' };
     if (link.state === 'reconnecting') return { state: 'reconnecting', label: 'Reconnecting', detail: sentence || undefined };
     if (link.reason === 'paused') return { state: 'paused', label: 'Paused', detail: sentence };
@@ -465,8 +487,8 @@ function computerStatus({ link, member }: Computer): ComputerBadge {
  * and actions on one row. Reconnect re-keys the link; Remove ends the pairing (the whole group once there are three or
  * more computers). A summary row below states the group size and carries Leave Group.
  */
-function ComputerCards({ computers, status, busy, onReconnect, onRemove }: {
-  computers: Computer[]; status: GroupStatus | null; busy: boolean; onReconnect(id: string): void; onRemove(computer: Computer, scope: 'group' | 'link'): void;
+function ComputerCards({ computers, status, busy, onReconnect, onRepair, onRemove }: {
+  computers: Computer[]; status: GroupStatus | null; busy: boolean; onReconnect(id: string): void; onRepair(id: string): void; onRemove(computer: Computer, scope: 'group' | 'link'): void;
 }) {
   const self = status?.members.find((member) => member.replicaId === status.replicaId);
   const groupSize = status?.configured ? status.members.length : 0;
@@ -482,7 +504,7 @@ function ComputerCards({ computers, status, busy, onReconnect, onRemove }: {
         <ul className="dd-peers-list dd-peers-cards" aria-label="Computers">
           {computers.map((computer) => {
             const { id, name, link, member } = computer;
-            const badge = computerStatus(computer);
+            const badge = computerStatus(computer, status);
             const reconnect = !!link && link.state !== 'connected' && link.reason !== 'revoked' && link.reason !== 'paused';
             // Every card carries an action: a roster entry without a live link is cleared by Remove, never left as a dead card.
             const removable = !member?.retiring;
@@ -493,6 +515,8 @@ function ComputerCards({ computers, status, busy, onReconnect, onRemove }: {
                   <strong className="dd-peers-card-name" title={`Computer id ${id}`}>{name}</strong>
                   <span className="dd-peers-badge" data-state={badge.state} role="status">{badge.label}</span>
                   <span className="dd-peers-card-actions">
+                    {badge.state === 'unsynced' ? <button type="button" className="btn dd-btn-secondary" disabled={busy} onClick={() => onRepair(id)}
+                      title="Retry sync setup with this computer; re-links only this connection if needed.">Repair</button> : null}
                     {reconnect ? <button type="button" className="btn" disabled={busy} onClick={() => onReconnect(id)}>Reconnect</button> : null}
                     {removable ? (
                       <button type="button" className="btn dd-btn-remove" disabled={busy || !lifecycle} onClick={() => onRemove(computer, scope)}
@@ -583,6 +607,18 @@ export function PeerSettings({ requestApproval = experimental_requestApproval, j
     void action().then((value) => { if (mounted.current) setStatus(value); }).catch((failure) => { if (mounted.current) setError(errorMessage(failure)); })
       .finally(() => { if (mounted.current) { setBusy(false); loadInvites(); } });
   };
+  const repairComputer = (id: string) => {
+    setBusy(true);
+    setError(null);
+    void api.repairPeer(id).then((result: RepairResult) => {
+      if (!mounted.current) return;
+      if (result.outcome === 'unavailable') {
+        const cause = result.reason ? lifecycleText(result.reason) : result.detail ?? 'The reason was not reported.';
+        setError(`Repair could not finish: ${cause}${result.reason ? '' : ' Next step: use Reconnect, or remove this computer and add the peer again.'}`);
+      } else toast(result.outcome === 'relinked' ? 'Connection re-linked and sync set up' : 'Sync set up');
+    }).catch((failure) => { if (mounted.current) setError(errorMessage(failure)); })
+      .finally(() => { if (mounted.current) { setBusy(false); loadInvites(); void api.groupStatus().then((value) => { if (mounted.current) setStatus(value); }).catch(() => undefined); } });
+  };
   const removeComputer = (computer: Computer, scope: 'group' | 'link') => {
     const leaving = !!status && computer.member?.replicaId === status.replicaId;
     const message = leaving ? 'Leave the sync group? This computer stops syncing with every other computer in it. If they are offline, leaving finishes when they reconnect.'
@@ -611,7 +647,7 @@ export function PeerSettings({ requestApproval = experimental_requestApproval, j
       <p>Sync this entire Design Docs database with other Zana apps. Existing documents stay local until you use Sync.</p>
       <InvitePanel invites={invites} onChanged={() => { loadInvites(); void api.groupStatus().then((value) => { if (mounted.current) setStatus(value); }).catch(() => undefined); }} requestApproval={requestApproval} joinRequest={joinRequest} onJoinRequestHandled={onJoinRequestHandled} />
       {invites?.enableError ? <p role="alert" className="dd-banner dd-banner-error">{invites.enableError}</p> : null}
-      <ComputerCards computers={computers} status={status} busy={busy} onRemove={removeComputer}
+      <ComputerCards computers={computers} status={status} busy={busy} onRemove={removeComputer} onRepair={repairComputer}
         onReconnect={(id) => { setBusy(true); setError(null); void api.reconnectPeer(id).catch((failure) => { if (mounted.current) setError(errorMessage(failure)); }).finally(() => { if (mounted.current) { setBusy(false); loadInvites(); } }); }} />
       {outOfSync && !dismissed ? (
         <div className="dd-peers-block">
@@ -648,7 +684,7 @@ export function PeerSettings({ requestApproval = experimental_requestApproval, j
             </label>
           ) : null}
           {!status.lifecycleAvailable ? (
-            <p className="dd-peers-hint">Database sync cannot start on this app yet: Core peer lifecycle needs protected key storage. Pairing and Enable Database Sync stay off until it is ready.</p>
+            <p className="dd-peers-hint" role="status">{lifecycleText(status.lifecycleReason)} Pairing and Enable Database Sync stay off until it is ready.</p>
           ) : !status.introductionsAvailable ? (
             <p className="dd-peers-hint">Automatic introductions are unavailable on this app, so new members are not introduced to the rest of the group.</p>
           ) : null}

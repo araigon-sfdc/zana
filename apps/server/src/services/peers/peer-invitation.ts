@@ -616,7 +616,8 @@ export class PeerInvitations {
   async approvalRequest(args: { pluginId: string; invitationId: string }): Promise<PluginApprovalRequest> {
     return this.mutate(undefined, async state => {
       const rec = this.find(state, args.pluginId, args.invitationId);
-      if (rec.state !== 'reserved') throw new InvitationError('not_ready');
+      // Only the inviter's owner approves; the redeemer's consent is the pasted invitation.
+      if (rec.state !== 'reserved' || rec.role !== 'inviter') throw new InvitationError('not_ready');
       return this.approvalFor(rec);
     });
   }
@@ -1125,6 +1126,9 @@ export class PeerInvitations {
     if (!TERMINAL.has(rec.state)) {
       delete rec.reason;
       if (receipt.state === 'denied' || receipt.state === 'cancelled' || receipt.state === 'expired') { this.terminate(rec, receipt.state, receipt.state); return; }
+      // The redeemer's owner already consented by pasting the invitation, so its decision is implicit; only the inviter's
+      // owner approves. Delivered below as the usual signed `decide`, so the inviter's both-decisions fence is unchanged.
+      if (rec.redeemerDecision === 'pending' && (receipt.state === 'reserved' || rec.state === 'reserved')) rec.redeemerDecision = 'approved';
       if (['consented', 'connecting', 'ready'].includes(receipt.state) && rec.redeemerDecision === 'approved' && receipt.redeemerDecision === 'approved') {
         if (rec.state === 'redeeming' || rec.state === 'reserved') rec.state = 'consented';
       } else if (rec.state === 'redeeming') rec.state = 'reserved';

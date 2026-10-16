@@ -411,9 +411,10 @@ it('invites, redeems and decides through the SDK with redacted projections and o
   expect(await pa.decideInvitation!({ invitationId: created.invitationId, decision: 'approved', ownerProof: proof })).toMatchObject({ inviterDecision: 'approved' });
   // Proof is single-use.
   await expect(pa.decideInvitation!({ invitationId: created.invitationId, decision: 'approved', ownerProof: proof })).rejects.toThrow('not ready');
-  // Deny needs no proof and a stray proof is not forwarded.
-  const denied = await pb.decideInvitation!({ invitationId: created.invitationId, decision: 'denied' });
-  expect(denied).toMatchObject({ state: 'denied', reason: 'denied', redeemerDecision: 'denied' });
+  // The redeemer consented by pasting the invitation: it has no approval sheet and cannot approve or deny again.
+  await expect(pb.invitationApproval!({ invitationId: created.invitationId })).rejects.toThrow('not ready');
+  await expect(pb.decideInvitation!({ invitationId: created.invitationId, decision: 'approved', ownerProof: w.sign('sync-plugin', sheet.binding) })).rejects.toThrow('not ready');
+  expect((await pb.invitationStatus!({ invitationId: created.invitationId })).redeemerDecision).toBe('approved');
   await pb.cancelInvitation!({ invitationId: created.invitationId });
   await pb.cancelInvitation!({ invitationId: created.invitationId });
 }, 30_000);

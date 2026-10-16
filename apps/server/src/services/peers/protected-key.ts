@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { link, lstat, mkdir, open, opendir, realpath, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
-import { serializePeerStorage, type PeerKeyProvider } from './peer-auth.js';
+import { peerKeyReasonSuffix, serializePeerStorage, type PeerKeyProvider } from './peer-auth.js';
 
 /** Injected by trusted host composition, never by HTTP or plugin code. */
 export interface PeerCryptoProvider {
@@ -13,32 +13,51 @@ export interface PeerCryptoProvider {
 }
 
 export const PEER_BOOT_KEY_ENV = 'ZCC_PEER_STORAGE_BOOT_KEY';
+/** Boot-only, secret-free: why the desktop could not derive the key (a `PeerKeyReason`). Scrubbed on consumption. */
+export const PEER_KEY_REASON_ENV = 'ZCC_PEER_STORAGE_KEY_REASON';
 const MAX_KEY_FILE_BYTES = 4096;
+
+/** Why the protected peer key cannot be used. Codes only: never key material, paths or OS error text. */
+export const PEER_KEY_REASONS = ['encryption-unavailable', 'insecure-backend', 'keychain-denied', 'storage-permissions', 'key-missing', 'key-corrupt', 'unknown'] as const;
+export type PeerKeyReason = typeof PEER_KEY_REASONS[number];
+export const isPeerKeyReason = (value: unknown): value is PeerKeyReason => typeof value === 'string' && (PEER_KEY_REASONS as readonly string[]).includes(value);
+
+export class PeerKeyReasonError extends Error {
+  constructor(readonly reason: PeerKeyReason) { super(`protected peer storage key unavailable: ${reason}`); }
+}
+export { peerKeyReasonSuffix };
+const fail = (reason: PeerKeyReason): never => { throw new PeerKeyReasonError(reason); };
+const crypto = <T>(run: () => T): T => { try { return run(); } catch { return fail('keychain-denied'); } };
+const classify = (error: unknown): PeerKeyReason => {
+  if (error instanceof PeerKeyReasonError) return error.reason;
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === 'EACCES' || code === 'EPERM' || code === 'ENOENT' || code === 'ENOTDIR' ? 'storage-permissions' : 'unknown';
+};
 
 export function createProtectedPeerKeyProvider(dataDir: string, cryptoProvider?: PeerCryptoProvider): PeerKeyProvider {
   return {
     getKey: async () => {
       let base: string;
       try { base = await realpath(dataDir); }
-      catch { throw new Error('protected peer storage key unavailable'); }
+      catch { throw new PeerKeyReasonError('storage-permissions'); }
       return serializePeerStorage(join(base, 'peer-key'), async () => {
         try {
-        if (!cryptoProvider?.isEncryptionAvailable()) return null;
+        if (!cryptoProvider || !crypto(() => cryptoProvider.isEncryptionAvailable())) return fail('encryption-unavailable');
         const backend = cryptoProvider.getSelectedStorageBackend?.();
         if (backend === 'basic_text' || backend === 'unknown' || (process.platform === 'linux' &&
-          !['gnome_libsecret', 'kwallet', 'kwallet5', 'kwallet6'].includes(backend ?? ''))) return null;
+          !['gnome_libsecret', 'kwallet', 'kwallet5', 'kwallet6'].includes(backend ?? ''))) return fail('insecure-backend');
         const baseInfo = await lstat(base);
-        if (!baseInfo.isDirectory() || baseInfo.uid !== process.getuid?.() || (baseInfo.mode & 0o022) !== 0) throw new Error();
+        if (!baseInfo.isDirectory() || baseInfo.uid !== process.getuid?.() || (baseInfo.mode & 0o022) !== 0) fail('storage-permissions');
         const directory = join(base, 'peer-key');
         await mkdir(directory, { mode: 0o700 }).catch(error => { if (error.code !== 'EEXIST') throw error; });
         const info = await lstat(directory);
-        if (!info.isDirectory() || info.uid !== baseInfo.uid || (info.mode & 0o7777) !== 0o700) throw new Error();
+        if (!info.isDirectory() || info.uid !== baseInfo.uid || (info.mode & 0o7777) !== 0o700) fail('storage-permissions');
         const entries = await opendir(directory), stale: string[] = [];
         let count = 0;
         for await (const entry of entries) {
-          if (++count > 32) throw new Error();
+          if (++count > 32) fail('storage-permissions');
           if (entry.name === 'key.bin') continue;
-          if (!entry.isFile() || !/^key-[0-9a-f-]{36}\.tmp$/.test(entry.name)) throw new Error();
+          if (!entry.isFile() || !/^key-[0-9a-f-]{36}\.tmp$/.test(entry.name)) fail('storage-permissions');
           stale.push(join(directory, entry.name));
         }
         for (const path of stale) await unlink(path);
@@ -50,7 +69,7 @@ export function createProtectedPeerKeyProvider(dataDir: string, cryptoProvider?:
           try {
             const metadata = await handle.stat();
             if (!metadata.isFile() || metadata.nlink !== 1 || metadata.uid !== baseInfo.uid ||
-              (metadata.mode & 0o7777) !== 0o600 || metadata.size < 1 || metadata.size > MAX_KEY_FILE_BYTES) throw new Error();
+              (metadata.mode & 0o7777) !== 0o600 || metadata.size < 1 || metadata.size > MAX_KEY_FILE_BYTES) fail('storage-permissions');
             const bytes = Buffer.alloc(MAX_KEY_FILE_BYTES + 1);
             let length = 0;
             while (length < bytes.length) {
@@ -58,7 +77,7 @@ export function createProtectedPeerKeyProvider(dataDir: string, cryptoProvider?:
               if (!bytesRead) break;
               length += bytesRead;
             }
-            if (length !== metadata.size) throw new Error();
+            if (length !== metadata.size) fail('key-corrupt');
             return bytes.subarray(0, length);
           } finally { await handle.close(); }
         };
@@ -66,11 +85,11 @@ export function createProtectedPeerKeyProvider(dataDir: string, cryptoProvider?:
         if (!sealed) {
           // Losing an established key must not silently reset encrypted pair authority.
           const pairs = await lstat(join(base, 'peer-pairs')).catch(error => { if (error.code !== 'ENOENT') throw error; return null; });
-          if (pairs) throw new Error();
+          if (pairs) fail('key-missing');
           const key = randomBytes(32);
-          try { sealed = cryptoProvider.encryptString(key.toString('base64url')); }
+          try { sealed = crypto(() => cryptoProvider.encryptString(key.toString('base64url'))); }
           finally { key.fill(0); }
-          if (!sealed.length || sealed.length > MAX_KEY_FILE_BYTES) throw new Error();
+          if (!sealed.length || sealed.length > MAX_KEY_FILE_BYTES) fail('keychain-denied');
           const temporary = join(directory, `key-${randomUUID()}.tmp`);
           try {
             const handle = await open(temporary, 'wx', 0o600);
@@ -82,13 +101,13 @@ export function createProtectedPeerKeyProvider(dataDir: string, cryptoProvider?:
           try { await handle.sync(); } finally { await handle.close(); }
           sealed = await read();
         }
-        if (!sealed) throw new Error();
-        const text = cryptoProvider.decryptString(sealed);
-        if (!/^[A-Za-z0-9_-]{43}$/.test(text)) throw new Error();
+        if (!sealed) return fail('key-missing');
+        const text = crypto(() => cryptoProvider.decryptString(sealed));
+        if (!/^[A-Za-z0-9_-]{43}$/.test(text)) return fail('key-corrupt');
         const key = Buffer.from(text, 'base64url');
-        if (key.length !== 32 || key.toString('base64url') !== text) { key.fill(0); throw new Error(); }
+        if (key.length !== 32 || key.toString('base64url') !== text) { key.fill(0); return fail('key-corrupt'); }
         return key;
-        } catch { throw new Error('protected peer storage key unavailable'); }
+        } catch (error) { throw new PeerKeyReasonError(classify(error)); }
       });
     }
   };
@@ -98,10 +117,18 @@ export function createProtectedPeerKeyProvider(dataDir: string, cryptoProvider?:
 export function consumePeerBootKey(env: NodeJS.ProcessEnv = process.env): PeerKeyProvider & { dispose(): void } {
   const text = env[PEER_BOOT_KEY_ENV];
   delete env[PEER_BOOT_KEY_ENV];
+  const supplied = env[PEER_KEY_REASON_ENV];
+  delete env[PEER_KEY_REASON_ENV];
+  const reason: PeerKeyReason | null = isPeerKeyReason(supplied) ? supplied : null;
   const key = text && /^[A-Za-z0-9_-]{43}$/.test(text) ? Buffer.from(text, 'base64url') : null;
   let live = !!key && key.length === 32 && key.toString('base64url') === text;
   return {
-    getKey: async () => live ? Buffer.from(key!) : null,
+    getKey: async () => {
+      if (live) return Buffer.from(key!);
+      // Absent key with a known cause: fail typed so the cause reaches plugins instead of a silent null.
+      if (reason) throw new PeerKeyReasonError(reason);
+      return null;
+    },
     dispose: () => { live = false; key?.fill(0); }
   };
 }

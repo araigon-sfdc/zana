@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { PluginApprovalRequest, PluginInvitationDecision, PluginInvitationReason, PluginInvitationState, PluginInvitationStatus, PluginPeerLink, PluginPeerRequest, PluginSdkPeers, ZccPluginApi } from '@zana-ai/zcc-plugin-sdk/server';
 import { canonicalPeerHash, PeerProtocolError } from '../shared/peer-contract.js';
-import type { GroupRoster, GroupStatus } from '../shared/peer-group.js';
+import type { GroupRoster, GroupStatus, PeerLifecycleReason, RepairResult } from '../shared/peer-group.js';
 import { PEER_CALL_TIMEOUT_MS, PEER_PENDING_TICK_MS } from '../shared/peer-limits.js';
 import { admissionSchema, capacityRequestId, capacitySchema, DesignDocPeerGroup, parseRoster, retirementJobSchema, rosterCovers, type Admission } from './peer-group.js';
 import { historicalMembers, isRetiring, ownedSeats, retirementEvidence } from './peer-slots.js';
@@ -28,6 +28,12 @@ const ACTIVE_INVITATION = new Set<PluginInvitationState>(['open', 'redeeming', '
 const INVITATION_LIST_LIMIT = 6;
 /** Thrown by the core pair store while a link re-key or rotation is in flight; it clears on its own, so it is retried, not shown. */
 const TRANSIENT_PEER_ERROR = 'peer enrollment changed or revoked';
+const LIFECYCLE_REASONS: readonly PeerLifecycleReason[] = ['encryption-unavailable', 'insecure-backend', 'keychain-denied', 'storage-permissions', 'key-missing', 'key-corrupt', 'core-unsupported', 'unknown'];
+/** Core tags key failures as `[reason=code]`; anything else is an unclassified failure. */
+export function lifecycleReasonOf(error: unknown): PeerLifecycleReason {
+  const code = /\[reason=([a-z-]+)\]/.exec(error instanceof Error ? error.message : String(error))?.[1];
+  return LIFECYCLE_REASONS.find((reason) => reason === code) ?? 'unknown';
+}
 const isTransient = (error: unknown): boolean => error instanceof Error && error.message === TRANSIENT_PEER_ERROR;
 /** Cap for the follower's backoff between failed probes of an unreachable initiator. */
 const FOLLOWER_PROBE_MAX_MS = 5 * 60 * 1000;
@@ -76,12 +82,15 @@ function inviteItem(status: PluginInvitationStatus): InviteItem {
   return { invitationId: status.invitationId, role: status.role, state: status.state, reason: status.reason ?? null,
     peer: status.peer ? { instanceId: status.peer.instanceId, name: status.peer.name, fingerprint: status.peer.fingerprint } : null,
     localFingerprint: status.localFingerprint, myDecision, theirDecision: inviter ? status.redeemerDecision : status.inviterDecision,
-    awaitingMyApproval: status.state === 'reserved' && myDecision === 'pending', expiresAt: status.expiresAt, consentExpiresAt: status.consentExpiresAt ?? null };
+    // Only the inviter approves: the redeemer's consent is pasting the invitation.
+    awaitingMyApproval: inviter && status.state === 'reserved' && myDecision === 'pending', expiresAt: status.expiresAt, consentExpiresAt: status.consentExpiresAt ?? null };
 }
 
 export class DesignDocPairing {
   private readonly abort = new AbortController();
   private lifecycleWarning: string | null = null;
+  private lifecycleReason: PeerLifecycleReason | null = null;
+  private readonly logged = new Set<string>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private running: Promise<void> | null = null;
   private enabling: Promise<GroupStatus> | null = null;
@@ -266,6 +275,7 @@ export class DesignDocPairing {
       try { await step(); } catch (error) { this.abort.signal.throwIfAborted(); if (!isTransient(error)) failure = error; }
     }
     this.setupError = failure ? this.message(failure) : null;
+    if (failure) this.logOnce('setup', `peer setup step failed: ${this.setupError}`);
     return snapshot;
   }
 
@@ -293,7 +303,9 @@ export class DesignDocPairing {
       if (grants.some((grant) => grant.id === peerId && grant.scope === roster.repoId)) continue;
       if (this.restoring.size >= INVITATION_LIST_LIMIT) this.restoring.clear();
       this.restoring.set(peerId, now + PEER_PENDING_TICK_MS);
-      await this.peers.enable(peerId, { scope: roster.repoId, signal: this.abort.signal }).catch(() => undefined);
+      await this.peers.enable(peerId, { scope: roster.repoId, signal: this.abort.signal }).catch((error) => {
+        this.logOnce(`restore:${peerId}`, `restoring database grant failed: ${this.message(error)}`);
+      });
       return;
     }
   }
@@ -327,7 +339,10 @@ export class DesignDocPairing {
       if (this.enabling || this.revoking || this.group.consent()) return;
       this.following.delete(peerId);
       this.disabledPeers.delete(peerId);
-      void this.enableNow(peerId).then(() => { this.enableError = null; }).catch((error) => { this.enableError = this.message(error); });
+      void this.enableNow(peerId).then(() => { this.enableError = null; }).catch((error) => {
+        this.enableError = this.message(error);
+        this.logOnce(`auto-enable:${peerId}`, `automatic database sync enable failed: ${this.enableError}`);
+      });
       return;
     }
   }
@@ -424,6 +439,56 @@ export class DesignDocPairing {
   }
 
   /**
+   * Owner action on one computer whose link is live but which is not in the sync group. Re-tries enabling sync; if that
+   * fails, re-links only this connection and tries once more. Authorized here (the renderer is untrusted): the peer must
+   * have a live linked pairing. Idempotent, and it only runs the same enable path an invitation does, so it grants no
+   * execution authority and never touches other computers or the key storage.
+   */
+  async repair(peerId: string): Promise<RepairResult> {
+    id.parse(peerId);
+    const peers = this.invitePeers();
+    const links = await peers.peerLinks({ peerId, signal: this.abort.signal });
+    if (!links.some((link) => link.peerInstanceId === peerId && link.phase === 'linked')) {
+      throw new PeerProtocolError('invalid', 'no linked connection to that computer; add the peer again');
+    }
+    const roster = this.group.roster();
+    const member = !!roster && roster.members.some((entry) => entry.machineId === peerId && !isRetiring(roster, entry.replicaId));
+    const status = await this.status();
+    if (member && status.members.some((entry) => entry.machineId === peerId && entry.authorized)) {
+      return { outcome: 'already-synced', detail: null, reason: null };
+    }
+    if (!status.lifecycleAvailable) {
+      // Re-linking cannot help while the key is unusable; say why instead of churning the connection.
+      return { outcome: 'unavailable', detail: null, reason: status.lifecycleReason ?? 'unknown' };
+    }
+    const attempt = async (): Promise<unknown> => { this.disabledPeers.delete(peerId); await this.enableNow(peerId); return null; };
+    try { await attempt(); this.enableError = null; return { outcome: 'sync-enabled', detail: null, reason: null }; }
+    catch (first) {
+      this.abort.signal.throwIfAborted();
+      this.logOnce(`repair-enable:${peerId}`, `repair: enable failed, re-linking: ${this.message(first)}`);
+      try {
+        await peers.reconnectPeer(peerId, { signal: this.abort.signal });
+        await attempt();
+        this.enableError = null;
+        return { outcome: 'relinked', detail: null, reason: null };
+      } catch (second) {
+        this.abort.signal.throwIfAborted();
+        this.logOnce(`repair-relink:${peerId}`, `repair: re-link failed: ${this.message(second)}`);
+        return { outcome: 'unavailable', detail: this.message(second), reason: lifecycleReasonOf(second) === 'unknown' ? null : lifecycleReasonOf(second) };
+      }
+    }
+  }
+
+  /** Log a failure once per distinct message (the poll tick would otherwise repeat it forever). */
+  private logOnce(key: string, text: string): void {
+    const entry = `${key}|${text}`;
+    if (this.logged.has(entry)) return;
+    if (this.logged.size >= 64) this.logged.clear();
+    this.logged.add(entry);
+    console.warn(`[design-docs] ${text}`);
+  }
+
+  /**
    * True only when a connected member's database state differs from this one. Compares opaque digests, so neither a
    * document name, count nor any content crosses the wire or reaches the UI. Unreachable or older peers read as in sync.
    */
@@ -463,16 +528,19 @@ export class DesignDocPairing {
     const features = await this.peers.features();
     let peers: Awaited<ReturnType<PluginSdkPeers['list']>> = [], enrolled: Awaited<ReturnType<PluginSdkPeers['enrolled']>> = [];
     let available = features.lifecycle;
+    let reason: PeerLifecycleReason | null = available ? null : 'core-unsupported';
     try {
       [peers, enrolled] = await Promise.all([this.peers.list({ signal: this.abort.signal }), this.peers.enrolled({ signal: this.abort.signal })]);
     } catch (error) {
       this.abort.signal.throwIfAborted();
-      const reason = error instanceof Error ? error.message : String(error);
-      if (reason !== this.lifecycleWarning) console.warn(`[design-docs] peer lifecycle unavailable: ${reason}`);
-      this.lifecycleWarning = reason;
+      const text = error instanceof Error ? error.message : String(error);
+      reason = lifecycleReasonOf(error);
+      if (text !== this.lifecycleWarning) console.warn(`[design-docs] peer lifecycle unavailable (${reason}): ${text}`);
+      this.lifecycleWarning = text;
       available = false;
     }
     if (available) this.lifecycleWarning = null;
+    this.lifecycleReason = available ? null : reason;
     const local = this.group.sync.localRepository()!, roster = this.group.roster(), consent = this.group.consent();
     return { configured: !!roster && !!local.groupId, repoId: local.repoId, replicaId: local.replicaId, roster,
       members: (roster?.members ?? []).map((member) => {
@@ -483,7 +551,7 @@ export class DesignDocPairing {
       }), jobs: this.group.jobs().map(({ payload: _payload, ...job }) => job), peers,
       enrolled: enrolled.map(({ id, name, connected }) => ({ id, name, connected })),
       setup: consent ? { peerId: consent.peerId, repoId: consent.repoId, state: consent.state, error: consent.error } : null,
-      lifecycleAvailable: available, introductionsAvailable: available && features.introductions, installerAvailable: false };
+      lifecycleAvailable: available, lifecycleReason: this.lifecycleReason, introductionsAvailable: available && features.introductions, installerAvailable: false };
   }
 
   /** Explicit owner action: also lifts a local Disable Link. */
