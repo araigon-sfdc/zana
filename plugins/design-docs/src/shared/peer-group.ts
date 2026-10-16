@@ -61,7 +61,7 @@ export type PeerLifecycleReason = 'encryption-unavailable' | 'insecure-backend' 
 
 /** Result of the per-computer Repair action. `detail` is a non-secret sentence for the owner. */
 export interface RepairResult {
-  outcome: 'already-synced' | 'sync-enabled' | 'relinked' | 'unavailable';
+  outcome: 'already-synced' | 'sync-enabled' | 'relinked' | 'pending' | 'unavailable';
   detail: string | null;
   reason: PeerLifecycleReason | null;
 }

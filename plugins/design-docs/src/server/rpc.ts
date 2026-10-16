@@ -162,6 +162,10 @@ export function createRpcHandlers(deps: RpcDeps): Record<string, (args: unknown)
       await requirePairing(deps).cancelInvitation(requiredString(onlyKeys(raw, ['invitationId']), 'invitationId'));
     },
 
+    dismissInvitation: async (raw) => {
+      await requirePairing(deps).dismissInvitation(requiredString(onlyKeys(raw, ['invitationId']), 'invitationId'));
+    },
+
     reconnectPeer: (raw) => requirePairing(deps).reconnect(requiredString(onlyKeys(raw, ['peerId']), 'peerId')),
 
     repairPeer: (raw) => requirePairing(deps).repair(requiredString(onlyKeys(raw, ['peerId']), 'peerId')),

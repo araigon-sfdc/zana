@@ -267,7 +267,7 @@ function InvitePanel({ invites, onChanged, requestApproval, joinRequest, onJoinR
   const connected = new Set((invites?.links ?? []).filter((link) => link.phase === 'linked').map((link) => link.peerInstanceId));
   const items = (invites?.invitations ?? []).filter((item) => !dismissed.includes(item.invitationId)
     && !(item.state === 'ready' && item.peer && linked.has(item.peer.instanceId))
-    && !(TERMINAL.has(item.state) && item.state !== 'ready' && item.peer && connected.has(item.peer.instanceId)));
+    && !(TERMINAL.has(item.state) && item.state !== 'ready' && (item.peer ? connected.has(item.peer.instanceId) : connected.size > 0)));
   // The token is shown only while the invitation is open; any later state (or expiry) clears it.
   const live = created ? invites?.invitations.find((item) => item.invitationId === created.invitationId) : undefined;
   useEffect(() => { if (created && live && live.state !== 'open') setCreated(null); }, [created, live]);
@@ -384,7 +384,7 @@ function InvitePanel({ invites, onChanged, requestApproval, joinRequest, onJoinR
             onApprove={() => approve(item)}
             onDeny={() => act(() => api.decideInvitation({ invitationId: item.invitationId, decision: 'denied' }))}
             onCancel={() => act(() => api.cancelInvitation(item.invitationId))}
-            onDismiss={() => setDismissed((current) => [...current, item.invitationId])} />)}
+            onDismiss={() => { setDismissed((current) => [...current, item.invitationId]); void api.dismissInvitation(item.invitationId).catch(() => undefined); }} />)}
         </ul>
       ) : null}
     </div>
@@ -487,8 +487,8 @@ function computerStatus({ link, member }: Computer, status: GroupStatus | null):
  * and actions on one row. Reconnect re-keys the link; Remove ends the pairing (the whole group once there are three or
  * more computers). A summary row below states the group size and carries Leave Group.
  */
-function ComputerCards({ computers, status, busy, onReconnect, onRepair, onRemove }: {
-  computers: Computer[]; status: GroupStatus | null; busy: boolean; onReconnect(id: string): void; onRepair(id: string): void; onRemove(computer: Computer, scope: 'group' | 'link'): void;
+function ComputerCards({ computers, status, busy, notes, onReconnect, onRepair, onRemove }: {
+  computers: Computer[]; status: GroupStatus | null; notes: Record<string, { text: string; ok: boolean }>; busy: boolean; onReconnect(id: string): void; onRepair(id: string): void; onRemove(computer: Computer, scope: 'group' | 'link'): void;
 }) {
   const self = status?.members.find((member) => member.replicaId === status.replicaId);
   const groupSize = status?.configured ? status.members.length : 0;
@@ -527,6 +527,7 @@ function ComputerCards({ computers, status, busy, onReconnect, onRepair, onRemov
                   </span>
                 </div>
                 {badge.detail ? <p className="dd-peers-hint dd-peers-status">{badge.detail}</p> : null}
+                {notes[id] ? <p className="dd-peers-hint dd-peers-status dd-peers-note" data-ok={notes[id]!.ok} data-testid="repair-note">{notes[id]!.text}</p> : null}
               </li>
             );
           })}
@@ -557,6 +558,7 @@ export function PeerSettings({ requestApproval = experimental_requestApproval, j
   const [status, setStatus] = useState<GroupStatus | null>(null);
   const [invites, setInvites] = useState<InviteView | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notes, setNotes] = useState<Record<string, { text: string; ok: boolean }>>({});
   const [peerId, setPeerId] = useState('');
   const [busy, setBusy] = useState(false);
   const [outOfSync, setOutOfSync] = useState(false);
@@ -610,13 +612,22 @@ export function PeerSettings({ requestApproval = experimental_requestApproval, j
   const repairComputer = (id: string) => {
     setBusy(true);
     setError(null);
+    const note = (text: string, ok: boolean) => { if (mounted.current) setNotes((current) => ({ ...current, [id]: { text, ok } })); };
+    note('Repairing...', true);
     void api.repairPeer(id).then((result: RepairResult) => {
       if (!mounted.current) return;
       if (result.outcome === 'unavailable') {
         const cause = result.reason ? lifecycleText(result.reason) : result.detail ?? 'The reason was not reported.';
-        setError(`Repair could not finish: ${cause}${result.reason ? '' : ' Next step: use Reconnect, or remove this computer and add the peer again.'}`);
-      } else toast(result.outcome === 'relinked' ? 'Connection re-linked and sync set up' : 'Sync set up');
-    }).catch((failure) => { if (mounted.current) setError(errorMessage(failure)); })
+        const text = `Repair could not finish: ${cause}${result.reason || /Add peer|offline/.test(cause) ? '' : ' Next step: use Reconnect, or remove this computer and add the peer again.'}`;
+        setError(text); note(text, false);
+      } else if (result.outcome === 'pending') {
+        const text = `Repair started but sync is not set up yet. ${result.detail ?? ''}`.trim();
+        setError(text); note(text, false);
+      } else {
+        const text = result.outcome === 'relinked' ? 'Connection re-linked and sync set up' : result.outcome === 'already-synced' ? 'Already syncing' : 'Sync set up';
+        toast(text); note(text, true);
+      }
+    }).catch((failure) => { if (mounted.current) { const text = errorMessage(failure); setError(text); note(`Repair failed: ${text}`, false); } })
       .finally(() => { if (mounted.current) { setBusy(false); loadInvites(); void api.groupStatus().then((value) => { if (mounted.current) setStatus(value); }).catch(() => undefined); } });
   };
   const removeComputer = (computer: Computer, scope: 'group' | 'link') => {
@@ -647,7 +658,7 @@ export function PeerSettings({ requestApproval = experimental_requestApproval, j
       <p>Sync this entire Design Docs database with other Zana apps. Existing documents stay local until you use Sync.</p>
       <InvitePanel invites={invites} onChanged={() => { loadInvites(); void api.groupStatus().then((value) => { if (mounted.current) setStatus(value); }).catch(() => undefined); }} requestApproval={requestApproval} joinRequest={joinRequest} onJoinRequestHandled={onJoinRequestHandled} />
       {invites?.enableError ? <p role="alert" className="dd-banner dd-banner-error">{invites.enableError}</p> : null}
-      <ComputerCards computers={computers} status={status} busy={busy} onRemove={removeComputer} onRepair={repairComputer}
+      <ComputerCards computers={computers} status={status} busy={busy} notes={notes} onRemove={removeComputer} onRepair={repairComputer}
         onReconnect={(id) => { setBusy(true); setError(null); void api.reconnectPeer(id).catch((failure) => { if (mounted.current) setError(errorMessage(failure)); }).finally(() => { if (mounted.current) { setBusy(false); loadInvites(); } }); }} />
       {outOfSync && !dismissed ? (
         <div className="dd-peers-block">

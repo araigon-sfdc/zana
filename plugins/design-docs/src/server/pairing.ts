@@ -109,6 +109,7 @@ export class DesignDocPairing {
   private readonly following = new Map<string, { attempts: number; nextAt: number; scope: string | null; failedAt: string | null }>();
   /** Initiator side: earliest next grant restore per member peer (bounded like `following`). */
   private readonly restoring = new Map<string, number>();
+  private readonly dismissedInvites = new Set<string>();
 
   /**
    * `stateDigest` is an opaque, convergence-stable hash of the local database state; drift checks compare it and never see
@@ -245,7 +246,7 @@ export class DesignDocPairing {
       if (!this.lastSnapshot) throw error;
       snapshot = this.lastSnapshot; stale = this.message(error);
     }
-    return { available: true, reason: null, invitations: snapshot?.list.map(inviteItem) ?? [], links: snapshot?.links ?? [],
+    return { available: true, reason: null, invitations: snapshot?.list.filter((item) => !this.dismissedInvites.has(item.invitationId)).map(inviteItem) ?? [], links: snapshot?.links ?? [],
       enableError: this.enableError ?? this.setupError, ...(stale ? { stale } : {}) };
   }
 
@@ -429,6 +430,13 @@ export class DesignDocPairing {
     const peers = this.invitePeers();
     return inviteItem(await peers.decideInvitation({ invitationId, decision, ...(decision === 'approved' ? { ownerProof } : {}), signal: this.abort.signal }));
   }
+  /** Owner hides a finished (non-active) attempt for good. Kept server-side so it survives reloads; active invitations cannot be dismissed. */
+  async dismissInvitation(invitationId: string): Promise<void> {
+    const item = this.lastSnapshot?.list.find((entry) => entry.invitationId === invitationId);
+    if (!item || ACTIVE_INVITATION.has(item.state)) throw new PeerProtocolError('invalid', 'only a finished pairing attempt can be dismissed');
+    if (this.dismissedInvites.size >= 256) this.dismissedInvites.clear();
+    this.dismissedInvites.add(invitationId);
+  }
   async cancelInvitation(invitationId: string): Promise<void> {
     await this.invitePeers().cancelInvitation({ invitationId, signal: this.abort.signal });
     if (this.openInvite?.invitationId === invitationId) this.openInvite = null;
@@ -461,16 +469,30 @@ export class DesignDocPairing {
       // Re-linking cannot help while the key is unusable; say why instead of churning the connection.
       return { outcome: 'unavailable', detail: null, reason: status.lifecycleReason ?? 'unknown' };
     }
+    // Core enrollment is the precondition of every enable; re-linking cannot create it, so say so instead of failing opaquely.
+    const enrolled = (await this.peers.enrolled({ signal: this.abort.signal })).find((peer) => peer.id === peerId);
+    if (!enrolled) {
+      return { outcome: 'unavailable', reason: null,
+        detail: 'The connection exists but this computer was never fully enrolled (the pairing was cancelled part-way). Remove it, then use Add peer to pair again.' };
+    }
+    if (!enrolled.connected) return { outcome: 'unavailable', reason: null, detail: 'That computer is offline. Open Zana there, then press Repair again.' };
     const attempt = async (): Promise<unknown> => { this.disabledPeers.delete(peerId); await this.enableNow(peerId); return null; };
-    try { await attempt(); this.enableError = null; return { outcome: 'sync-enabled', detail: null, reason: null }; }
+    // `negotiate` records a half-finished setup as a pending consent instead of throwing, so success means the peer joined the roster.
+    const settled = async (outcome: 'sync-enabled' | 'relinked'): Promise<RepairResult> => {
+      this.enableError = null;
+      const joined = this.group.roster(), consent = this.group.consent();
+      if (joined?.members.some((entry) => entry.machineId === peerId && !isRetiring(joined, entry.replicaId))) return { outcome, detail: null, reason: null };
+      return { outcome: 'pending', reason: null, detail: consent?.peerId === peerId && consent.error ? `Sync setup started but has not finished: ${consent.error}`
+        : 'Sync setup started on this computer and is waiting for the other computer to join. If it does not finish in a minute, open Design Docs settings on the other computer and press Repair on this computer\'s card.' };
+    };
+    try { await attempt(); return await settled('sync-enabled'); }
     catch (first) {
       this.abort.signal.throwIfAborted();
       this.logOnce(`repair-enable:${peerId}`, `repair: enable failed, re-linking: ${this.message(first)}`);
       try {
         await peers.reconnectPeer(peerId, { signal: this.abort.signal });
         await attempt();
-        this.enableError = null;
-        return { outcome: 'relinked', detail: null, reason: null };
+        return await settled('relinked');
       } catch (second) {
         this.abort.signal.throwIfAborted();
         this.logOnce(`repair-relink:${peerId}`, `repair: re-link failed: ${this.message(second)}`);

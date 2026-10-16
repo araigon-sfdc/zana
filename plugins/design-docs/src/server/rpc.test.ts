@@ -453,7 +453,7 @@ describe('Design Docs RPC', () => {
     expect(method.mock.calls.map(([name]) => name)).not.toContain('agentSettings');
     expect(method.mock.calls.map(([name]) => name)).not.toContain('setAgentSettings');
     expect(method.mock.calls.map(([name]) => name)).not.toContain('agentHarnesses');
-    expect(method).toHaveBeenCalledTimes(52);
+    expect(method).toHaveBeenCalledTimes(53);
   });
 });
 
@@ -469,6 +469,7 @@ describe('Design Docs invitation RPC handlers', () => {
       invitationApproval: vi.fn(async () => ({ title: 'Approve' })),
       decideInvitation: vi.fn(async () => ({ invitationId: 'inv-1', state: 'consented' })),
       cancelInvitation: vi.fn(async () => undefined),
+      dismissInvitation: vi.fn(async () => undefined),
       reconnect: vi.fn(async () => [{ pairingId: 'p' }]),
       repair: vi.fn(async () => ({ outcome: 'sync-enabled', detail: null, reason: null })),
       outOfSync: vi.fn(async () => true),
@@ -483,7 +484,7 @@ describe('Design Docs invitation RPC handlers', () => {
   it('every handler fails with a clear message when pairing is unavailable', async () => {
     const handlers = createRpcHandlers({ store: new DesignDocStore(createTestDatabase()), changed: vi.fn(), sdk: {} as never });
     const calls: Array<[string, unknown]> = [['inviteState', undefined], ['createInvitation', undefined], ['openInvitation', undefined], ['redeemInvitation', { token: TOKEN }],
-      ['invitationApproval', { invitationId: 'i' }], ['decideInvitation', { invitationId: 'i', decision: 'denied' }], ['cancelInvitation', { invitationId: 'i' }],
+      ['invitationApproval', { invitationId: 'i' }], ['decideInvitation', { invitationId: 'i', decision: 'denied' }], ['cancelInvitation', { invitationId: 'i' }], ['dismissInvitation', { invitationId: 'i' }],
       ['reconnectPeer', { peerId: 'p' }], ['repairPeer', { peerId: 'p' }], ['peersOutOfSync', undefined]];
     for (const [name, args] of calls) expect(await reject(() => handlers[name]!(args)), name).toBe('database group setup is unavailable');
   });

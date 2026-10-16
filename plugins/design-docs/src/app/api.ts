@@ -96,6 +96,7 @@ export interface DesignDocsApi {
   /** `approved` needs the owner proof from the sheet; `denied` needs none. */
   decideInvitation(args: { invitationId: string; decision: 'approved' | 'denied'; ownerProof?: string }): Promise<InviteItem>;
   cancelInvitation(invitationId: string): Promise<void>;
+  dismissInvitation(invitationId: string): Promise<void>;
   reconnectPeer(peerId: string): Promise<PeerLink[]>;
   /** Re-try sync setup for one linked computer; re-links only that connection if needed. */
   repairPeer(peerId: string): Promise<RepairResult>;
@@ -179,6 +180,7 @@ export function createApi(call: Call): DesignDocsApi {
     invitationApproval: (invitationId) => typed('invitationApproval', { invitationId }),
     decideInvitation: (args) => typed('decideInvitation', args),
     cancelInvitation: (invitationId) => done(typed('cancelInvitation', { invitationId })),
+    dismissInvitation: (invitationId) => done(typed('dismissInvitation', { invitationId })),
     reconnectPeer: (peerId) => typed('reconnectPeer', { peerId }),
     repairPeer: (peerId) => typed('repairPeer', { peerId }),
     peersOutOfSync: () => typed('peersOutOfSync'),

@@ -209,10 +209,10 @@ describe('database peer settings UI', () => {
     const call = vi.fn(async () => ({})); const api = createApi(call);
     await api.inviteState(); await api.createInvitation(); await api.openInvitation(); await api.redeemInvitation('zccinv1.x'); await api.invitationApproval('i');
     await api.decideInvitation({ invitationId: 'i', decision: 'approved', ownerProof: 'p' }); await api.decideInvitation({ invitationId: 'i', decision: 'denied', ownerProof: undefined });
-    await api.cancelInvitation('i'); await api.reconnectPeer('app'); await api.repairPeer('app'); await api.peersOutOfSync();
+    await api.cancelInvitation('i'); await api.dismissInvitation('i'); await api.reconnectPeer('app'); await api.repairPeer('app'); await api.peersOutOfSync();
     expect(call.mock.calls).toEqual([['inviteState', undefined], ['createInvitation', undefined], ['openInvitation', undefined], ['redeemInvitation', { token: 'zccinv1.x' }],
       ['invitationApproval', { invitationId: 'i' }], ['decideInvitation', { invitationId: 'i', decision: 'approved', ownerProof: 'p' }],
-      ['decideInvitation', { invitationId: 'i', decision: 'denied' }], ['cancelInvitation', { invitationId: 'i' }],
+      ['decideInvitation', { invitationId: 'i', decision: 'denied' }], ['cancelInvitation', { invitationId: 'i' }], ['dismissInvitation', { invitationId: 'i' }],
       ['reconnectPeer', { peerId: 'app' }], ['repairPeer', { peerId: 'app' }], ['peersOutOfSync', undefined]]);
   });
 });
@@ -550,6 +550,7 @@ describe('invitation pairing UI', () => {
     await waitFor(() => expect(repair).toHaveBeenCalledExactlyOnceWith({ peerId: 'app-b' }));
     await waitFor(() => expect((screen.getByRole('button', { name: 'Repair' }) as HTMLButtonElement).disabled).toBe(false));
     expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.getByTestId('repair-note').textContent).toBe('Sync set up');
   });
 
   it('Repair that cannot finish shows the real cause and next step; a thrown error is shown too', async () => {
@@ -567,6 +568,19 @@ describe('invitation pairing UI', () => {
     await waitFor(() => expect((screen.getByRole('button', { name: 'Repair' }) as HTMLButtonElement).disabled).toBe(false));
     await click();
     await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/no linked connection/));
+  });
+
+  it('Repair that leaves sync pending shows the concrete state instead of success; unenrolled link says to pair again', async () => {
+    const repair = vi.fn()
+      .mockResolvedValueOnce({ outcome: 'pending', detail: 'Sync setup started but has not finished: keychain locked', reason: null })
+      .mockResolvedValueOnce({ outcome: 'unavailable', detail: 'never fully enrolled. Remove it, then use Add peer to pair again.', reason: null });
+    mount({ inviteState: async () => view({ links: [lnk()] }), repairPeer: repair });
+    fireEvent.click(await screen.findByRole('button', { name: 'Repair' }));
+    expect((await screen.findByRole('alert')).textContent).toMatch(/not set up yet\. Sync setup started but has not finished: keychain locked/);
+    expect(screen.getByTestId('repair-note').textContent).toMatch(/keychain locked/);
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Repair' }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole('button', { name: 'Repair' }));
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/Add peer to pair again\.$/));
   });
 
   it('lifecycle failure explains the real cause on the card and in the hint; a group member keeps Connected', async () => {
@@ -704,6 +718,18 @@ describe('invitation pairing UI', () => {
       expect(screen.queryByRole('list', { name: 'Pairing' })).toBeNull();
       cleanup();
     }
+    // A terminal attempt with no peer attached is history too once any live linked connection exists.
+    mount({ inviteState: async () => view({ links: [lnk()], invitations: [item({ state: 'cancelled', peer: null })] }) });
+    await screen.findByText(/No sync group/);
+    expect(screen.queryByText(/Pairing was cancelled/)).toBeNull();
+    cleanup();
+    // Without a live link it stays, and Dismiss is persisted on the server.
+    const dismiss = vi.fn(async () => undefined);
+    mount({ inviteState: async () => view({ invitations: [item({ state: 'cancelled', peer: null })] }), dismissInvitation: dismiss });
+    fireEvent.click(await screen.findByRole('button', { name: 'Dismiss' }));
+    await waitFor(() => expect(dismiss).toHaveBeenCalledOnce());
+    expect(screen.queryByText(/Pairing was cancelled/)).toBeNull();
+    cleanup();
     // A failed link does not count as live, so its attempt keeps Dismiss.
     mount({ inviteState: async () => view({ links: [lnk({ phase: 'failed', state: 'disconnected' })], invitations: [item({ state: 'failed', peer })] }) });
     expect(await screen.findByRole('button', { name: 'Dismiss' })).toBeTruthy();
