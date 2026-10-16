@@ -47,6 +47,9 @@ async function addPeer(app: AppHandle, sshd: { port: number; hostKey: string }):
   const panel = (await openPeers(app)).getByLabel('Pair a peer');
   await panel.getByRole('button', { name: 'Add peer', exact: true }).click();
   await expect(panel.getByRole('status').filter({ hasText: /^Invitation ready\. Expires in (10|9):\d{2}\./ })).toBeVisible({ timeout: 20_000 });
+  // The field shows the auto-copied format (a link when the build has one); pick the raw code for the tests.
+  await panel.getByRole('button', { name: 'Copy code', exact: true }).click();
+  await expect(panel.getByRole('textbox', { name: 'Invitation', exact: true })).toHaveValue(/^zccinv1\./);
   const token = await panel.getByRole('textbox', { name: 'Invitation', exact: true }).inputValue();
   const body = JSON.parse(Buffer.from(token.slice('zccinv1.'.length), 'base64url').toString('utf8'));
   expect(body).toMatchObject({ v: 3, link: { endpoint: { host: 'localhost', port: sshd.port, hostKey: sshd.hostKey }, joinCode: expect.stringMatching(/^zcde_/) } });
@@ -85,7 +88,7 @@ async function pair(inviter: AppHandle, redeemer: AppHandle, label: string, sshd
   // Both Peers views stay open: concurrent automatic Enable is resolved by the initiator tie-break.
   await approveInUi(inviter);
   // The Ready row clears itself once the link exists; the inviter's computer cards carry the result.
-  const ready = async (app: AppHandle) => expect((await openPeers(app)).getByLabel('Computers').locator('.dd-peers-status', { hasText: /^Connected$/ })).toHaveCount(inviterConnected, { timeout: 120_000 });
+  const ready = async (app: AppHandle) => expect((await openPeers(app)).getByLabel('Computers').locator('.dd-peers-badge', { hasText: /^Connected$/ })).toHaveCount(inviterConnected, { timeout: 120_000 });
   await ready(inviter).catch(async error => {
     for (const [name, app] of [['inviter', inviter], ['redeemer', redeemer]] as const)
       console.log(`[three-peer] ${label} ${name} pairing stuck`, JSON.stringify(await invites(app)));

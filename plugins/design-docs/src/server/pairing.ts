@@ -529,9 +529,22 @@ export class DesignDocPairing {
     id.parse(replicaId);
     if (!(await this.peers.features()).lifecycle) throw new PeerProtocolError('invalid', 'core peer lifecycle unavailable');
     // Barrier commits first; offline targets stay pending until their committed frontier is sealed.
-    this.group.remove(replicaId);
+    this.group.remove(this.dissolvesTo(replicaId) ?? replicaId);
     await this.retry();
     return this.status();
+  }
+
+  /**
+   * In a two-member group, removing the only other computer ends the pairing: core refuses to shrink a group below two by
+   * removing another member, so this computer leaves instead (its own retirement seals locally, the other side receives the
+   * roster, drops the link and keeps a one-member roster). Returns this computer's replica id for that case, else undefined.
+   */
+  private dissolvesTo(replicaId: string): string | undefined {
+    const roster = this.group.roster(), local = this.group.sync.localRepository()!;
+    if (!roster || replicaId === local.replicaId || roster.members.length !== 2 ||
+      !roster.members.some((member) => member.replicaId === local.replicaId) ||
+      !roster.members.some((member) => member.replicaId === replicaId) || isRetiring(roster, replicaId)) return undefined;
+    return local.replicaId;
   }
 
   async revoke(peerId: string): Promise<GroupStatus> {

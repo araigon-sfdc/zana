@@ -13,7 +13,6 @@ const makeToken = (over: Record<string, unknown> = {}) =>
 const TOKEN = makeToken();
 const BASE = 'zana-test://';
 const LINK = `${BASE}plugin/design-docs/join?d=${encodeURIComponent(TOKEN)}`;
-const PREF = 'zcc.design-docs.invite-format';
 
 const EMPTY = { configured: false, repoId: 'database', replicaId: 'r-a', roster: null, members: [], jobs: [], setup: null, peers: [],
   enrolled: [], lifecycleAvailable: true, introductionsAvailable: true, installerAvailable: false };
@@ -40,46 +39,51 @@ function mount(options: { deepLinkBase?: string | null; token?: string; redeem?:
 const addPeer = async () => fireEvent.click(await screen.findByRole('button', { name: 'Add peer' }));
 const buttons = () => screen.getAllByRole('button').map((button) => button.textContent);
 
-describe('invitation format: copy', () => {
-  it('Add peer copies the link by default and offers the code second', async () => {
+describe('invitation delivery: copy', () => {
+  const primaries = () => screen.getAllByRole('button').filter((button) => button.className.split(' ').includes('primary')).map((button) => button.textContent);
+  const field = () => screen.getByLabelText('Invitation') as HTMLInputElement;
+
+  it('Add peer copies the link, shows it in the field and offers both Copy link and Copy code', async () => {
     const { harness } = mount();
     harness.render(<PeerSettings />);
+    await screen.findByRole('button', { name: 'Add peer' });
+    expect(primaries()).toEqual(['Add peer']);
     await addPeer();
     await waitFor(() => expect(writeText).toHaveBeenCalledExactlyOnceWith(LINK));
     expect(harness.toasts).toContainEqual({ message: 'Invitation link copied to clipboard', kind: 'info' });
     const link = await screen.findByRole('button', { name: 'Copy link' });
-    const code = screen.getByRole('button', { name: 'Copy invitation' });
-    expect(link.className).toContain('primary');
-    expect(code.className).not.toContain('primary');
-    expect(buttons().indexOf('Copy link')).toBeLessThan(buttons().indexOf('Copy invitation'));
+    const code = screen.getByRole('button', { name: 'Copy code' });
+    expect(field().value).toBe(LINK);
+    // Exactly one primary: the copy button; Add peer and Cancel invitation are not.
+    expect(primaries()).toEqual(['Copy link']);
+    expect(screen.getByRole('button', { name: 'Cancel invitation' }).className).toContain('dd-btn-remove');
+    expect(buttons().indexOf('Copy link')).toBeLessThan(buttons().indexOf('Copy code'));
     fireEvent.click(code);
     await waitFor(() => expect(writeText).toHaveBeenLastCalledWith(TOKEN));
-    expect(harness.toasts).toContainEqual({ message: 'Invitation copied to clipboard', kind: 'info' });
+    expect(harness.toasts).toContainEqual({ message: 'Invitation code copied to clipboard', kind: 'info' });
+    await waitFor(() => expect(field().value).toBe(TOKEN));
     fireEvent.click(link);
     await waitFor(() => expect(writeText).toHaveBeenLastCalledWith(LINK));
+    await waitFor(() => expect(field().value).toBe(LINK));
   });
 
-  it('the code format makes the code primary and is what Add peer copies', async () => {
-    localStorage.setItem(PREF, JSON.stringify('code'));
+  it('there is no invitation-format setting any more', async () => {
     const { harness } = mount();
-    harness.render(<PeerSettings />);
-    await addPeer();
-    await waitFor(() => expect(writeText).toHaveBeenCalledExactlyOnceWith(TOKEN));
-    expect(harness.toasts.at(-1)).toEqual({ message: 'Invitation copied to clipboard', kind: 'info' });
-    const code = await screen.findByRole('button', { name: 'Copy invitation' });
-    expect(code.className).toContain('primary');
-    expect(screen.getByRole('button', { name: 'Copy link' }).className).not.toContain('primary');
-    expect(buttons().indexOf('Copy invitation')).toBeLessThan(buttons().indexOf('Copy link'));
+    harness.render(<SettingsView peer={null} onBack={() => undefined} />);
+    expect(await screen.findByRole('button', { name: 'Peers' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Sharing' })).toBeNull();
+    expect(screen.queryByRole('combobox', { name: 'Invitation format' })).toBeNull();
   });
 
-  it('no link scheme: no Copy link, the code is copied, and even a stored Link preference falls back', async () => {
-    localStorage.setItem(PREF, JSON.stringify('link'));
+  it('no link scheme: only Copy code, the code is copied and shown, and it is the one primary', async () => {
     const { harness } = mount({ deepLinkBase: null });
     harness.render(<PeerSettings />);
     await addPeer();
     await waitFor(() => expect(writeText).toHaveBeenCalledExactlyOnceWith(TOKEN));
-    await screen.findByRole('button', { name: 'Copy invitation' });
+    await screen.findByRole('button', { name: 'Copy code' });
     expect(screen.queryByRole('button', { name: 'Copy link' })).toBeNull();
+    expect(field().value).toBe(TOKEN);
+    expect(primaries()).toEqual(['Copy code']);
   });
 
   it('an oversized token hides Copy link and falls back to the code', async () => {
@@ -92,43 +96,21 @@ describe('invitation format: copy', () => {
     await addPeer();
     await waitFor(() => expect(writeText).toHaveBeenCalledExactlyOnceWith(token));
     expect(screen.queryByRole('button', { name: 'Copy link' })).toBeNull();
+    expect(field().value).toBe(token);
   });
 
   it('buildInviteLink rejects no base and a link over the host limit', () => {
     expect(buildInviteLink(null, TOKEN)).toBeNull();
     expect(buildInviteLink(`${'x'.repeat(5000)}://`, 'a'.repeat(4096))).toBeNull();
   });
-});
 
-describe('invitation format setting', () => {
-  const settings = () => {
+  it('Join peer is primary only once the field has content', async () => {
     const { harness } = mount();
-    harness.render(<SettingsView peer={null} onBack={() => undefined} />);
-    return harness;
-  };
-
-  it('lives under Sharing, defaults to Link, persists, and drives the Peers view', async () => {
-    settings();
-    localStorage.setItem('zcc.design-docs.settings-tab', JSON.stringify('agent'));
-    fireEvent.click(await screen.findByRole('button', { name: 'Sharing' }));
-    const select = await screen.findByRole('combobox', { name: 'Invitation format' }) as HTMLSelectElement;
-    expect(select.value).toBe('link');
-    expect([...select.options].map((option) => option.textContent)).toEqual(['Link (clickable)', 'Code (paste)']);
-    fireEvent.change(select, { target: { value: 'code' } });
-    expect(localStorage.getItem(PREF)).toBe(JSON.stringify('code'));
-    // Choosing a section is still remembered separately.
-    expect(localStorage.getItem('zcc.design-docs.settings-tab')).toBe(JSON.stringify('sharing'));
-    fireEvent.click(screen.getByRole('button', { name: 'Peers' }));
-    await addPeer();
-    await waitFor(() => expect(writeText).toHaveBeenCalledExactlyOnceWith(TOKEN));
-  });
-
-  it('shows Code when this build has no link scheme', async () => {
-    const { harness } = mount({ deepLinkBase: null });
-    harness.render(<SettingsView peer={null} onBack={() => undefined} />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Sharing' }));
-    expect((screen.getByRole('combobox', { name: 'Invitation format' }) as HTMLSelectElement).value).toBe('code');
-    expect(screen.getByText(/Links need the Zana desktop app/)).toBeTruthy();
+    harness.render(<PeerSettings />);
+    const join = await screen.findByRole('button', { name: 'Join peer' });
+    expect(join.className).not.toContain('primary');
+    fireEvent.change(screen.getByLabelText('Paste invitation'), { target: { value: TOKEN } });
+    expect(join.className).toContain('primary');
   });
 });
 

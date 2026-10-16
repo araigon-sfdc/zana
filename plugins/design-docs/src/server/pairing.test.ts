@@ -289,7 +289,23 @@ describe('DD lifecycle setup', () => {
     expect((await a.pairing.status()).members.find((member) => member.machineId === 'b')!.authorized).toBe(false);
     expect(a.peers.revoke).toHaveBeenCalledWith('b', { scope: roster!.repoId });
     expect(a.peers.revoke).toHaveBeenCalledWith('b', { scope: bootstrapScope('a', 'b') });
-    await expect(a.pairing.remove(b.group.sync.localRepository()!.replicaId)).rejects.toThrow(/below 2/);
+    await expect(a.pairing.remove(b.group.sync.localRepository()!.replicaId)).resolves.toMatchObject({ configured: false });
+  });
+
+  it('removing the only other computer of a two-member group leaves it: roster entry and link end on both sides', async () => {
+    const net = network(), a = net.app('a'), b = net.app('b'); await net.found(a, b);
+    const status = await a.pairing.remove(b.group.sync.localRepository()!.replicaId);
+    expect(status.configured).toBe(false);
+    expect(a.group.sync.localRepository()!.groupId).toBeNull();
+    expect(a.peers.revoke).toHaveBeenCalledWith('b', { scope: a.group.roster()!.repoId });
+    // The other side keeps a one-member roster and drops the link to the leaver.
+    expect(b.group.roster()!.members.map((member) => member.machineId)).toEqual(['b']);
+    expect(b.group.sync.localRepository()!.groupId).not.toBeNull();
+  });
+
+  it('a two-member group still refuses removing a computer that is not the other member or is already gone', async () => {
+    const net = network(), a = net.app('a'), b = net.app('b'); await net.found(a, b);
+    await expect(a.pairing.remove('missing')).rejects.toThrow(/not found|invalid/i);
   });
 
   it('group removal commits epoch before network revoke; failure persists job without rolling roster back', async () => {

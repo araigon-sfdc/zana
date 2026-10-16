@@ -45,7 +45,7 @@ test('Design Docs peer setup exposes lifecycle, enrolled peers and refuses fabri
   await expect(view.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible();
   const nav = view.getByRole('navigation', { name: 'Settings sections' });
   await expect(nav.getByRole('button', { name: 'Peers', exact: true })).toHaveAttribute('aria-current', 'page');
-  await expect(nav.getByRole('button', { name: 'Sharing', exact: true })).not.toHaveAttribute('aria-current', 'page');
+  await expect(nav.getByRole('button', { name: 'Sharing', exact: true })).toHaveCount(0);
   await expect(nav.getByRole('button', { name: 'Agent', exact: true })).not.toHaveAttribute('aria-current', 'page');
   await expect(window.locator('.dd-list')).toHaveCount(0);
   const peers = view.getByRole('region', { name: 'Database sync peers' });
@@ -108,7 +108,8 @@ test('Design Docs peer setup exposes lifecycle, enrolled peers and refuses fabri
     // The Peers view polls; no manual Refresh.
     await expect(peers).toContainText('Sync group: 3 of 8 computers', { timeout: 20_000 });
     const member = peers.getByLabel('Computers').getByRole('listitem').filter({ has: window.locator('[title="Computer id e2e-app-b"]') });
-    await expect(member).toContainText('Being removed: waiting for committed frontier; data sync disabled');
+    await expect(member).toContainText('Being removed');
+    await expect(member).toContainText('Waiting for committed frontier; data sync disabled');
     // A retiring computer offers no Remove; with three computers the roster actions are Leave Group on this computer only.
     await expect(member.getByRole('button', { name: 'Remove', exact: true })).toHaveCount(0);
     await expect(member.getByRole('button', { name: 'Reconnect', exact: true })).toHaveCount(0);
@@ -134,7 +135,10 @@ test('Design Docs peer setup exposes lifecycle, enrolled peers and refuses fabri
     await window.locator('.dd-list').getByRole('button', { name: 'Settings', exact: true }).click();
 
     expect(group.remove(local.replicaId).stage).toBe('removed');
-    await expect(peers).toContainText('Sync group: 2 of 8 computers', { timeout: 20_000 });
+    // After leaving, the leftover roster is history: no group count and no dead cards for the former members.
+    await expect(peers).toContainText('No sync group configured.', { timeout: 20_000 });
+    await expect(peers).not.toContainText('Sync group:');
+    await expect(peers.getByLabel('Computers').getByRole('listitem')).toHaveCount(0);
     await expect(peers.getByRole('button', { name: 'Leave Group', exact: true })).toHaveCount(0);
     expect(await window.evaluate(() => window.cc.pluginApps.callRpc('design-docs', 'peerStatus')))
       .toMatchObject({ configured: false, members: [] });

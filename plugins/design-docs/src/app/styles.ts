@@ -155,7 +155,22 @@ export const DESIGN_DOCS_STYLES = `
 .dd-peers-member { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
 .dd-peers-member-name { min-width: 0; overflow-wrap: anywhere; }
 .dd-peers-status { display: block; }
-.dd-peers-self { opacity: 0.85; }
+.dd-peers-cards { gap: 10px; }
+.dd-peers-card { display: flex; flex-direction: column; gap: 6px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-elevated); min-width: 0; }
+.dd-peers-card + .dd-peers-card { border-top-color: var(--border-strong, var(--border)); }
+.dd-peers-card-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.dd-peers-card-name { flex: 1; min-width: 0; font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.dd-peers-badge { --dd-dot: var(--text-muted); display: inline-flex; align-items: center; gap: 6px; font-size: 11px; line-height: 1.4; color: var(--text-muted); cursor: default; user-select: none; }
+.dd-peers-badge::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--dd-dot); flex: none; }
+.dd-peers-badge[data-state='connected'] { --dd-dot: var(--success); color: var(--success); }
+.dd-peers-badge[data-state='reconnecting'], .dd-peers-badge[data-state='paused'], .dd-peers-badge[data-state='removing'] { --dd-dot: var(--warning, #b7791f); color: var(--warning, #b7791f); }
+.dd-peers-badge[data-state='disconnected'], .dd-peers-badge[data-state='not-syncing'] { --dd-dot: var(--danger, #d33); color: var(--danger, #d33); }
+.dd-peers-card-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-end; margin-left: auto; padding-left: 12px; border-left: 1px solid var(--border); }
+.dd-btn-remove.btn { color: var(--danger, #d33); border-color: var(--danger, #d33); background: transparent; font-weight: 500; }
+.dd-btn-remove.btn:hover:not(:disabled) { background: color-mix(in srgb, var(--danger, #d33) 12%, transparent); }
+.dd-peers-summary { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; padding: 2px 4px; font-size: 12px; }
+.dd-peers-summary .btn { margin-left: auto; }
+@media (max-width: 560px) { .dd-peers-card-actions { margin-left: 0; padding-left: 0; border-left: 0; width: 100%; justify-content: flex-start; } }
 .dd-peers-hint { color: var(--text-muted); }
 .dd-peers-note { font-size: 12px; line-height: 1.5; }
 

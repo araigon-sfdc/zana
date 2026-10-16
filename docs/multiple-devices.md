@@ -232,10 +232,9 @@ pairing.
 - **Invitation formats.** An invitation is handed over either as a **code** (paste)
   or as a **link** (clickable), and both carry the same content. After **Add peer**
   the panel shows **Copy link** (`zana://plugin/design-docs/join?d=<code>`; `zana-dev://`
-  in `pnpm dev`) and **Copy invitation** (the raw code). Design Docs → Settings →
-  **Sharing** → **Invitation format** (`Link (clickable)` or `Code (paste)`) picks the
-  main button and what **Add peer** copies for you; the default is Link when this
-  build supports links, otherwise Code. Links are hidden when this build has no link
+  in `pnpm dev`) and **Copy code** (the raw code). There is no setting: **Add peer**
+  copies the link when this build supports links and the code fits in one, otherwise
+  the code, and the field under the buttons shows what was copied. Links are hidden when this build has no link
   scheme (E2E, older hosts) or the code is too long for a link (4096 characters).
   Opening a link, or pasting one into **Join peer**, never joins by itself: it opens
   Settings → Peers with the field filled in and asks **Join &lt;computer&gt;?** with the
@@ -244,7 +243,8 @@ pairing.
   The field accepts a raw code or a full link ("Paste an invitation code or link.").
   Dev testing: macOS cannot register a scheme for an unpackaged dev Electron, so
   run `pnpm dev:open-link "zana-dev://plugin/design-docs/join?d=<code>"` to deliver
-  a link to the running dev app (see `docs/plugin-deep-links.md`).
+  a link to the running dev app, or run `pnpm dev:register-link` once so clicking
+  `zana-dev://` links works (see `docs/plugin-deep-links.md`, "macOS dev setup").
 - **Connection method.** Only the computer that created the invitation needs an SSH
   server (macOS Remote Login, or OpenSSH elsewhere). The other computer connects out
   to it and opens a reverse tunnel, so the first computer never needs SSH access to

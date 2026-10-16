@@ -8,8 +8,7 @@ import { createHarness } from './test-harness.js';
 import { createApi } from './api.js';
 
 afterEach(() => { vi.useRealTimers(); });
-// These tests cover the code format; the link format is covered in invite-links.test.tsx.
-beforeEach(() => localStorage.setItem('zcc.design-docs.invite-format', JSON.stringify('code')));
+// These tests run without a link scheme, so the code is the one format; links are covered in invite-links.test.tsx.
 /** Manual Refresh is gone: status reloads on the poll interval, so tests drive that interval. */
 const fakePolling = () => vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
 const pollOnce = () => act(async () => { vi.advanceTimersByTime(INVITE_WAITING_POLL_MS); });
@@ -21,7 +20,7 @@ describe('database peer settings UI', () => {
       peers: [], enrolled: [{ id: 'app-b', name: 'Laptop', connected: true }], lifecycleAvailable: true, introductionsAvailable: true, installerAvailable: false };
     const enable = vi.fn(async () => ({ ...status, setup: { peerId: 'app-b', repoId: 'database', state: 'pending', error: 'bilateral database enablement required' },
       jobs: [{ id: 'job0', peerId: 'app-b', state: 'pending' }] }));
-    installTestPluginRuntime({ rpc: { groupStatus: async () => status, enablePeer: enable } });
+    installTestPluginRuntime({ deepLinkBase: null, rpc: { groupStatus: async () => status, enablePeer: enable } });
     harness.render(<PeerSettings />);
     expect(await screen.findByText(/No sync group/)).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Add peer' })).toBeTruthy();
@@ -39,7 +38,7 @@ describe('database peer settings UI', () => {
   it('no authorized links and failed setup never claim completion', async () => {
     const harness = createHarness();
     let fail = false;
-    installTestPluginRuntime({ rpc: { groupStatus: async () => {
+    installTestPluginRuntime({ deepLinkBase: null, rpc: { groupStatus: async () => {
       if (fail) throw new Error('core unavailable');
       return { configured: false, repoId: 'database', members: [], jobs: [], peers: [], enrolled: [], setup: null, roster: null };
     } } });
@@ -63,33 +62,36 @@ describe('database peer settings UI', () => {
       ['retryIntroductions', undefined], ['removePeer', { replicaId: 'replica' }], ['revokePeer', { peerId: 'app' }]]);
   });
 
-  it('two computers: one card per computer, Remove deletes the link only, and no roster controls render', async () => {
+  it('two computers: one card per computer, Remove ends the pairing (roster entry and link), and the group line disappears', async () => {
     const harness = createHarness();
     const members = ['a', 'b'].map((name) => ({ replicaId: `r-${name}`, machineId: `app-${name}`, authorized: true, connected: true, grantEpoch: 1, joinedAt: 1, sponsorReplicaId: null }));
     const status = { configured: true, repoId: 'database', replicaId: 'r-a', roster: { rosterEpoch: 1 },
       members, jobs: [], setup: null, peers: [], enrolled: [], lifecycleAvailable: true, introductionsAvailable: true, installerAvailable: false };
-    const revoked = { ...status, members: members.map((member) => member.machineId === 'app-b' ? { ...member, authorized: false } : member) };
-    const revoke = vi.fn(async () => revoked), remove = vi.fn();
-    installTestPluginRuntime({ rpc: { groupStatus: async () => status, revokePeer: revoke, removePeer: remove } });
+    const left = { ...status, configured: false, members };
+    const revoke = vi.fn(), remove = vi.fn(async () => left);
+    installTestPluginRuntime({ deepLinkBase: null, rpc: { groupStatus: async () => status, revokePeer: revoke, removePeer: remove } });
     const priorConfirm = window.confirm;
     const confirm = vi.fn(() => false); window.confirm = confirm;
     try {
       harness.render(<PeerSettings />);
       await screen.findByText('Sync group: 2 of 8 computers');
       const list = screen.getByRole('list', { name: 'Computers' });
-      expect(within(list).getAllByRole('listitem').map((row) => row.textContent)).toEqual(['Unnamed computerConnectedRemove', 'This computer']);
+      expect(within(list).getAllByRole('listitem').map((row) => row.textContent)).toEqual(['Unnamed computerConnectedRemove']);
       expect(screen.getByText('Unnamed computer').getAttribute('title')).toBe('Computer id app-b');
       expect(list.textContent).not.toContain('app-b');
       expect(screen.queryByRole('button', { name: /Remove Member|Leave Group|Disable Link/ })).toBeNull();
       fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
-      expect(revoke).not.toHaveBeenCalled();
-      expect(confirm).toHaveBeenCalledWith('Remove Unnamed computer? This computer stops syncing with it and the link is deleted. To sync again, pair with Add peer.');
+      expect(remove).not.toHaveBeenCalled();
+      expect(confirm).toHaveBeenCalledWith('Remove Unnamed computer? This computer stops syncing with it and the pairing ends. To sync again, pair with Add peer.');
       confirm.mockReturnValue(true);
       fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
-      await waitFor(() => expect(revoke).toHaveBeenCalledExactlyOnceWith({ peerId: 'app-b' }));
-      expect(remove).not.toHaveBeenCalled();
-      expect(await screen.findByText('Not syncing. Add peer to pair again.')).toBeTruthy();
-      expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull();
+      await waitFor(() => expect(remove).toHaveBeenCalledExactlyOnceWith({ replicaId: 'r-b' }));
+      expect(revoke).not.toHaveBeenCalled();
+      // The roster entry is gone: no dead card, no group count.
+      await waitFor(() => expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull());
+      expect(screen.queryByText('Unnamed computer')).toBeNull();
+      expect(screen.queryByText(/Sync group:/)).toBeNull();
+      expect(screen.queryByText('Not syncing. Add peer to pair again.')).toBeNull();
     } finally { window.confirm = priorConfirm; }
   });
 
@@ -100,7 +102,7 @@ describe('database peer settings UI', () => {
       jobs: [], peers: [], enrolled: [], lifecycleAvailable: true, introductionsAvailable: true,
       setup: { peerId: 'app-d', state: 'pending', error: 'waiting for reserved capacity' } };
     const remove = vi.fn(async () => status);
-    installTestPluginRuntime({ rpc: { groupStatus: async () => status, removePeer: remove } });
+    installTestPluginRuntime({ deepLinkBase: null, rpc: { groupStatus: async () => status, removePeer: remove } });
     const priorConfirm = window.confirm; window.confirm = vi.fn(() => true);
     try {
       harness.render(<PeerSettings />);
@@ -117,7 +119,7 @@ describe('database peer settings UI', () => {
 
   it('missing protected storage disables lifecycle actions and reports introductions unavailable', async () => {
     const harness = createHarness();
-    installTestPluginRuntime({ rpc: { groupStatus: async () => ({ configured: false, repoId: 'database', replicaId: 'r-a', roster: null,
+    installTestPluginRuntime({ deepLinkBase: null, rpc: { groupStatus: async () => ({ configured: false, repoId: 'database', replicaId: 'r-a', roster: null,
       members: [], jobs: [], setup: null, peers: [], enrolled: [{ id: 'app-b', name: 'Laptop', connected: true }],
       lifecycleAvailable: false, introductionsAvailable: false, installerAvailable: false }) } });
     harness.render(<PeerSettings />);
@@ -134,17 +136,17 @@ describe('database peer settings UI', () => {
     const status = { configured: true, repoId: 'database', replicaId: 'r-a', roster: { rosterEpoch: 4 }, members,
       jobs: [{ id: 'retire', kind: 'retire', peerId: 'app-b', state: 'blocked', error: 'waiting for committed frontier' }],
       peers: [], enrolled: [], setup: null, lifecycleAvailable: true, introductionsAvailable: true };
-    installTestPluginRuntime({ rpc: { groupStatus: async () => status } });
+    installTestPluginRuntime({ deepLinkBase: null, rpc: { groupStatus: async () => status } });
     harness.render(<PeerSettings />);
     await screen.findByText('Sync group: 3 of 8 computers');
-    expect(screen.getByText('Being removed: waiting for committed frontier; data sync disabled')).toBeTruthy();
+    expect(screen.getByText('Waiting for committed frontier; data sync disabled')).toBeTruthy();
     expect(screen.getAllByRole('button', { name: 'Remove' })).toHaveLength(1);
     expect(screen.getByText(/app-b: blocked: waiting for committed frontier/)).toBeTruthy();
   });
 
   it('leads with copy/paste pairing and never requires Settings or Machines', async () => {
     const harness = createHarness();
-    installTestPluginRuntime({ rpc: { groupStatus: async () => ({ configured: false, repoId: 'database', replicaId: 'r-a', roster: null,
+    installTestPluginRuntime({ deepLinkBase: null, rpc: { groupStatus: async () => ({ configured: false, repoId: 'database', replicaId: 'r-a', roster: null,
       members: [], jobs: [{ id: 'done', peerId: 'app-b', state: 'done', error: null }], setup: null, peers: [], enrolled: [],
       lifecycleAvailable: true, introductionsAvailable: true, installerAvailable: false }) } });
     harness.render(<PeerSettings />);
@@ -164,7 +166,7 @@ describe('database peer settings UI', () => {
 
   it('explains missing introductions when lifecycle is ready; offline enrolled peers cannot be chosen', async () => {
     const harness = createHarness();
-    installTestPluginRuntime({ rpc: { groupStatus: async () => ({ configured: false, repoId: 'database', replicaId: 'r-a', roster: null,
+    installTestPluginRuntime({ deepLinkBase: null, rpc: { groupStatus: async () => ({ configured: false, repoId: 'database', replicaId: 'r-a', roster: null,
       members: [], jobs: [], setup: { peerId: 'app-b', repoId: 'database', state: 'joining', error: null }, peers: [],
       enrolled: [{ id: 'app-b', name: 'Desk', connected: false }], lifecycleAvailable: true, introductionsAvailable: false, installerAvailable: false }) } });
     harness.render(<PeerSettings />);
@@ -178,7 +180,7 @@ describe('database peer settings UI', () => {
   it('initial load failure shows the error and shows no lifecycle buttons', async () => {
     const harness = createHarness();
     const groupStatus = vi.fn(async () => { throw new Error('database group setup is unavailable'); });
-    installTestPluginRuntime({ rpc: { groupStatus } });
+    installTestPluginRuntime({ deepLinkBase: null, rpc: { groupStatus } });
     harness.render(<PeerSettings />);
     expect((await screen.findByRole('alert')).textContent).toBe('database group setup is unavailable');
     expect(screen.queryByText('Loading peers')).toBeNull();
@@ -190,7 +192,7 @@ describe('database peer settings UI', () => {
     const harness = createHarness();
     const members = ['a', 'b', 'c'].map((name) => ({ replicaId: `r-${name}`, machineId: `app-${name}`, authorized: true, connected: true }));
     const remove = vi.fn();
-    installTestPluginRuntime({ rpc: { groupStatus: async () => ({ configured: true, repoId: 'database', replicaId: 'r-a', roster: { rosterEpoch: 2 },
+    installTestPluginRuntime({ deepLinkBase: null, rpc: { groupStatus: async () => ({ configured: true, repoId: 'database', replicaId: 'r-a', roster: { rosterEpoch: 2 },
       members, jobs: [], peers: [], enrolled: [], setup: null, lifecycleAvailable: true, introductionsAvailable: true }), removePeer: remove } });
     const priorConfirm = window.confirm; window.confirm = vi.fn(() => false);
     try {
@@ -223,7 +225,7 @@ const peer = { instanceId: 'app-b', name: 'Laptop', fingerprint: 'ABCD-1234' };
 const lnk = (over: Partial<PeerLink> = {}): PeerLink => ({ pairingId: 'pair-1', peerInstanceId: 'app-b', scope: 'database', role: 'inviter', phase: 'linked', state: 'connected', ...over });
 function mount(rpc: Record<string, (args?: any) => unknown>, props: Parameters<typeof PeerSettings>[0] = {}) {
   const harness = createHarness();
-  installTestPluginRuntime({ rpc: { groupStatus: async () => EMPTY, inviteState: async () => view(), ...rpc } });
+  installTestPluginRuntime({ deepLinkBase: null, rpc: { groupStatus: async () => EMPTY, inviteState: async () => view(), ...rpc } });
   return harness.render(<PeerSettings {...props} />);
 }
 
@@ -236,7 +238,7 @@ describe('invitation pairing UI', () => {
     ['ssh_host_key_mismatch', /not the one that made the invitation/, /new invitation/]
   ] as const)('Add peer failing with %s shows a guided setup card with steps', async (code, title, step) => {
     const harness = createHarness();
-    installTestPluginRuntime({ rpc: { groupStatus: async () => EMPTY, inviteState: async () => view(),
+    installTestPluginRuntime({ deepLinkBase: null, rpc: { groupStatus: async () => EMPTY, inviteState: async () => view(),
       createInvitation: async () => { throw new Error(code); } } });
     harness.render(<PeerSettings />);
     fireEvent.click(await screen.findByRole('button', { name: 'Add peer' }));
@@ -247,7 +249,7 @@ describe('invitation pairing UI', () => {
 
   it('tells owners both computers must be on the same network and where Remote Login lives', async () => {
     const harness = createHarness();
-    installTestPluginRuntime({ rpc: { groupStatus: async () => EMPTY, inviteState: async () => view() } });
+    installTestPluginRuntime({ deepLinkBase: null, rpc: { groupStatus: async () => EMPTY, inviteState: async () => view() } });
     harness.render(<PeerSettings />);
     expect(await screen.findByText(/Both computers must be on the same network/)).toBeTruthy();
     expect(screen.getByText(/System Settings > General > Sharing > Remote Login/)).toBeTruthy();
@@ -268,8 +270,8 @@ describe('invitation pairing UI', () => {
     expect(await screen.findByText(/Expires in 9:30/)).toBeTruthy();
     expect((screen.getByLabelText('Invitation') as HTMLInputElement).value).toBe('zccinv1.first');
     expect(writeText).toHaveBeenCalledWith('zccinv1.first');
-    await screen.findByRole('button', { name: 'Copy invitation' });
-    fireEvent.click(screen.getByRole('button', { name: 'Copy invitation' }));
+    await screen.findByRole('button', { name: 'Copy code' });
+    fireEvent.click(screen.getByRole('button', { name: 'Copy code' }));
     expect(writeText).toHaveBeenCalledTimes(2);
     fireEvent.click(screen.getByRole('button', { name: 'New invitation' }));
     await waitFor(() => expect((screen.getByLabelText('Invitation') as HTMLInputElement).value).toBe('zccinv1.second'));
@@ -289,7 +291,7 @@ describe('invitation pairing UI', () => {
     fireEvent.click(await screen.findByRole('button', { name: 'Add peer' }));
     expect(await screen.findByText(/Invitation expired\./)).toBeTruthy();
     expect(screen.queryByLabelText('Invitation')).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Copy invitation' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Copy code' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Cancel invitation' }));
     await waitFor(() => expect(screen.queryByRole('button', { name: 'New invitation' })).toBeNull());
     expect(cancel).toHaveBeenCalledWith({ invitationId: 'inv-1' });
@@ -304,7 +306,7 @@ describe('invitation pairing UI', () => {
     expect((await screen.findByRole('alert')).textContent).toMatch(/Copy failed/);
     expect((screen.getByLabelText('Invitation') as HTMLInputElement).value).toBe('zccinv1.manual');
     fireEvent.focus(screen.getByLabelText('Invitation'));
-    fireEvent.click(screen.getByRole('button', { name: 'Copy invitation' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Copy code' }));
     fireEvent.click(screen.getByRole('button', { name: 'New invitation' }));
     expect((await screen.findByText('Could not create the invitation.'))).toBeTruthy();
   });
@@ -315,7 +317,7 @@ describe('invitation pairing UI', () => {
     Object.defineProperty(document, 'execCommand', { value: exec, configurable: true });
     mount({ createInvitation: async () => ({ invitationId: 'inv-1', token: 'zccinv1.legacy', expiresAt: Date.now() + 600_000 }) });
     fireEvent.click(await screen.findByRole('button', { name: 'Add peer' }));
-    expect(await screen.findByRole('button', { name: 'Copy invitation' })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'Copy code' })).toBeTruthy();
     expect(exec).toHaveBeenCalledWith('copy');
     expect(screen.queryByText(/Copy failed/)).toBeNull();
     Object.defineProperty(document, 'execCommand', { value: undefined, configurable: true });
@@ -520,11 +522,11 @@ describe('invitation pairing UI', () => {
     const list = await screen.findByRole('list', { name: 'Computers' });
     const rows = within(list).getAllByRole('listitem').map((row) => row.textContent);
     expect(rows).toEqual([
-      'LaptopConnectedRemove', 'DeskReconnecting... (the other computer is offline)ReconnectRemove',
-      'StudioDisconnected (the link credential expired). Sync resumes when the link is back.ReconnectRemove',
-      'MiniDisconnected (the secure connection to the other computer is down). Sync resumes when the link is back.ReconnectRemove',
-      'OldDisconnected (the link was revoked). Add peer to pair again.Remove', 'TowerDisconnected. Sync resumes when the link is back.ReconnectRemove',
-      'PadPaused (Disconnected on this computer. Reconnect from Settings → Peers.)Remove']);
+      'LaptopConnectedRemove', 'DeskReconnectingReconnectRemoveThe other computer is offline',
+      'StudioDisconnectedReconnectRemoveThe link credential expired. Sync resumes when the link is back.',
+      'MiniDisconnectedReconnectRemoveThe secure connection to the other computer is down. Sync resumes when the link is back.',
+      'OldDisconnectedRemoveThe link was revoked. Add peer to pair again.', 'TowerDisconnectedReconnectRemoveSync resumes when the link is back.',
+      'PadPausedRemoveDisconnected on this computer. Reconnect from Settings → Peers.']);
     // The red banner is gone: the status line carries the state.
     expect(screen.queryByRole('alert')).toBeNull();
     expect(list.textContent).not.toMatch(/app-[a-j]/);
@@ -549,22 +551,61 @@ describe('invitation pairing UI', () => {
       groupStatus: async () => ({ ...EMPTY, configured: true, roster: { rosterEpoch: 1 }, members }) });
     const list = await screen.findByRole('list', { name: 'Computers' });
     const rows = within(list).getAllByRole('listitem');
-    expect(rows.map((row) => row.textContent)).toEqual(['LaptopDisconnected (the other computer is offline). Sync resumes when the link is back.ReconnectRemove', 'This computer']);
+    expect(rows.map((row) => row.textContent)).toEqual(['LaptopDisconnectedReconnectRemoveThe other computer is offline. Sync resumes when the link is back.']);
     expect(document.body.textContent).not.toMatch(/Unnamed computer|Members|Disable Link/);
   });
 
-  it('a legacy enrolled member without a link keeps a card with its enrolled name, and Remove stops the local link', async () => {
+  it('a legacy enrolled member without a link keeps a card with its enrolled name, and Remove clears the roster entry', async () => {
     const members = ['a', 'b'].map((name) => ({ replicaId: `r-${name}`, machineId: `app-${name}`, authorized: true, connected: name === 'a' }));
-    const revoke = vi.fn(async () => ({ ...EMPTY, configured: true, roster: { rosterEpoch: 1 }, members }));
-    mount({ groupStatus: async () => ({ ...EMPTY, configured: true, roster: { rosterEpoch: 1 }, members, enrolled: [{ id: 'app-b', name: 'Desk', connected: false }] }), revokePeer: revoke });
+    const remove = vi.fn(async () => ({ ...EMPTY, configured: false }));
+    mount({ groupStatus: async () => ({ ...EMPTY, configured: true, roster: { rosterEpoch: 1 }, members, enrolled: [{ id: 'app-b', name: 'Desk', connected: false }] }), removePeer: remove });
     const row = (await screen.findByText('Desk')).closest('li')!;
     expect(row.textContent).toBe('DeskOfflineRemove');
     expect(within(row).queryByRole('button', { name: 'Reconnect' })).toBeNull();
     const priorConfirm = window.confirm; window.confirm = vi.fn(() => true);
     try {
       fireEvent.click(within(row).getByRole('button', { name: 'Remove' }));
-      await waitFor(() => expect(revoke).toHaveBeenCalledExactlyOnceWith({ peerId: 'app-b' }));
+      await waitFor(() => expect(remove).toHaveBeenCalledExactlyOnceWith({ replicaId: 'r-b' }));
     } finally { window.confirm = priorConfirm; }
+  });
+
+  it('a rostered computer with no live link and no grant keeps a Remove card instead of a dead tombstone', async () => {
+    const members = ['a', 'b'].map((name) => ({ replicaId: `r-${name}`, machineId: `app-${name}`, authorized: name === 'a', connected: false }));
+    mount({ groupStatus: async () => ({ ...EMPTY, configured: true, roster: { rosterEpoch: 1 }, members }) });
+    const row = (await screen.findByText('Unnamed computer')).closest('li')!;
+    expect(within(row).getByRole('button', { name: 'Remove' })).toBeTruthy();
+  });
+
+  it('a leftover roster after leaving the group shows no computers and no group line', async () => {
+    const members = ['a', 'b'].map((name) => ({ replicaId: `r-${name}`, machineId: `app-${name}`, authorized: false, connected: false }));
+    mount({ groupStatus: async () => ({ ...EMPTY, configured: false, replicaId: 'r-a', roster: { rosterEpoch: 2 }, members }) });
+    await screen.findByText(/No sync group/);
+    expect(screen.queryByText('Unnamed computer')).toBeNull();
+  });
+
+  it('a computer card shows a bordered badge row, a danger Remove and a labelled group summary instead of a bare This computer line', async () => {
+    const members = ['a', 'b', 'c'].map((name) => ({ replicaId: `r-${name}`, machineId: `app-${name}`, authorized: true, connected: true }));
+    mount({ groupStatus: async () => ({ ...EMPTY, configured: true, replicaId: 'r-a', roster: { rosterEpoch: 1 }, members }) });
+    const cards = await screen.findAllByRole('listitem');
+    expect(cards).toHaveLength(2);
+    for (const card of cards) {
+      expect(card.className).toContain('dd-peers-card');
+      expect(within(card).getByRole('status').getAttribute('data-state')).toBe('connected');
+      expect(within(card).getByRole('button', { name: 'Remove' }).className).toContain('dd-btn-remove');
+    }
+    expect(screen.queryByText('This computer')).toBeNull();
+    const summary = screen.getByText('Sync group: 3 of 8 computers').parentElement!;
+    expect(summary.textContent).toContain('includes this computer');
+    expect(within(summary).getByRole('button', { name: 'Leave Group' })).toBeTruthy();
+  });
+
+  it('an open invitation has one Cancel invitation and no duplicate Cancel in the pending row', async () => {
+    mount({ createInvitation: async () => ({ invitationId: 'inv-1', token: 'zccinv1.t', expiresAt: Date.now() + 600_000 }),
+      inviteState: async () => view({ invitations: [item({ invitationId: 'inv-1', state: 'open' })] }) });
+    fireEvent.click(await screen.findByRole('button', { name: 'Add peer' }));
+    await screen.findByRole('button', { name: 'Cancel invitation' });
+    expect(screen.getByText(/Pending: waiting for the other computer/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Cancel' })).toBeNull();
   });
 
   it('a failed Remove reports the error and keeps the card', async () => {
@@ -728,7 +769,7 @@ describe('invitation pairing UI', () => {
 
     function mountWith(rpc: Record<string, (args?: any) => unknown>) {
       const harness = createHarness();
-      const installed = installTestPluginRuntime({ rpc: { groupStatus: async () => EMPTY, inviteState: async () => view(), ...rpc } });
+      const installed = installTestPluginRuntime({ deepLinkBase: null, rpc: { groupStatus: async () => EMPTY, inviteState: async () => view(), ...rpc } });
       (globalThis as { __ZCC_PLUGIN_RUNTIME__: { toast: unknown } }).__ZCC_PLUGIN_RUNTIME__.toast = (message: string, kind = 'info') => { harness.toasts.push({ message, kind } as never); };
       harness.render(<PeerSettings />);
       return Object.assign(harness, { emitRealtime: installed.emitRealtime });
@@ -745,7 +786,7 @@ describe('invitation pairing UI robustness', () => {
     const open = vi.fn(async () => ({ invitationId: 'inv-1', token: 'zccinv1.again', expiresAt: Date.now() + 600_000 }));
     mount({ inviteState: async () => view({ invitations: [item()] }), openInvitation: open });
     await waitFor(() => expect((screen.getByLabelText('Invitation') as HTMLInputElement).value).toBe('zccinv1.again'));
-    fireEvent.click(screen.getByRole('button', { name: 'Copy invitation' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Copy code' }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith('zccinv1.again'));
     cleanup();
     mount({ inviteState: async () => view({ invitations: [item({ invitationId: 'inv-9' })] }), openInvitation: open });
@@ -835,13 +876,13 @@ describe('invitation pairing UI robustness', () => {
   it('a link that is reconnecting says so and still offers Reconnect', async () => {
     mount({ inviteState: async () => view({ links: [lnk({ state: 'reconnecting' })] }) });
     const list = await screen.findByRole('list', { name: 'Computers' });
-    expect(list.textContent).toBe('Unnamed computerReconnecting...ReconnectRemove');
+    expect(list.textContent).toBe('Unnamed computerReconnectingReconnectRemove');
   });
 
   it('a revoked link has no Reconnect and points at Add peer', async () => {
     mount({ inviteState: async () => view({ links: [lnk({ state: 'disconnected', reason: 'revoked' })] }) });
     const list = await screen.findByRole('list', { name: 'Computers' });
-    expect(list.textContent).toBe('Unnamed computerDisconnected (the link was revoked). Add peer to pair again.Remove');
+    expect(list.textContent).toBe('Unnamed computerDisconnectedRemoveThe link was revoked. Add peer to pair again.');
   });
 
   it('a reconnect failing with an ssh_* reason shows the guidance card', async () => {

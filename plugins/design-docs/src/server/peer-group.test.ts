@@ -345,6 +345,14 @@ describe('transactional reserved-slot admission', () => {
     expect(c.group.sync.localRepository()!.groupId).toBeNull(); expect(c.group.jobs().some((job) => job.kind === 'local-revoke')).toBe(true);
   });
 
+  it('a two-member group refuses removing the other member but lets this computer leave', () => {
+    const a = fixture('a'), b = fixture('b'); found(a, b);
+    expect(() => a.group.remove(b.replica)).toThrow(/below 2/);
+    const left = a.group.remove(a.replica);
+    expect(left.stage).toBe('removed'); expect(left.roster.members.map((member) => member.replicaId)).toEqual([b.replica]);
+    expect(a.group.sync.localRepository()!.groupId).toBeNull();
+  });
+
   it('rejects forks, forged owner/hash/projection, unknown sender and scope atomically', () => {
     const a = fixture('a'), b = fixture('b'), c = fixture('c'); found(a, b); const root = a.group.roster()!;
     const { receipt } = join(a, c, 0); const before = a.group.roster(), jobs = a.group.jobs();

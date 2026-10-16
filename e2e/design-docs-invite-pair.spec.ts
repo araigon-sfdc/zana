@@ -52,6 +52,9 @@ async function addPeer(app: AppHandle): Promise<string> {
   const panel = (await openPeers(app)).getByLabel('Pair a peer');
   await panel.getByRole('button', { name: 'Add peer', exact: true }).click();
   await expect(panel.getByRole('status').filter({ hasText: /^Invitation ready\. Expires in \d+:\d{2}\. Paste it on the other computer before then\.$/ })).toBeVisible({ timeout: 30_000 });
+  // The field shows the auto-copied format (a link when the build has one); pick the raw code for the tests.
+  await panel.getByRole('button', { name: 'Copy code', exact: true }).click();
+  await expect(panel.getByRole('textbox', { name: 'Invitation', exact: true })).toHaveValue(/^zccinv1\./);
   const token = await panel.getByRole('textbox', { name: 'Invitation', exact: true }).inputValue();
   expect(token).toMatch(/^zccinv1\./);
   return token;
@@ -166,8 +169,8 @@ test('two fresh apps pair over a private sshd, sync both ways, heal a killed ssh
     expect(aFingerprint).not.toBe(bFingerprint);
     await approveInUi(a);
     // A finished pairing hands over to its computer card (the Ready row clears itself once the link exists).
-    await expect((await openPeers(a)).getByLabel('Computers').locator('.dd-peers-status', { hasText: /^Connected$/ })).toHaveCount(1, { timeout: 120_000 }).catch(error => { dumpLogs(a); dumpLogs(b); throw error; });
-    await expect((await openPeers(b)).getByLabel('Computers').locator('.dd-peers-status', { hasText: /^Connected$/ })).toHaveCount(1, { timeout: 120_000 });
+    await expect((await openPeers(a)).getByLabel('Computers').locator('.dd-peers-badge', { hasText: /^Connected$/ })).toHaveCount(1, { timeout: 120_000 }).catch(error => { dumpLogs(a); dumpLogs(b); throw error; });
+    await expect((await openPeers(b)).getByLabel('Computers').locator('.dd-peers-badge', { hasText: /^Connected$/ })).toHaveCount(1, { timeout: 120_000 });
 
     step('key swap and connected');
     // The throwaway bootstrap line is replaced by B's per-link key: gone, and exactly one link line remains.
@@ -221,6 +224,10 @@ test('two fresh apps pair over a private sshd, sync both ways, heal a killed ssh
     a.window.once('dialog', dialog => void dialog.accept());
     await region.getByLabel('Computers').getByRole('listitem').filter({ has: a.window.locator(`[title*="${bId}"]`) }).getByRole('button', { name: 'Remove', exact: true }).click();
     await expect.poll(async () => (await liveLinks(a)).length, { timeout: 60_000 }).toBe(0);
+    // Remove ends the whole pairing: no dead card for B, no tombstone text, no group count.
+    await expect(region.getByLabel('Computers').locator(`[title*="${bId}"]`)).toHaveCount(0, { timeout: 30_000 });
+    await expect(region).not.toContainText('Not syncing. Add peer to pair again.');
+    await expect(region).not.toContainText('Sync group:');
     await expect.poll(() => zanaLines(a), { message: 'no zana-peer-v1 lines remain', timeout: 30_000 }).toEqual([]);
     await expect.poll(() => listening(F), { message: 'nothing listens on F', timeout: 30_000 }).toBe(false);
     await expect.poll(() => linkSshPids(sshd).length, { message: 'B closes its ssh', timeout: 60_000 }).toBe(0);

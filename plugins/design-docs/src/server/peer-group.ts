@@ -247,7 +247,12 @@ export class DesignDocPeerGroup {
       if (isRetiring(current, local.replicaId) && !current.retirements.some((event) => event.actorReplicaId === local.replicaId && event.replicaId === replicaId)) {
         throw new PeerProtocolError('invalid', 'retiring member cannot initiate retirement');
       }
-      if (!isRetiring(current, replicaId) && current.members.length <= 2) throw new PeerProtocolError('invalid', 'two-member group cannot shrink below 2; disable link instead');
+      // A group never loses another member below 2 (the survivor could not seal it). The one exception is this computer
+      // leaving: it seals its own retirement locally at once, and the survivor merely holds a one-member roster. Groups of
+      // 3+ are unaffected: any removal that leaves two or more members stays allowed, nothing else is relaxed.
+      if (!isRetiring(current, replicaId) && current.members.length <= 2 && replicaId !== local.replicaId) {
+        throw new PeerProtocolError('invalid', 'two-member group cannot shrink below 2; disable link instead');
+      }
       let roster = requestRetirement(current, local.replicaId, replicaId);
       const requestId = roster.retirements.find((event) => event.actorReplicaId === local.replicaId && event.replicaId === replicaId)!.requestId;
       if (replicaId === local.replicaId) roster = closeRetirement(roster, replicaId);

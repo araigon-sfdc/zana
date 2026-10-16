@@ -25,6 +25,21 @@ Parsing is strict and total. Anything else is dropped in main (never thrown) and
 
 macOS resolves scheme handlers from the app bundle, so an unpackaged dev Electron cannot own a scheme there. Use `pnpm dev:open-link "<url>"` instead: it launches (or reaches, via the single-instance lock) the dev app with the link as an argument.
 
+### macOS dev setup
+
+To make clicking a `zana-dev://` link (Slack, browser) reach `pnpm run dev`, register a small helper app once:
+
+```
+pnpm dev:register-link            # add --dry-run to print the plan only
+pnpm dev:unregister-link          # lsregister -u and delete the helper dir
+```
+
+- Creates `~/Library/Application Support/Zana Dev Link/ZanaDevLink.app`: an `osacompile`d AppleScript applet (`on open location`) whose Info.plist declares `zana-dev` and `LSUIElement` (no Dock icon). It is ad-hoc signed and registered with `lsregister -f`. No network, no sudo.
+- On a click, macOS hands the URL to the applet. It accepts only `zana-dev://plugin/...` links of at most 8192 characters made of a shell-inert character set (mirrors the parser in `packages/desktop-contract/src/deep-link.ts`), then runs `<node> <checkout>/scripts/dev-open-link.mjs <url>` with the URL as one quoted argument. Node path and checkout path are baked in at registration time; re-run `pnpm dev:register-link` after moving the checkout or switching node.
+- Dev app running: the link goes to it through the single-instance lock. Not running but `out-dev/` is built: `dev-open-link` starts the dev app and routes the link once the window is ready. `out-dev/main/index.js` missing: a "Run pnpm run dev first" notification, nothing else happens.
+- First use: macOS may ask which app opens `zana-dev://`. Choose **ZanaDevLink** and tick "always". There is no scriptable default-handler setter without extra tools (`duti`, Swift).
+- Non-macOS: the command prints a message and exits 0; use `ZCC_REGISTER_DEV_PROTOCOL=1` there.
+
 Env vars: `ZCC_REGISTER_DEV_PROTOCOL=1` (dev OS registration), `ZCC_E2E_DEEP_LINK_SCHEME` (E2E-only scheme override, honoured only under `ZCC_E2E_HOME`), `ZCC_DATA_DIR` (dev data dir; its presence enables the single-instance lock for unpackaged runs).
 
 ## Plugin API

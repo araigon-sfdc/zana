@@ -3,15 +3,11 @@
  * Parsing here is advisory (display and routing only); the server still validates every token it redeems.
  */
 import { PLUGIN_ID } from '../shared/contract.js';
-import { usePersistentState } from './hooks.js';
 
 export const TOKEN_PREFIX = 'zccinv1.';
 /** Host limits for a deep link: decoded payload and whole link. */
 export const MAX_LINK_PAYLOAD = 4096;
 export const MAX_LINK = 8192;
-
-export type InviteFormat = 'link' | 'code';
-export type InviteFormatPreference = InviteFormat | '';
 
 /** A deep link request for the Join peer field (`seq` makes repeated identical links distinct). */
 export interface JoinRequest {
@@ -102,15 +98,4 @@ export function parseJoinPayload(payload: string | null, now = Date.now()): Invi
   if (!summary) return { kind: 'invalid', message: LINK_ERROR };
   if (summary.expiresAt <= now) return { kind: 'invalid', message: EXPIRED_ERROR };
   return { kind: 'token', token: summary.token, summary };
-}
-
-/** The remembered delivery preference ('' = automatic: link when this build has a link scheme, else code). */
-export function useInviteFormatPreference(): [InviteFormatPreference, (value: InviteFormatPreference) => void] {
-  const [stored, setStored] = usePersistentState<string>('invite-format', '');
-  const preference: InviteFormatPreference = stored === 'link' || stored === 'code' ? stored : '';
-  return [preference, setStored];
-}
-
-export function resolveInviteFormat(preference: InviteFormatPreference, base: string | null): InviteFormat {
-  return preference || (base ? 'link' : 'code');
 }

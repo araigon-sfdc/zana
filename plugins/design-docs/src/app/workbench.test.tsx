@@ -103,8 +103,8 @@ describe('peers view', () => {
     expect(screen.getByText('Manage Design Docs sync, agents and publishing preferences.')).toBeTruthy();
     const nav = screen.getByRole('navigation', { name: 'Settings sections' });
     expect([...nav.querySelectorAll('.dd-nav-group-label')].map((el) => el.textContent)).toEqual(['SYNC', 'AGENTS']);
-    expect([...nav.querySelectorAll('button')].map((el) => el.textContent)).toEqual(['Peers', 'Sharing', 'Agent']);
-    expect(nav.querySelectorAll('button svg')).toHaveLength(3);
+    expect([...nav.querySelectorAll('button')].map((el) => el.textContent)).toEqual(['Peers', 'Agent']);
+    expect(nav.querySelectorAll('button svg')).toHaveLength(2);
     // Default section: only Peers renders, under its own heading and description.
     expect(screen.getByRole('heading', { name: 'Peers' })).toBeTruthy();
     expect(screen.getByRole('region', { name: 'Database sync peers' })).toBeTruthy();
