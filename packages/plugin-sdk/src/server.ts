@@ -689,6 +689,8 @@ export interface PluginInvitationStatus {
 export interface PluginPeerLink {
   pairingId: string;
   peerInstanceId: string;
+  /** The peer's display name from pairing. Absent on links made before names were kept: fall back to another label, never show the id. */
+  peerName?: string;
   scope: string;
   role: 'inviter' | 'redeemer';
   phase: 'pending' | 'exchanged' | 'enrolled' | 'linked' | 'failed' | 'removed';

@@ -81,6 +81,8 @@ export interface PeerLinkView {
   pairingId: string; peerInstanceId: string; pluginId: string; scope: string; role: 'inviter' | 'redeemer';
   phase: PeerLinkViewPhase; state: PeerLinkState; reason?: PeerLinkReason; failure?: PeerLinkFailure;
   retryInMs?: number; capability: 'peer.forward';
+  /** The peer's display name learned while pairing; absent on records written before names were kept. */
+  peerName?: string;
 }
 
 type Bridge = {
@@ -1240,7 +1242,8 @@ export class PeerLinks implements PeerLinksControlPort {
   private project(rec: Rec): PeerLinkView {
     const phase: PeerLinkViewPhase = rec.phase === 'pre-consent' ? 'pending' : rec.phase === 'activating' ? 'enrolled' : rec.phase;
     const base = { pairingId: rec.pairingId ?? rec.invitationId, peerInstanceId: rec.peer!, pluginId: rec.pluginId, scope: rec.scope, role: rec.role,
-      phase, capability: 'peer.forward' as const, ...(rec.failure ? { failure: rec.failure } : {}) };
+      phase, capability: 'peer.forward' as const, ...(rec.failure ? { failure: rec.failure } : {}),
+      ...(rec.peerName ? { peerName: rec.peerName } : {}) };
     if (rec.phase === 'removed') return { ...base, state: 'disconnected', reason: 'revoked' };
     if (rec.phase === 'failed') return { ...base, state: 'disconnected', reason: 'peer-offline' };
     if (rec.phase !== 'linked') {

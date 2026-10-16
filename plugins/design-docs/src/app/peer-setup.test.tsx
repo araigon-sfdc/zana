@@ -63,7 +63,7 @@ describe('database peer settings UI', () => {
       ['retryIntroductions', undefined], ['removePeer', { replicaId: 'replica' }], ['revokePeer', { peerId: 'app' }]]);
   });
 
-  it('confirms link disable separately from membership removal; two-member group cannot shrink', async () => {
+  it('two computers: one card per computer, Remove deletes the link only, and no roster controls render', async () => {
     const harness = createHarness();
     const members = ['a', 'b'].map((name) => ({ replicaId: `r-${name}`, machineId: `app-${name}`, authorized: true, connected: true, grantEpoch: 1, joinedAt: 1, sponsorReplicaId: null }));
     const status = { configured: true, repoId: 'database', replicaId: 'r-a', roster: { rosterEpoch: 1 },
@@ -76,23 +76,24 @@ describe('database peer settings UI', () => {
     try {
       harness.render(<PeerSettings />);
       await screen.findByText('Sync group: 2 of 8 computers');
-      expect(screen.getByText('This computer: connected')).toBeTruthy();
-      expect(screen.getByText('Unnamed computer: connected').getAttribute('title')).toBe('Computer id app-b');
-      expect(screen.getByText('Unnamed computer: connected').textContent).not.toContain('app-b');
-      expect(screen.getByRole('button', { name: 'Remove Member' })).toHaveProperty('disabled', true);
-      expect(screen.getByRole('button', { name: 'Leave Group' })).toHaveProperty('disabled', true);
-      fireEvent.click(screen.getByRole('button', { name: 'Disable Link' }));
+      const list = screen.getByRole('list', { name: 'Computers' });
+      expect(within(list).getAllByRole('listitem').map((row) => row.textContent)).toEqual(['Unnamed computerConnectedRemove', 'This computer']);
+      expect(screen.getByText('Unnamed computer').getAttribute('title')).toBe('Computer id app-b');
+      expect(list.textContent).not.toContain('app-b');
+      expect(screen.queryByRole('button', { name: /Remove Member|Leave Group|Disable Link/ })).toBeNull();
+      fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
       expect(revoke).not.toHaveBeenCalled();
-      expect(confirm).toHaveBeenCalledWith('Disable this local database link? Group membership is unchanged.');
+      expect(confirm).toHaveBeenCalledWith('Remove Unnamed computer? This computer stops syncing with it and the link is deleted. To sync again, pair with Add peer.');
       confirm.mockReturnValue(true);
-      fireEvent.click(screen.getByRole('button', { name: 'Disable Link' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
       await waitFor(() => expect(revoke).toHaveBeenCalledExactlyOnceWith({ peerId: 'app-b' }));
       expect(remove).not.toHaveBeenCalled();
-      expect(screen.getByText('Sync group: 2 of 8 computers')).toBeTruthy();
+      expect(await screen.findByText('Not syncing. Add peer to pair again.')).toBeTruthy();
+      expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull();
     } finally { window.confirm = priorConfirm; }
   });
 
-  it('non-founder can remove or leave; capacity wait stays visible without success claim', async () => {
+  it('three computers: Remove and Leave Group appear and remove through the roster; capacity wait stays visible', async () => {
     const harness = createHarness();
     const members = ['a', 'b', 'c'].map((name) => ({ replicaId: `r-${name}`, machineId: `app-${name}`, authorized: true, connected: true }));
     const status = { configured: true, repoId: 'database', replicaId: 'r-c', roster: { rosterEpoch: 3 }, members,
@@ -104,10 +105,13 @@ describe('database peer settings UI', () => {
     try {
       harness.render(<PeerSettings />);
       await screen.findByText(/Setup pending: app-d: waiting for reserved capacity/);
-      expect(screen.getAllByRole('button', { name: 'Remove Member' })).toHaveLength(2);
+      expect(screen.getAllByRole('button', { name: 'Remove' })).toHaveLength(2);
       fireEvent.click(screen.getByRole('button', { name: 'Leave Group' }));
       await waitFor(() => expect(remove).toHaveBeenCalledExactlyOnceWith({ replicaId: 'r-c' }));
-      expect(window.confirm).toHaveBeenCalledWith('Remove this member? Syncing with them stops on this computer now. If they are offline, removal finishes when they reconnect.');
+      expect(window.confirm).toHaveBeenLastCalledWith('Leave the sync group? This computer stops syncing with every other computer in it. If they are offline, leaving finishes when they reconnect.');
+      fireEvent.click(screen.getAllByRole('button', { name: 'Remove' })[0]!);
+      await waitFor(() => expect(remove).toHaveBeenLastCalledWith({ replicaId: 'r-a' }));
+      expect(window.confirm).toHaveBeenLastCalledWith('Remove Unnamed computer from the sync group for everyone? Syncing with it stops on this computer now. If it is offline, removal finishes when it reconnects.');
     } finally { window.confirm = priorConfirm; }
   });
 
@@ -123,7 +127,7 @@ describe('database peer settings UI', () => {
     expect(screen.getByRole('button', { name: 'Enable Database Sync' })).toHaveProperty('disabled', true);
   });
 
-  it('pending retirement keeps member visible without data authorization or removal success', async () => {
+  it('pending retirement keeps member visible without data authorization or removal controls', async () => {
     const harness = createHarness();
     const members = ['a', 'b', 'c'].map((name) => ({ replicaId: `r-${name}`, machineId: `app-${name}`,
       retiring: name === 'b', authorized: name !== 'b', connected: name !== 'b' }));
@@ -133,9 +137,8 @@ describe('database peer settings UI', () => {
     installTestPluginRuntime({ rpc: { groupStatus: async () => status } });
     harness.render(<PeerSettings />);
     await screen.findByText('Sync group: 3 of 8 computers');
-    expect(screen.getByText(/Unnamed computer: retiring - waiting for committed frontier; data sync disabled/)).toBeTruthy();
-    expect(screen.getAllByRole('button', { name: 'Remove Member' })[0]).toHaveProperty('disabled', true);
-    expect(screen.getAllByRole('button', { name: 'Disable Link' })[0]).toHaveProperty('disabled', false);
+    expect(screen.getByText('Being removed: waiting for committed frontier; data sync disabled')).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: 'Remove' })).toHaveLength(1);
     expect(screen.getByText(/app-b: blocked: waiting for committed frontier/)).toBeTruthy();
   });
 
@@ -193,7 +196,7 @@ describe('database peer settings UI', () => {
     try {
       harness.render(<PeerSettings />);
       await screen.findByText('Sync group: 3 of 8 computers');
-      fireEvent.click(screen.getAllByRole('button', { name: 'Remove Member' })[0]!);
+      fireEvent.click(screen.getAllByRole('button', { name: 'Remove' })[0]!);
       expect(window.confirm).toHaveBeenCalledOnce();
       expect(remove).not.toHaveBeenCalled();
     } finally { window.confirm = priorConfirm; }
@@ -340,7 +343,7 @@ describe('invitation pairing UI', () => {
     expect(screen.getByRole('button', { name: 'Add peer' })).toHaveProperty('disabled', true);
     expect(screen.getByLabelText('Paste invitation')).toHaveProperty('disabled', true);
     expect(await screen.findByText('Sync group: 2 of 8 computers')).toBeTruthy();
-    expect(screen.queryByRole('list', { name: 'Peer links' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Reconnect' })).toBeNull();
   });
 
   it('inviteState failure leaves pairing actions usable and shows no invitation list', async () => {
@@ -501,33 +504,103 @@ describe('invitation pairing UI', () => {
     expect(decide).not.toHaveBeenCalled();
   });
 
-  it('shows Connected, Reconnecting and Disconnected with exact reasons, a Disconnected notice and Reconnect', async () => {
+  it('shows one card per computer: name, one status line with the exact reason, and Reconnect only where it can work', async () => {
     const reconnect = vi.fn(async () => [lnk({ state: 'reconnecting' })]);
-    const links = [lnk(), lnk({ pairingId: 'p2', peerInstanceId: 'app-c', state: 'reconnecting', reason: 'peer-offline' }),
-      lnk({ pairingId: 'p3', peerInstanceId: 'app-d', state: 'disconnected', reason: 'credential-expired' }),
-      lnk({ pairingId: 'p4', peerInstanceId: 'app-e', state: 'disconnected', reason: 'ssh-down' }),
-      lnk({ pairingId: 'p5', peerInstanceId: 'app-f', state: 'disconnected', reason: 'revoked' }),
-      lnk({ pairingId: 'p6', peerInstanceId: 'app-g', state: 'disconnected' }),
-      lnk({ pairingId: 'p10', peerInstanceId: 'app-j', state: 'disconnected', reason: 'paused' }),
+    const links = [lnk({ peerName: 'Laptop' }), lnk({ pairingId: 'p2', peerInstanceId: 'app-c', peerName: 'Desk', state: 'reconnecting', reason: 'peer-offline' }),
+      lnk({ pairingId: 'p3', peerInstanceId: 'app-d', peerName: 'Studio', state: 'disconnected', reason: 'credential-expired' }),
+      lnk({ pairingId: 'p4', peerInstanceId: 'app-e', peerName: 'Mini', state: 'disconnected', reason: 'ssh-down' }),
+      lnk({ pairingId: 'p5', peerInstanceId: 'app-f', peerName: 'Old', state: 'disconnected', reason: 'revoked' }),
+      lnk({ pairingId: 'p6', peerInstanceId: 'app-g', peerName: 'Tower', state: 'disconnected' }),
+      lnk({ pairingId: 'p10', peerInstanceId: 'app-j', peerName: 'Pad', state: 'disconnected', reason: 'paused' }),
       lnk({ pairingId: 'p7', peerInstanceId: 'app-h', phase: 'removed', state: 'disconnected' }),
       // A declined or replayed attempt never linked: not shown, and it never shadows the live link to the same peer.
       lnk({ pairingId: 'p8', peerInstanceId: 'app-i', phase: 'failed', state: 'disconnected', reason: 'peer-offline' }),
       lnk({ pairingId: 'p9', peerInstanceId: 'app-b', phase: 'failed', state: 'disconnected', reason: 'peer-offline' })];
-    mount({ inviteState: async () => view({ links }), reconnectPeer: reconnect,
-      groupStatus: async () => ({ ...EMPTY, enrolled: [{ id: 'app-b', name: 'Laptop', connected: true }] }) });
-    const list = await screen.findByRole('list', { name: 'Peer links' });
+    mount({ inviteState: async () => view({ links }), reconnectPeer: reconnect });
+    const list = await screen.findByRole('list', { name: 'Computers' });
     const rows = within(list).getAllByRole('listitem').map((row) => row.textContent);
     expect(rows).toEqual([
-      'Laptop: Connected', 'app-c: Reconnecting automatically... (the other computer is offline)Reconnect',
-      'app-d: Disconnected (the link credential expired)Reconnect', 'app-e: Disconnected (the secure connection to the other computer is down)Reconnect',
-      'app-f: Disconnected (the link was revoked). Add peer to pair again.', 'app-g: DisconnectedReconnect', 'app-j: Paused (Disconnected on this computer. Reconnect from Settings → Peers.)']);
-    const alerts = screen.getAllByRole('alert').map((alert) => alert.textContent);
-    expect(alerts).toContain('Disconnected from app-d (the link credential expired). Sync is paused and resumes when the link is back.');
-    expect(alerts).toContain('Disconnected from app-g. Sync is paused and resumes when the link is back.');
-    expect(alerts.some((text) => text?.includes('app-j'))).toBe(false);
-    expect(alerts.some((text) => text?.includes('app-h') || text?.includes('app-i') || text?.includes('Laptop'))).toBe(false);
+      'LaptopConnectedRemove', 'DeskReconnecting... (the other computer is offline)ReconnectRemove',
+      'StudioDisconnected (the link credential expired). Sync resumes when the link is back.ReconnectRemove',
+      'MiniDisconnected (the secure connection to the other computer is down). Sync resumes when the link is back.ReconnectRemove',
+      'OldDisconnected (the link was revoked). Add peer to pair again.Remove', 'TowerDisconnected. Sync resumes when the link is back.ReconnectRemove',
+      'PadPaused (Disconnected on this computer. Reconnect from Settings → Peers.)Remove']);
+    // The red banner is gone: the status line carries the state.
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(list.textContent).not.toMatch(/app-[a-j]/);
     fireEvent.click(within(list).getAllByRole('button', { name: 'Reconnect' })[1]!);
     await waitFor(() => expect(reconnect).toHaveBeenCalledExactlyOnceWith({ peerId: 'app-d' }));
+  });
+
+  it('name falls back from the link to the enrolled name, the invitation and finally Unnamed computer; an id is never a label', async () => {
+    const links = [lnk({ peerName: 'From link' }), lnk({ pairingId: 'p2', peerInstanceId: 'app-c' }), lnk({ pairingId: 'p3', peerInstanceId: 'app-d' }),
+      lnk({ pairingId: 'p4', peerInstanceId: '3f32cd8a-1111-4222-8333-444455556666' })];
+    mount({ inviteState: async () => view({ links, invitations: [item({ invitationId: 'i2', state: 'ready', peer: { instanceId: 'app-d', name: 'From invite', fingerprint: 'F' } })] }),
+      groupStatus: async () => ({ ...EMPTY, enrolled: [{ id: 'app-c', name: 'Enrolled', connected: true }, { id: 'app-b', name: 'Shadowed', connected: true }] }) });
+    const list = await screen.findByRole('list', { name: 'Computers' });
+    expect(within(list).getAllByRole('listitem').map((row) => row.querySelector('strong')?.textContent)).toEqual(['From link', 'Enrolled', 'From invite', 'Unnamed computer']);
+    expect(list.textContent).not.toContain('3f32cd8a');
+    expect(within(list).getAllByText('Unnamed computer')[0]!.getAttribute('title')).toBe('Computer id 3f32cd8a-1111-4222-8333-444455556666');
+  });
+
+  it('joins a link and its group member on the instance id into a single card with the link name and status', async () => {
+    const members = ['a', 'b'].map((name) => ({ replicaId: `r-${name}`, machineId: `app-${name}`, authorized: true, connected: false }));
+    mount({ inviteState: async () => view({ links: [lnk({ peerName: 'Laptop', state: 'disconnected', reason: 'peer-offline' })] }),
+      groupStatus: async () => ({ ...EMPTY, configured: true, roster: { rosterEpoch: 1 }, members }) });
+    const list = await screen.findByRole('list', { name: 'Computers' });
+    const rows = within(list).getAllByRole('listitem');
+    expect(rows.map((row) => row.textContent)).toEqual(['LaptopDisconnected (the other computer is offline). Sync resumes when the link is back.ReconnectRemove', 'This computer']);
+    expect(document.body.textContent).not.toMatch(/Unnamed computer|Members|Disable Link/);
+  });
+
+  it('a legacy enrolled member without a link keeps a card with its enrolled name, and Remove stops the local link', async () => {
+    const members = ['a', 'b'].map((name) => ({ replicaId: `r-${name}`, machineId: `app-${name}`, authorized: true, connected: name === 'a' }));
+    const revoke = vi.fn(async () => ({ ...EMPTY, configured: true, roster: { rosterEpoch: 1 }, members }));
+    mount({ groupStatus: async () => ({ ...EMPTY, configured: true, roster: { rosterEpoch: 1 }, members, enrolled: [{ id: 'app-b', name: 'Desk', connected: false }] }), revokePeer: revoke });
+    const row = (await screen.findByText('Desk')).closest('li')!;
+    expect(row.textContent).toBe('DeskOfflineRemove');
+    expect(within(row).queryByRole('button', { name: 'Reconnect' })).toBeNull();
+    const priorConfirm = window.confirm; window.confirm = vi.fn(() => true);
+    try {
+      fireEvent.click(within(row).getByRole('button', { name: 'Remove' }));
+      await waitFor(() => expect(revoke).toHaveBeenCalledExactlyOnceWith({ peerId: 'app-b' }));
+    } finally { window.confirm = priorConfirm; }
+  });
+
+  it('a failed Remove reports the error and keeps the card', async () => {
+    const priorConfirm = window.confirm; window.confirm = vi.fn(() => true);
+    try {
+      mount({ inviteState: async () => view({ links: [lnk({ peerName: 'Laptop' })] }), revokePeer: async () => { throw new Error('database revocation already running'); } });
+      fireEvent.click(await screen.findByRole('button', { name: 'Remove' }));
+      expect((await screen.findByRole('alert')).textContent).toBe('database revocation already running');
+      expect(screen.getByText('Laptop')).toBeTruthy();
+    } finally { window.confirm = priorConfirm; }
+  });
+
+  it('disables Remove while core peer lifecycle is unavailable', async () => {
+    const members = ['a', 'b'].map((name) => ({ replicaId: `r-${name}`, machineId: `app-${name}`, authorized: true, connected: true }));
+    mount({ groupStatus: async () => ({ ...EMPTY, configured: true, roster: { rosterEpoch: 1 }, members, lifecycleAvailable: false }) });
+    expect(await screen.findByRole('button', { name: 'Remove' })).toHaveProperty('disabled', true);
+  });
+
+  it('a finished pairing clears itself once its link exists; failed, denied and expired rows keep Dismiss', async () => {
+    mount({ inviteState: async () => view({ links: [lnk({ peerName: 'Laptop' })], invitations: [item({ state: 'ready', peer })] }) });
+    await screen.findByRole('list', { name: 'Computers' });
+    expect(screen.queryByRole('list', { name: 'Pairing' })).toBeNull();
+    expect(screen.queryByText(/Ready: paired with/)).toBeNull();
+    cleanup();
+    // A removed link also stays cleared; only a ready pairing with no link at all remains, so it cannot get stuck.
+    mount({ inviteState: async () => view({ links: [lnk({ phase: 'removed', state: 'disconnected', reason: 'revoked' })], invitations: [item({ state: 'ready', peer })] }) });
+    await screen.findByText(/No sync group/);
+    expect(screen.queryByText(/Ready: paired with/)).toBeNull();
+    cleanup();
+    mount({ inviteState: async () => view({ invitations: [item({ state: 'ready', peer })] }) });
+    expect(await screen.findByText(/Ready: paired with Laptop/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Dismiss' })).toBeTruthy();
+    cleanup();
+    mount({ inviteState: async () => view({ links: [lnk()], invitations: [item({ state: 'denied', reason: 'denied', peer })] }) });
+    expect(await screen.findByText(/Pairing was declined/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Dismiss' })).toBeTruthy();
   });
 
   it('reports a failed reconnect', async () => {
@@ -761,14 +834,14 @@ describe('invitation pairing UI robustness', () => {
 
   it('a link that is reconnecting says so and still offers Reconnect', async () => {
     mount({ inviteState: async () => view({ links: [lnk({ state: 'reconnecting' })] }) });
-    const list = await screen.findByRole('list', { name: 'Peer links' });
-    expect(list.textContent).toBe('app-b: Reconnecting automatically...Reconnect');
+    const list = await screen.findByRole('list', { name: 'Computers' });
+    expect(list.textContent).toBe('Unnamed computerReconnecting...ReconnectRemove');
   });
 
   it('a revoked link has no Reconnect and points at Add peer', async () => {
     mount({ inviteState: async () => view({ links: [lnk({ state: 'disconnected', reason: 'revoked' })] }) });
-    const list = await screen.findByRole('list', { name: 'Peer links' });
-    expect(list.textContent).toBe('app-b: Disconnected (the link was revoked). Add peer to pair again.');
+    const list = await screen.findByRole('list', { name: 'Computers' });
+    expect(list.textContent).toBe('Unnamed computerDisconnected (the link was revoked). Add peer to pair again.Remove');
   });
 
   it('a reconnect failing with an ssh_* reason shows the guidance card', async () => {

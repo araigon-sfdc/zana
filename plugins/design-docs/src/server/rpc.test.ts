@@ -112,6 +112,24 @@ describe('Design Docs RPC', () => {
     expect(() => unavailable.revokePeer!({ peerId: 'app' })).toThrow(/unavailable/);
     await expect(unavailable.retryIntroductions!(undefined)).rejects.toThrow(/unavailable/);
   });
+  it('peerStatus marks this computer and linked members connected, and degrades without pairing or on a failed lookup', async () => {
+    const store = new DesignDocStore(createTestDatabase());
+    const members = [{ replicaId: 'r-a', machineId: 'app-a' }, { replicaId: 'r-b', machineId: 'app-b' }, { replicaId: 'r-c', machineId: 'app-c' }];
+    const peerSync = { status: () => ({ configured: true, replicaId: 'r-a', members }) };
+    const connectedMembers = vi.fn(async () => ['app-b']);
+    const withPairing = createRpcHandlers({ store, changed: vi.fn(), sdk: {} as never, peerSync: peerSync as never, pairing: { connectedMembers } as never });
+    await expect(withPairing.peerStatus!(undefined)).resolves.toMatchObject({ configured: true, members: [
+      { machineId: 'app-a', connected: true }, { machineId: 'app-b', connected: true }, { machineId: 'app-c', connected: false }] });
+    const failing = createRpcHandlers({ store, changed: vi.fn(), sdk: {} as never, peerSync: peerSync as never,
+      pairing: { connectedMembers: async () => { throw new Error('host down'); } } as never });
+    await expect(failing.peerStatus!(undefined)).resolves.toMatchObject({ members: [{ connected: true }, { connected: false }, { connected: false }] });
+    const bare = createRpcHandlers({ store, changed: vi.fn(), sdk: {} as never, peerSync: peerSync as never });
+    await expect(bare.peerStatus!(undefined)).resolves.toMatchObject({ members: [{ connected: true }, { connected: false }, { connected: false }] });
+    const unconfigured = createRpcHandlers({ store, changed: vi.fn(), sdk: {} as never, peerSync: { status: () => ({ configured: false, members: [] }) } as never });
+    await expect(unconfigured.peerStatus!(undefined)).resolves.toEqual({ configured: false, members: [] });
+    await expect(createRpcHandlers({ store, changed: vi.fn(), sdk: {} as never }).peerStatus!(undefined)).resolves.toEqual({ configured: false, members: [] });
+  });
+
   it('captures message import plus association as one trusted import, not milestone', async () => {
     const db = createTestDatabase();
     let sync!: DesignDocSyncStore;

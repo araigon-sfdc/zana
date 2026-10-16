@@ -76,6 +76,14 @@ describe('PeersSettingsView', () => {
     expect(within(header).getByRole('button', { name: 'Disconnect' })).toBeTruthy();
     expect(within(header).getByRole('button', { name: 'Remove link' })).toBeTruthy();
     expect(within(header).getByText('Connected')).toBeTruthy();
+    const statuses = header.querySelector('.peers-link-statuses') as HTMLElement;
+    const actions = header.querySelector('.peers-link-actions') as HTMLElement;
+    expect(within(statuses).getAllByRole('status').map((el) => el.textContent)).toEqual(['Linked', 'Connected']);
+    expect(within(statuses).getByText('Connected').classList.contains('peers-state')).toBe(true);
+    expect(within(statuses).queryByRole('button')).toBeNull();
+    expect(statuses.contains(actions)).toBe(false);
+    expect(within(actions).getByRole('button', { name: 'Disconnect' }).className).toContain('peers-btn-secondary');
+    expect(within(actions).getByRole('button', { name: 'Remove link' }).className).toContain('peers-btn-remove');
     expect(screen.queryByRole('button', { name: 'Reconnect' })).toBeNull();
     fireEvent.click(within(header).getByRole('button', { name: 'Disconnect' }));
     await waitFor(() => expect(api.disconnect).toHaveBeenCalledWith('h1'));

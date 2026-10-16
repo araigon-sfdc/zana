@@ -18,7 +18,6 @@ export interface PeerSync {
   refresh(): void;
 }
 
-/** One sync implementation shared by the doc-list header and the collapsed rail. */
 /** True until the component unmounts; async completions check it before touching state. */
 function useMounted(): { readonly current: boolean } {
   const mounted = useRef(true);
@@ -26,15 +25,24 @@ function useMounted(): { readonly current: boolean } {
   return mounted;
 }
 
+/** How often the Sync badge re-reads which computers are connected. */
+export const PEER_STATUS_POLL_MS = 15_000;
+
+/** One sync implementation shared by the doc-list header and the collapsed rail. */
 export function usePeerSync(): PeerSync {
   const api = useApi();
   const [peer, setPeer] = useState<PeerStatus | null>(null);
   const [syncing, setSyncing] = useState(false);
   const mounted = useMounted();
+  // A failed re-read keeps the last good view: a transient error must not hide the Sync button.
   const refresh = useCallback(() => {
-    void api.peerStatus().then((value) => { if (mounted.current) setPeer(value); }).catch(() => { if (mounted.current) setPeer(null); });
+    void api.peerStatus().then((value) => { if (mounted.current) setPeer(value); }).catch(() => undefined);
   }, [api, mounted]);
-  useEffect(refresh, [refresh]);
+  useEffect(() => {
+    refresh();
+    const timer = setInterval(refresh, PEER_STATUS_POLL_MS);
+    return () => clearInterval(timer);
+  }, [refresh]);
   const sync = () => {
     if (syncing) return;
     setSyncing(true);
@@ -42,37 +50,42 @@ export function usePeerSync(): PeerSync {
       .syncNow()
       .then((result) => toast(result.blocked ? `Synced ${result.synced}/${result.attempted}; ${result.blocked} blocked` : `Synced ${result.synced} peers`))
       .catch((error) => toast(errorMessage(error), 'error'))
-      .finally(() => { if (mounted.current) setSyncing(false); });
+      .finally(() => { if (mounted.current) { setSyncing(false); refresh(); } });
   };
   return { peer, syncing, sync, refresh };
 }
 
+/** Computers currently syncing: this one plus every connected peer. */
+export function syncingCount(peer: PeerStatus): number {
+  return Math.max(1, peer.members.filter((member) => member.connected).length);
+}
+
+function syncingTitle(count: number): string {
+  return count === 1 ? '1 computer syncing (this one)' : `${count} computers syncing (including this one)`;
+}
+
 /**
- * Sync now, only once a group is configured: a bordered square in the doc-list
- * header (sized like New), or a plain icon in the collapsed rail.
+ * Sync now, only once a group is configured: a bordered button in the doc-list header (sized like New) carrying
+ * the number of computers currently syncing, or a plain icon in the collapsed rail.
  */
 export function SyncButton({ peerSync, compact = false }: { peerSync: PeerSync; compact?: boolean }) {
   const { peer, syncing, sync } = peerSync;
   if (!peer?.configured) return null;
-  if (compact) return <IconButton icon={RefreshCw} label={syncing ? 'Syncing peers' : 'Sync peers'} disabled={syncing} onClick={sync} />;
+  const count = syncingCount(peer);
+  if (compact) return <IconButton icon={RefreshCw} label={`${syncing ? 'Syncing peers' : 'Sync peers'}: ${syncingTitle(count)}`} disabled={syncing} onClick={sync} />;
   return (
     <button
       type="button"
-      className="btn dd-head-btn dd-head-icon dd-sync"
+      className="btn dd-head-btn dd-sync"
       disabled={syncing}
       onClick={sync}
       aria-label={syncing ? 'Syncing' : 'Sync'}
-      title={`Sync group: ${peer.members.length} members`}
+      title={syncingTitle(count)}
     >
       <RefreshCw size={13} aria-hidden className={syncing ? 'spin' : undefined} />
+      <span className="dd-head-count">{count}</span>
     </button>
   );
-}
-
-function memberState(member: GroupStatus['members'][number]): string {
-  if (member.retiring) return 'retiring - waiting for committed frontier; data sync disabled';
-  if (!member.authorized) return 'not authorized';
-  return member.connected ? 'connected' : 'offline';
 }
 
 /**
@@ -232,7 +245,11 @@ function InvitePanel({ invites, onChanged, requestApproval, joinRequest, onJoinR
   const mounted = useMounted();
   const now = useNow(!!created);
   const unavailable = invites?.available === false;
-  const items = (invites?.invitations ?? []).filter((item) => !dismissed.includes(item.invitationId));
+  // A finished pairing clears itself once its link exists (the computer card carries it from there); Dismiss stays only
+  // for a 'ready' row that has no link to take over.
+  const linked = new Set((invites?.links ?? []).filter((link) => link.phase !== 'failed').map((link) => link.peerInstanceId));
+  const items = (invites?.invitations ?? []).filter((item) => !dismissed.includes(item.invitationId)
+    && !(item.state === 'ready' && item.peer && linked.has(item.peer.instanceId)));
   // The token is shown only while the invitation is open; any later state (or expiry) clears it.
   const live = created ? invites?.invitations.find((item) => item.invitationId === created.invitationId) : undefined;
   useEffect(() => { if (created && live && live.state !== 'open') setCreated(null); }, [created, live]);
@@ -394,39 +411,97 @@ function InviteRow({ item, busy, onApprove, onDeny, onCancel, onDismiss, onRenew
 
 const isLiveLink = (link: PeerLink): boolean => link.phase !== 'removed' && link.phase !== 'failed';
 
+const UNNAMED_COMPUTER = 'Unnamed computer';
+type GroupMemberStatus = GroupStatus['members'][number];
+
+/** One other computer: its invitation-founded link and its sync-group membership, joined on the same instance id. */
+interface Computer { id: string; name: string; link?: PeerLink; member?: GroupMemberStatus }
+
 /**
- * Per-peer transport status of this plugin's invitation-founded links (the host lists only links Design Docs uses), with
- * the exact reason and a Reconnect action that re-keys the link.
+ * Join links (peerInstanceId) and group members (machineId) into one entry per computer. The name comes from the link
+ * (learned while pairing), then the Machines enrollment, then the pairing invitation; an id is never a label.
  */
-function PeerLinks({ links, names, busy, onReconnect }: { links: PeerLink[]; names: Map<string, string>; busy: boolean; onReconnect(peerId: string): void }) {
-  // One row per peer: the newest live link wins (an older ended invitation must not shadow it). A failed attempt (declined,
-  // replayed, expired before linking) never carried sync, so it is not a link to show.
-  const live = [...new Map(links.filter(isLiveLink).map((link) => [link.peerInstanceId, link])).values()];
-  if (!live.length) return null;
-  const label = (link: PeerLink) => names.get(link.peerInstanceId) ?? link.peerInstanceId;
-  const detail = (link: PeerLink) => link.reason ? ` (${LINK_REASON_TEXT[link.reason]})` : '';
-  // Paused is the owner's choice (Settings → Peers), not a fault: no error banner and no Reconnect here.
-  const isPaused = (link: PeerLink) => link.reason === 'paused';
+function computersOf(links: PeerLink[], status: GroupStatus | null, names: Map<string, string>, invitations: InviteItem[]): Computer[] {
+  const invited = new Map(invitations.flatMap((item) => item.peer ? [[item.peer.instanceId, item.peer.name] as const] : []));
+  const byId = new Map<string, Computer>();
+  const nameOf = (id: string, link?: PeerLink) => link?.peerName || names.get(id) || invited.get(id) || UNNAMED_COMPUTER;
+  // The newest live link wins (an older ended invitation must not shadow it). A failed attempt never carried sync.
+  for (const link of links.filter(isLiveLink)) byId.set(link.peerInstanceId, { id: link.peerInstanceId, name: nameOf(link.peerInstanceId, link), link });
+  for (const member of status?.members ?? []) {
+    if (member.replicaId === status?.replicaId) continue;
+    const link = byId.get(member.machineId)?.link;
+    byId.set(member.machineId, { id: member.machineId, name: nameOf(member.machineId, link), link, member });
+  }
+  return [...byId.values()];
+}
+
+/** The one status line of a computer card. */
+function computerStatus({ link, member }: Computer): string {
+  if (member?.retiring) return 'Being removed: waiting for committed frontier; data sync disabled';
+  if (link) {
+    const detail = link.reason ? ` (${LINK_REASON_TEXT[link.reason]})` : '';
+    if (link.state === 'connected') return 'Connected';
+    if (link.state === 'reconnecting') return `Reconnecting...${detail}`;
+    if (link.reason === 'paused') return `Paused${detail}`;
+    if (link.reason === 'revoked') return `Disconnected${detail}. Add peer to pair again.`;
+    return `Disconnected${detail}. Sync resumes when the link is back.`;
+  }
+  if (!member) return 'Disconnected';
+  if (!member.authorized) return 'Not syncing. Add peer to pair again.';
+  return member.connected ? 'Connected' : 'Offline';
+}
+
+/**
+ * One card per other computer, whatever mix of pairing link and group membership it has. Reconnect re-keys the link;
+ * Remove stops syncing with it (for the whole group once there are three or more computers).
+ */
+function ComputerCards({ computers, status, busy, onReconnect, onRemove }: {
+  computers: Computer[]; status: GroupStatus | null; busy: boolean; onReconnect(id: string): void; onRemove(computer: Computer, scope: 'group' | 'link'): void;
+}) {
+  const self = status?.members.find((member) => member.replicaId === status.replicaId);
+  if (!computers.length && !self) return null;
+  // Roster removal needs a third computer to keep a group; with two, only the link can be removed.
+  const roster = !!status?.configured && status.members.length >= 3;
+  const lifecycle = !status || status.lifecycleAvailable;
   return (
-    <>
-      {live.filter((link) => link.state === 'disconnected' && !isPaused(link)).map((link) => (
-        <p key={`notice-${link.pairingId}`} role="alert" className="dd-banner dd-banner-error">
-          Disconnected from {label(link)}{detail(link)}. Sync is paused and resumes when the link is back.
-        </p>
-      ))}
-      <ul className="dd-peers-list" aria-label="Peer links">
-        {live.map((link) => (
-          <li key={link.pairingId} className="dd-peers-member">
-            <span className="dd-peers-member-name">{label(link)}: {link.state === 'connected' ? 'Connected' : link.state === 'reconnecting' ? 'Reconnecting automatically...' : isPaused(link) ? 'Paused' : 'Disconnected'}{link.state === 'connected' ? '' : detail(link)}{link.reason === 'revoked' ? '. Add peer to pair again.' : ''}</span>
+    <ul className="dd-peers-list" aria-label="Computers">
+      {computers.map((computer) => {
+        const { id, name, link, member } = computer;
+        const reconnect = !!link && link.state !== 'connected' && link.reason !== 'revoked' && link.reason !== 'paused';
+        const removable = !member?.retiring && (!!link || !!member?.authorized);
+        const scope = roster && member ? 'group' : 'link';
+        return (
+          <li key={id} className="dd-peers-member dd-peers-card" data-state={link?.state ?? 'member'}>
+            <span className="dd-peers-member-name">
+              <strong title={`Computer id ${id}`}>{name}</strong>
+              <span className="dd-peers-hint dd-peers-status">{computerStatus(computer)}</span>
+            </span>
             <span className="dd-actions">
-              {link.state !== 'connected' && link.reason !== 'revoked' && !isPaused(link) ? (
-                <button type="button" className="btn" disabled={busy} onClick={() => onReconnect(link.peerInstanceId)}>Reconnect</button>
+              {reconnect ? <button type="button" className="btn" disabled={busy} onClick={() => onReconnect(id)}>Reconnect</button> : null}
+              {removable ? (
+                <button type="button" className="btn" disabled={busy || !lifecycle} onClick={() => onRemove(computer, scope)}
+                  title={scope === 'group' ? 'Remove this computer from the sync group for everyone.' : 'Stop syncing with this computer and delete the link.'}>
+                  Remove
+                </button>
               ) : null}
             </span>
           </li>
-        ))}
-      </ul>
-    </>
+        );
+      })}
+      {self ? (
+        <li className="dd-peers-member dd-peers-card dd-peers-self">
+          <span className="dd-peers-member-name dd-peers-hint">This computer</span>
+          <span className="dd-actions">
+            {roster && !self.retiring ? (
+              <button type="button" className="btn" disabled={busy || !lifecycle} title="Remove this computer from the sync group."
+                onClick={() => onRemove({ id: self.machineId, name: 'This computer', member: self }, 'group')}>
+                Leave Group
+              </button>
+            ) : null}
+          </span>
+        </li>
+      ) : null}
+    </ul>
   );
 }
 
@@ -487,7 +562,15 @@ export function PeerSettings({ requestApproval = experimental_requestApproval, j
     setBusy(true);
     setError(null);
     void action().then((value) => { if (mounted.current) setStatus(value); }).catch((failure) => { if (mounted.current) setError(errorMessage(failure)); })
-      .finally(() => { if (mounted.current) setBusy(false); });
+      .finally(() => { if (mounted.current) { setBusy(false); loadInvites(); } });
+  };
+  const removeComputer = (computer: Computer, scope: 'group' | 'link') => {
+    const leaving = !!status && computer.member?.replicaId === status.replicaId;
+    const message = leaving ? 'Leave the sync group? This computer stops syncing with every other computer in it. If they are offline, leaving finishes when they reconnect.'
+      : scope === 'group' ? `Remove ${computer.name} from the sync group for everyone? Syncing with it stops on this computer now. If it is offline, removal finishes when it reconnects.`
+      : `Remove ${computer.name}? This computer stops syncing with it and the link is deleted. To sync again, pair with Add peer.`;
+    if (!window.confirm(message)) return;
+    run(() => scope === 'group' ? api.removePeer(computer.member!.replicaId) : api.revokePeer(computer.id));
   };
   const syncNow = () => {
     setBusy(true);
@@ -502,12 +585,13 @@ export function PeerSettings({ requestApproval = experimental_requestApproval, j
   // Invitation-founded peers enable themselves; the button is only for peers enrolled through the older Machines flow.
   const legacy = status?.enrolled.filter((peer) => !invited.has(peer.id)) ?? [];
   const names = new Map((status?.enrolled ?? []).map((peer) => [peer.id, peer.name]));
+  const computers = computersOf(links, status, names, invites?.invitations ?? []);
   return (
     <section className="dd-peers" aria-label="Database sync peers">
       <p>Sync this entire Design Docs database with other Zana apps. Existing documents stay local until you use Sync.</p>
       <InvitePanel invites={invites} onChanged={() => { loadInvites(); void api.groupStatus().then((value) => { if (mounted.current) setStatus(value); }).catch(() => undefined); }} requestApproval={requestApproval} joinRequest={joinRequest} onJoinRequestHandled={onJoinRequestHandled} />
       {invites?.enableError ? <p role="alert" className="dd-banner dd-banner-error">{invites.enableError}</p> : null}
-      <PeerLinks links={links} names={names} busy={busy}
+      <ComputerCards computers={computers} status={status} busy={busy} onRemove={removeComputer}
         onReconnect={(id) => { setBusy(true); setError(null); void api.reconnectPeer(id).catch((failure) => { if (mounted.current) setError(errorMessage(failure)); }).finally(() => { if (mounted.current) { setBusy(false); loadInvites(); } }); }} />
       {outOfSync && !dismissed ? (
         <div className="dd-peers-block">
@@ -527,31 +611,6 @@ export function PeerSettings({ requestApproval = experimental_requestApproval, j
               <p role="status">Setup {status.setup.state}: {status.setup.peerId}{status.setup.error ? `: ${status.setup.error}` : ''}</p>
             ) : null}
           </div>
-          {status.members.length ? (
-            <ul className="dd-peers-list" aria-label="Members">
-              {status.members.map((member) => (
-                <li key={member.replicaId} className="dd-peers-member">
-                  <span className="dd-peers-member-name" title={`Computer id ${member.machineId}`}>
-                    {member.replicaId === status.replicaId ? 'This computer' : names.get(member.machineId) ?? 'Unnamed computer'}: {memberState(member)}
-                  </span>
-                  <span className="dd-actions">
-                    {member.replicaId !== status.replicaId ? (
-                      <button type="button" className="btn" title="Stop syncing with this computer from here. It stays in the group." disabled={busy || !status.lifecycleAvailable}
-                        onClick={() => { if (window.confirm('Disable this local database link? Group membership is unchanged.')) run(() => api.revokePeer(member.machineId)); }}>
-                        Disable Link
-                      </button>
-                    ) : null}
-                    {status.configured ? (
-                      <button type="button" className="btn" title={member.replicaId === status.replicaId ? 'Remove this computer from the sync group.' : 'Remove this computer from the sync group for everyone.'} disabled={busy || !status.lifecycleAvailable || status.members.length <= 2 || member.retiring}
-                        onClick={() => { if (window.confirm('Remove this member? Syncing with them stops on this computer now. If they are offline, removal finishes when they reconnect.')) run(() => api.removePeer(member.replicaId)); }}>
-                        {member.replicaId === status.replicaId ? 'Leave Group' : 'Remove Member'}
-                      </button>
-                    ) : null}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          ) : null}
           {pendingJobs.length ? (
             <ul className="dd-peers-list" aria-label="Pending work">
               {pendingJobs.map((job) => <li key={job.id}>{job.peerId}: {job.state}{job.error ? `: ${job.error}` : ''}</li>)}

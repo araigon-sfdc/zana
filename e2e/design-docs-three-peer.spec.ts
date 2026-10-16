@@ -46,7 +46,7 @@ async function openPeers(app: AppHandle) {
 async function addPeer(app: AppHandle, sshd: { port: number; hostKey: string }): Promise<string> {
   const panel = (await openPeers(app)).getByLabel('Pair a peer');
   await panel.getByRole('button', { name: 'Add peer', exact: true }).click();
-  await expect(panel.getByRole('status').filter({ hasText: /^Invitation ready: (10|9) min left\./ })).toBeVisible({ timeout: 20_000 });
+  await expect(panel.getByRole('status').filter({ hasText: /^Invitation ready\. Expires in (10|9):\d{2}\./ })).toBeVisible({ timeout: 20_000 });
   const token = await panel.getByRole('textbox', { name: 'Invitation', exact: true }).inputValue();
   const body = JSON.parse(Buffer.from(token.slice('zccinv1.'.length), 'base64url').toString('utf8'));
   expect(body).toMatchObject({ v: 3, link: { endpoint: { host: 'localhost', port: sshd.port, hostKey: sshd.hostKey }, joinCode: expect.stringMatching(/^zcde_/) } });
@@ -76,7 +76,7 @@ async function approveInUi(app: AppHandle): Promise<void> {
 }
 
 /** Redeemer joins and approves first; the inviter approves once the redeemer is waiting on it; both reach Ready. */
-async function pair(inviter: AppHandle, redeemer: AppHandle, label: string, sshd: { port: number; hostKey: string }): Promise<void> {
+async function pair(inviter: AppHandle, redeemer: AppHandle, label: string, sshd: { port: number; hostKey: string }, inviterConnected: number): Promise<void> {
   await joinPeer(redeemer, await addPeer(inviter, sshd));
   const redeemerList = (await openPeers(redeemer)).getByLabel('Pairing');
   await expect(redeemerList).toContainText(/Pending: contacting the other computer\.|Approve pairing with /, { timeout: 60_000 });
@@ -84,7 +84,8 @@ async function pair(inviter: AppHandle, redeemer: AppHandle, label: string, sshd
   await expect(redeemerList).toContainText(/Awaiting the other owner's approval for |Approved\. Connecting to /, { timeout: 60_000 });
   // Both Peers views stay open: concurrent automatic Enable is resolved by the initiator tie-break.
   await approveInUi(inviter);
-  const ready = async (app: AppHandle) => expect((await openPeers(app)).getByLabel('Pairing')).toContainText(/Ready: paired with /, { timeout: 120_000 });
+  // The Ready row clears itself once the link exists; the inviter's computer cards carry the result.
+  const ready = async (app: AppHandle) => expect((await openPeers(app)).getByLabel('Computers').locator('.dd-peers-status', { hasText: /^Connected$/ })).toHaveCount(inviterConnected, { timeout: 120_000 });
   await ready(inviter).catch(async error => {
     for (const [name, app] of [['inviter', inviter], ['redeemer', redeemer]] as const)
       console.log(`[three-peer] ${label} ${name} pairing stuck`, JSON.stringify(await invites(app)));
@@ -132,7 +133,7 @@ test('three apps pair by invitation over a private sshd; C joins via an invitati
 
     // Founding: A invites, B joins. One bilateral owner consent forms the group (no peers.enroll, no Enable step).
     step('A-B invitation');
-    await pair(a, b, 'A-B', sshd);
+    await pair(a, b, 'A-B', sshd, 1);
     await expect.poll(async () => `${await members(a)},${await members(b)}`, { timeout: 120_000 }).toBe('2,2').catch(async error => {
       for (const [name, app] of [['a', a], ['b', b]] as const) {
         const status = await group(app);
@@ -150,7 +151,7 @@ test('three apps pair by invitation over a private sshd; C joins via an invitati
 
     // C pastes an invitation copied from B; B and C approve. B is the sponsor: C joins the existing group.
     step('C joins via B');
-    await pair(b, c, 'B-C', sshd);
+    await pair(b, c, 'B-C', sshd, 2);
     await expect.poll(async () => (await Promise.all([a, b, c].map(members))).join(','), { timeout: 180_000 }).toBe('3,3,3').catch(async error => {
       for (const [name, app] of [['a', a], ['b', b], ['c', c]] as const) {
         const status = await group(app);

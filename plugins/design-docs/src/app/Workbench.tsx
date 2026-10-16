@@ -254,7 +254,7 @@ function DocList({
           </span>
         ) : null}
         <span className="dd-spacer" />
-        <SettingsToggle open={false} peer={peerSync.peer} onToggle={onOpenSettings} />
+        <SettingsToggle open={false} onToggle={onOpenSettings} />
         <SyncButton peerSync={peerSync} />
         <button type="button" className="btn primary dd-head-btn dd-new" onClick={onNew}>
           <Plus size={13} aria-hidden /> New

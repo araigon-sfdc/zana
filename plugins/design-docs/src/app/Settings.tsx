@@ -59,10 +59,10 @@ const NAV_GROUPS: Array<{ label: string; sections: SettingsSection[] }> = [
 const SECTIONS = NAV_GROUPS.flatMap((group) => group.sections);
 
 /**
- * The header toggle. From the docs it is a compact "Settings" button carrying
- * the peer count once a sync group exists; from settings it is the way back.
+ * The header toggle. From the docs it is a plain Settings icon; from settings it is the way back.
+ * (The count of syncing computers lives on the Sync button.)
  */
-export function SettingsToggle({ open, peer, onToggle }: { open: boolean; peer: PeerStatus | null; onToggle(): void }) {
+export function SettingsToggle({ open, onToggle }: { open: boolean; onToggle(): void }) {
   if (open) {
     return (
       <button
@@ -77,18 +77,16 @@ export function SettingsToggle({ open, peer, onToggle }: { open: boolean; peer: 
       </button>
     );
   }
-  const count = peer?.configured ? peer.members.length : null;
   return (
     <button
       type="button"
-      className={`btn dd-head-btn dd-settings-toggle${count === null ? ' dd-head-icon' : ''}`}
+      className="btn dd-head-btn dd-head-icon dd-settings-toggle"
       aria-pressed={false}
       aria-label="Settings"
-      title={count === null ? 'Design Docs settings: peers and agent' : `Design Docs settings: ${count} sync peers, agent`}
+      title="Design Docs settings: peers and agent"
       onClick={onToggle}
     >
       <SettingsIcon size={13} aria-hidden />
-      {count !== null ? <span className="dd-head-count">{count}</span> : null}
     </button>
   );
 }
@@ -107,7 +105,7 @@ export function SettingsView({ peer, onBack, headerActions, joinRequest, onJoinR
   return (
     <div className="dd-peers-view dd-settings-view">
       <header className="dd-settings-header">
-        <SettingsToggle open peer={peer} onToggle={onBack} />
+        <SettingsToggle open onToggle={onBack} />
         <SettingsIcon size={16} className="dd-settings-header-icon" aria-hidden />
         <div className="dd-settings-heading">
           <h2>Settings</h2>

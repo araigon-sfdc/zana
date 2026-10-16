@@ -117,9 +117,12 @@ export function createRpcHandlers(deps: RpcDeps): Record<string, (args: unknown)
 
     backups: () => deps.backups?.list() ?? { backups: [], restores: [] },
 
-    peerStatus: () => {
+    // `connected` is what the Sync button counts: this computer plus every member with a live link.
+    peerStatus: async () => {
       const local = deps.peerSync?.status() ?? null;
-      return local ?? { configured: false, members: [] };
+      if (!local?.configured) return local ?? { configured: false, members: [] };
+      const connected = new Set(await deps.pairing?.connectedMembers().catch(() => [] as string[]) ?? []);
+      return { ...local, members: local.members.map((member) => ({ ...member, connected: member.replicaId === local.replicaId || connected.has(member.machineId) })) };
     },
 
     groupStatus: () => {

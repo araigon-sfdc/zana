@@ -448,7 +448,7 @@ export class DesignDocPairing {
   }
 
   /** Other, non-retiring group members with exactly one connected grant for this group's scope. */
-  private async connectedMembers(): Promise<string[]> {
+  async connectedMembers(): Promise<string[]> {
     const roster = this.group.roster(), local = this.group.sync.localRepository();
     if (!roster || !local) return [];
     let grants: Awaited<ReturnType<PluginSdkPeers['list']>>;

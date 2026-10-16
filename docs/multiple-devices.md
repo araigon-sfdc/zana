@@ -272,6 +272,12 @@ pairing.
   it. **Remove link** deletes the link for all plugins and removes this machine's
   access. When a machine is used by more than one plugin, **Stop syncing** on a plugin
   row ends only that plugin's use.
+- **Design Docs Peers list.** Each paired computer is one card in **Settings → Peers**
+  with its name, one status line (Connected, Reconnecting, Paused or Disconnected with
+  the reason), **Reconnect** when it is down, and **Remove**. A finished invitation
+  disappears once the computer is linked. Group-wide **Remove Member** and **Leave
+  Group** appear only when the group has three or more computers. The **Sync** button
+  in the doc list shows how many computers are syncing, including this one.
 - **Where links appear.** **Settings → Machines** lists execution machines only.
   **Settings → Peers** lists every peer link and its state (Connected, Connecting,
   or a specific reason why it cannot connect). See **Check your setup** for

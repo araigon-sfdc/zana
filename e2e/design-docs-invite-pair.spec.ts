@@ -51,7 +51,7 @@ async function openPeers(app: AppHandle) {
 async function addPeer(app: AppHandle): Promise<string> {
   const panel = (await openPeers(app)).getByLabel('Pair a peer');
   await panel.getByRole('button', { name: 'Add peer', exact: true }).click();
-  await expect(panel.getByRole('status').filter({ hasText: /^Invitation ready: \d+ min left\. Paste it on the other computer\.$/ })).toBeVisible({ timeout: 30_000 });
+  await expect(panel.getByRole('status').filter({ hasText: /^Invitation ready\. Expires in \d+:\d{2}\. Paste it on the other computer before then\.$/ })).toBeVisible({ timeout: 30_000 });
   const token = await panel.getByRole('textbox', { name: 'Invitation', exact: true }).inputValue();
   expect(token).toMatch(/^zccinv1\./);
   return token;
@@ -165,9 +165,9 @@ test('two fresh apps pair over a private sshd, sync both ways, heal a killed ssh
     console.log('[invite-pair] A sees redeemer fingerprint', aFingerprint);
     expect(aFingerprint).not.toBe(bFingerprint);
     await approveInUi(a);
-    const aList = (await openPeers(a)).getByLabel('Pairing');
-    await expect(aList).toContainText(/^Ready: paired with /, { timeout: 120_000 }).catch(error => { dumpLogs(a); dumpLogs(b); throw error; });
-    await expect(bList).toContainText(/Ready: paired with /, { timeout: 120_000 });
+    // A finished pairing hands over to its computer card (the Ready row clears itself once the link exists).
+    await expect((await openPeers(a)).getByLabel('Computers').locator('.dd-peers-status', { hasText: /^Connected$/ })).toHaveCount(1, { timeout: 120_000 }).catch(error => { dumpLogs(a); dumpLogs(b); throw error; });
+    await expect((await openPeers(b)).getByLabel('Computers').locator('.dd-peers-status', { hasText: /^Connected$/ })).toHaveCount(1, { timeout: 120_000 });
 
     step('key swap and connected');
     // The throwaway bootstrap line is replaced by B's per-link key: gone, and exactly one link line remains.
@@ -178,8 +178,8 @@ test('two fresh apps pair over a private sshd, sync both ways, heal a killed ssh
     expect(zanaLines(b)).toEqual([]);
     await expect.poll(async () => `${(await group(a)).members.length},${(await group(b)).members.length}`, { timeout: 120_000 }).toBe('2,2');
     await expect.poll(async () => `${await linkState(a)}|${await linkState(b)}`, { timeout: 60_000 }).toBe('connected|connected');
-    await expect((await openPeers(a)).getByLabel('Peer links')).toContainText(': Connected');
-    await expect((await openPeers(b)).getByLabel('Peer links')).toContainText(': Connected');
+    await expect((await openPeers(a)).getByLabel('Computers')).toContainText('Connected');
+    await expect((await openPeers(b)).getByLabel('Computers')).toContainText('Connected');
     expect(linkSshPids(sshd)).toHaveLength(1);
 
     step('sync A -> B');
@@ -219,7 +219,7 @@ test('two fresh apps pair over a private sshd, sync both ways, heal a killed ssh
     const bId = (await liveLinks(a))[0]!.peerInstanceId;
     const region = await openPeers(a);
     a.window.once('dialog', dialog => void dialog.accept());
-    await region.getByLabel('Members').locator('li').filter({ hasText: bId }).getByRole('button', { name: 'Disable Link', exact: true }).click();
+    await region.getByLabel('Computers').getByRole('listitem').filter({ has: a.window.locator(`[title*="${bId}"]`) }).getByRole('button', { name: 'Remove', exact: true }).click();
     await expect.poll(async () => (await liveLinks(a)).length, { timeout: 60_000 }).toBe(0);
     await expect.poll(() => zanaLines(a), { message: 'no zana-peer-v1 lines remain', timeout: 30_000 }).toEqual([]);
     await expect.poll(() => listening(F), { message: 'nothing listens on F', timeout: 30_000 }).toBe(false);

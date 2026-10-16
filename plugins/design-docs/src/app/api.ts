@@ -148,7 +148,7 @@ export interface PeerStatus {
   replicaId?: string;
   groupId?: string;
   rosterEpoch?: number;
-  members: Array<{ replicaId: string; machineId: string; joinedAt: number; sponsorReplicaId: string | null }>;
+  members: Array<{ replicaId: string; machineId: string; joinedAt: number; sponsorReplicaId: string | null; /** This computer, or a member with a live link; absent on older servers. */ connected?: boolean }>;
 }
 
 type Call = (method: string, args?: unknown) => Promise<unknown>;

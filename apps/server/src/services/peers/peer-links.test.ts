@@ -1054,6 +1054,16 @@ describe('startup, reconcile, sweep, views, dispose', () => {
     expect(await view()).toMatchObject({ phase: 'removed', state: 'disconnected', reason: 'revoked' });
   });
 
+  it('exposes the peer name learned in pairing, and omits it for records written before names were kept', async () => {
+    const f = await fixture(), links = f.make();
+    const ctx = await f.redeemerLinked(links);
+    expect((await links.links(ctx.peer.id))[0]).toMatchObject({ peerName: 'Remote Name' });
+    f.recOf(links, ctx.id).peerName = undefined;
+    const older = (await links.links(ctx.peer.id))[0]!;
+    expect(older).not.toHaveProperty('peerName');
+    expect(older).toMatchObject({ peerInstanceId: ctx.peer.id, phase: 'linked' });
+  });
+
   it('projects failed links as peer-offline and unfinished ones as reconnecting', async () => {
     const f = await fixture(), links = f.make();
     const ctx = await f.redeemerPreConsent(links);

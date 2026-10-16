@@ -72,16 +72,17 @@ test('Design Docs agents report an unusable project harness instead of starting 
   const detail = await win.evaluate((doc) => window.cc.pluginApps.callRpc('design-docs', 'get', { doc }), docId) as { threads: unknown[] };
   expect(detail.threads).toEqual([]);
 
-  // The same reason reaches the user through the doc's Ask agent menu.
+  // The doc's Ask agent menu only drafts the prompt in the side-panel composer, so choosing Review spawns nothing.
   await win.getByRole('button', { name: /^Design Docs/ }).click();
   await win.getByText('Unusable harness doc').first().click();
   await win.getByRole('button', { name: /Ask agent/ }).first().click();
   await win.getByRole('menuitem', { name: /^Review/ }).click();
-  await expect(win.locator('.toast.error').filter({ hasText: 'Could not start the agent: No usable AI harness' })).toBeVisible({ timeout: 15_000 });
+  const afterMenu = await win.evaluate((doc) => window.cc.pluginApps.callRpc('design-docs', 'get', { doc }), docId) as { threads: unknown[] };
+  expect(afterMenu.threads).toEqual([]);
 
   // The Agent tab only explains where the harness comes from; it has no controls.
   await win.locator('.dd-list').getByRole('button', { name: 'Settings', exact: true }).click();
-  await win.getByRole('tab', { name: 'Agent', exact: true }).click();
+  await win.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: 'Agent', exact: true }).click();
   const agent = win.getByRole('region', { name: 'Agent harness' });
   await expect(agent).toContainText("the doc's project");
   await expect(agent).toContainText('for a doc with no project, the Default Project');
@@ -139,7 +140,7 @@ test('Design Docs agents run on the project harness and honor its AI-harness ove
     // The Agent tab explains the inheritance and offers no override controls.
     await win.getByRole('button', { name: /^Design Docs/ }).click();
     await win.locator('.dd-list').getByRole('button', { name: 'Settings', exact: true }).click();
-    await win.getByRole('tab', { name: 'Agent', exact: true }).click();
+    await win.getByRole('navigation', { name: 'Settings sections' }).getByRole('button', { name: 'Agent', exact: true }).click();
     const agent = win.getByRole('region', { name: 'Agent harness' });
     await expect(agent).toContainText('Settings → AI Harness');
     await expect(agent.locator('input, select')).toHaveCount(0);

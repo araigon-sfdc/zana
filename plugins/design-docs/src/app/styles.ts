@@ -154,6 +154,8 @@ export const DESIGN_DOCS_STYLES = `
 .dd-peers-list { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; }
 .dd-peers-member { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
 .dd-peers-member-name { min-width: 0; overflow-wrap: anywhere; }
+.dd-peers-status { display: block; }
+.dd-peers-self { opacity: 0.85; }
 .dd-peers-hint { color: var(--text-muted); }
 .dd-peers-note { font-size: 12px; line-height: 1.5; }
 
@@ -348,7 +350,7 @@ export const DESIGN_DOCS_STYLES = `
 .dd-head-btn:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 1px; }
 .dd-head-btn[aria-pressed='true'] { border-color: var(--border-strong, var(--border)); }
 .dd-head-icon { justify-content: center; width: 26px; padding: 0; }
-.dd-settings-toggle:not(.dd-head-icon) { gap: 4px; padding: 0 7px; }
+.dd-settings-toggle:not(.dd-head-icon), .dd-sync:not(.dd-head-icon) { gap: 4px; padding: 0 7px; }
 .dd-head-count { font-variant-numeric: tabular-nums; }
 .dd-list-tools { display: flex; align-items: center; gap: 4px; padding: 8px 8px 6px 10px; }
 .dd-search {

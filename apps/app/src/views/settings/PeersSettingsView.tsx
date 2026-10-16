@@ -92,9 +92,11 @@ export function PeersSettingsView() {
               <li key={link.hostId} className="peers-link" data-testid="peer-link">
                 <div className="peers-link-header">
                   <h4 className="peers-link-name">{link.peerName}</h4>
-                  <span className="peers-state" data-state={link.state}>{STATE_LABELS[link.state] ?? link.state}</span>
-                  {link.paused ? <span className="peers-state" data-state="paused">Paused</span>
-                    : link.connected && <span className="peers-state" data-state="connected">Connected</span>}
+                  <div className="peers-link-statuses">
+                    <span className="peers-state" data-state={link.state} role="status">{STATE_LABELS[link.state] ?? link.state}</span>
+                    {link.paused ? <span className="peers-state" data-state="paused" role="status">Paused</span>
+                      : link.connected && <span className="peers-state" data-state="connected" role="status">Connected</span>}
+                  </div>
                   <div className="peers-link-actions">
                     {confirming === link.hostId ? (
                       <>
@@ -105,11 +107,11 @@ export function PeersSettingsView() {
                     ) : (
                       <>
                         {link.state === 'linked' && (link.paused || !link.connected ? (
-                          <button type="button" className="btn" disabled={busy !== null} onClick={() => void reconnect(link.hostId)}>Reconnect</button>
+                          <button type="button" className="btn peers-btn-secondary" disabled={busy !== null} onClick={() => void reconnect(link.hostId)}>Reconnect</button>
                         ) : (
-                          <button type="button" className="btn" disabled={busy !== null} onClick={() => void disconnect(link.hostId)}>Disconnect</button>
+                          <button type="button" className="btn peers-btn-secondary" disabled={busy !== null} onClick={() => void disconnect(link.hostId)}>Disconnect</button>
                         ))}
-                        <button type="button" className="btn" disabled={busy !== null} onClick={() => setConfirming(link.hostId)}>Remove link</button>
+                        <button type="button" className="btn peers-btn-remove" disabled={busy !== null} onClick={() => setConfirming(link.hostId)}>Remove link</button>
                       </>
                     )}
                   </div>

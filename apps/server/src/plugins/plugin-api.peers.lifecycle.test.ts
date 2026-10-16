@@ -594,6 +594,15 @@ it('honours abort and stale contexts; a create that completes after dispose is c
   await expect(live.listInvitations!({ signal: controller.signal })).rejects.toThrow('mid-flight');
 });
 
+it('copies the peer name through the plugin link projection only when the link has one', async () => {
+  const named = link({ peerName: 'Bob\'s Mac' });
+  const older = link();
+  const peers = inviteApi(tmpdir(), 'sync-plugin', { peerLinks: { links: vi.fn(async () => [named, older]) } });
+  const projected = await peers.peerLinks!();
+  expect(projected.find(item => item.peerInstanceId === named.peerInstanceId)).toMatchObject({ peerName: 'Bob\'s Mac' });
+  expect(projected.find(item => item.peerInstanceId === older.peerInstanceId)).not.toHaveProperty('peerName');
+});
+
 it('projects only this plugin\'s peer links, rotates owned peers only, and ties revoke to link release', async () => {
   const mine = link({ pairingId: 'p1', peerInstanceId: randomUUID(), reason: 'peer-offline', state: 'reconnecting', retryInMs: 500, credentialExpiresAt: 99, failure: 'unreachable' });
   const theirs = link({ pluginId: 'other-plugin', peerInstanceId: randomUUID() });

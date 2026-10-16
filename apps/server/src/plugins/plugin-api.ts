@@ -427,6 +427,7 @@ export function createPluginApi(
   });
   const publicLink = (link: PeerLinkView) => ({
     pairingId: link.pairingId, peerInstanceId: link.peerInstanceId, scope: link.scope, role: link.role, phase: link.phase, state: link.state,
+    ...(link.peerName ? { peerName: link.peerName } : {}),
     ...(link.reason ? { reason: link.reason } : {}), ...(link.failure ? { failure: link.failure } : {}),
     ...(link.retryInMs !== undefined ? { retryInMs: link.retryInMs } : {})
   });

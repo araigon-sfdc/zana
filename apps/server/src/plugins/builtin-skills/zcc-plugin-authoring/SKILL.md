@@ -234,7 +234,7 @@ Frontend runtime exports you may import from `@zana-ai/zcc-plugin-sdk/app`:
 `navPanelListsInExtensionsHub`,
 `useRpc`, `useRealtime`,
 `useRealtimeConnectionState`, `useSettings`, `useZccContext`,
-`useZccNavigate`, `useWindowTitle`, `useComposer`, `useComposerView`,
+`useZccNavigate`, `useZccDeepLinks`, `useWindowTitle`, `useComposer`, `useComposerView`,
 `experimental_useSidebarThreads`, `experimental_useSidebarThreadActions`,
 `experimental_useSidebarThreadPullRequest`,
 `experimental_useSidebarThreadSplit`, `ThreadChat`, `Markdown`,

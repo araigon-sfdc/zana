@@ -1,10 +1,11 @@
 // @vitest-environment happy-dom
-import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { collectTestPluginApp } from '@zana-ai/zcc-plugin-sdk/testing/app';
 import { UI_USER } from '../server/rpc.js';
 import type { DesignDocStore } from '../server/store.js';
 import { NavPanel, ProjectTab } from './slots.js';
+import { PEER_STATUS_POLL_MS } from './PeerSettings.js';
 import { projectOptions } from './Workbench.js';
 import { AGENT, createHarness, type Harness } from './test-harness.js';
 
@@ -51,8 +52,12 @@ describe('plugin app', () => {
   });
 });
 
-function configuredPeers(syncNow: () => Promise<{ attempted: number; synced: number; blocked: number }>) {
-  return { status: () => ({ configured: true, members: [{ replicaId: 'r-a' }, { replicaId: 'r-b' }] }), syncNow } as never;
+function configuredPeers(syncNow: () => Promise<{ attempted: number; synced: number; blocked: number }>, replicas = ['a', 'b']) {
+  return { status: () => ({ configured: true, replicaId: 'r-a', members: replicas.map((name) => ({ replicaId: `r-${name}`, machineId: `app-${name}` })) }), syncNow } as never;
+}
+/** Which other computers the pairing layer reports as connected right now. */
+function connectedPairing(connected: () => string[]) {
+  return { connectedMembers: async () => connected(), notifyStateChanged: async () => undefined } as never;
 }
 
 describe('peers view', () => {
@@ -125,16 +130,54 @@ describe('peers view', () => {
     expect(screen.getByRole('button', { name: 'Split' })).toBeTruthy();
   });
 
-  it('shows the member count and syncs from the doc list header', async () => {
+  it('shows the syncing count on Sync, not on the plain Settings icon', async () => {
+    const harness = createHarness({ peerSync: configuredPeers(async () => ({ attempted: 0, synced: 0, blocked: 0 }), ['a', 'b', 'c']), pairing: connectedPairing(() => ['app-b']) });
+    harness.render(<ProjectTab pluginId="design-docs" projectId="p1" />);
+    const sync = await screen.findByRole('button', { name: 'Sync' });
+    expect(sync.textContent).toBe('2');
+    expect(sync.getAttribute('title')).toBe('2 computers syncing (including this one)');
+    const settings = screen.getByRole('button', { name: 'Settings' });
+    expect(settings.textContent).toBe('');
+    expect(settings.className).toContain('dd-head-icon');
+    expect(settings.getAttribute('title')).toBe('Design Docs settings: peers and agent');
+  });
+
+  it('counts only this computer when no peer is connected, and every connected one otherwise', async () => {
+    let connected: string[] = [];
+    const harness = createHarness({ peerSync: configuredPeers(async () => ({ attempted: 0, synced: 0, blocked: 0 }), ['a', 'b', 'c']), pairing: connectedPairing(() => connected) });
+    harness.render(<ProjectTab pluginId="design-docs" projectId="p1" />);
+    const sync = await screen.findByRole('button', { name: 'Sync' });
+    expect(sync.textContent).toBe('1');
+    expect(sync.getAttribute('title')).toBe('1 computer syncing (this one)');
+    connected = ['app-b', 'app-c'];
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Back to design docs' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Sync' }).textContent).toBe('3'));
+  });
+
+  it('re-reads who is connected on a timer and keeps the last count when a re-read fails', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      let connected = ['app-b'];
+      const harness = createHarness({ peerSync: configuredPeers(async () => ({ attempted: 0, synced: 0, blocked: 0 })), pairing: connectedPairing(() => connected) });
+      harness.render(<ProjectTab pluginId="design-docs" projectId="p1" />);
+      expect((await screen.findByRole('button', { name: 'Sync' })).textContent).toBe('2');
+      connected = [];
+      await act(async () => { vi.advanceTimersByTime(PEER_STATUS_POLL_MS); });
+      await waitFor(() => expect(screen.getByRole('button', { name: 'Sync' }).textContent).toBe('1'));
+      harness.fail('peerStatus', 'offline');
+      await act(async () => { vi.advanceTimersByTime(PEER_STATUS_POLL_MS); });
+      expect(screen.getByRole('button', { name: 'Sync' }).textContent).toBe('1');
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('syncs from the doc list header', async () => {
     let finish!: (value: { attempted: number; synced: number; blocked: number }) => void;
     const syncNow = vi.fn(() => new Promise<{ attempted: number; synced: number; blocked: number }>((resolve) => { finish = resolve; }));
-    const harness = createHarness({ peerSync: configuredPeers(syncNow) });
+    const harness = createHarness({ peerSync: configuredPeers(syncNow), pairing: connectedPairing(() => ['app-b']) });
     harness.render(<ProjectTab pluginId="design-docs" projectId="p1" />);
-    const entry = await screen.findByRole('button', { name: 'Settings' });
-    await waitFor(() => expect(entry.textContent).toBe('2'));
-    expect(entry.getAttribute('title')).toBe('Design Docs settings: 2 sync peers, agent');
-    const sync = screen.getByRole('button', { name: 'Sync' });
-    expect(sync.getAttribute('title')).toBe('Sync group: 2 members');
+    const sync = await screen.findByRole('button', { name: 'Sync' });
+    expect(sync.getAttribute('title')).toBe('2 computers syncing (including this one)');
     fireEvent.click(sync);
     expect((screen.getByRole('button', { name: 'Syncing' }) as HTMLButtonElement).disabled).toBe(true);
     finish({ attempted: 2, synced: 2, blocked: 0 });
@@ -152,14 +195,14 @@ describe('peers view', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Hide doc list' }));
     const rail = screen.getByRole('navigation', { name: 'Design docs' });
     expect(within(rail).queryByRole('button', { name: 'Settings' })).toBeNull();
-    const sync = within(rail).getByRole('button', { name: 'Sync peers' }) as HTMLButtonElement;
+    const sync = within(rail).getByRole('button', { name: 'Sync peers: 1 computer syncing (this one)' }) as HTMLButtonElement;
     fireEvent.click(sync);
-    const busy = within(rail).getByRole('button', { name: 'Syncing peers' }) as HTMLButtonElement;
+    const busy = within(rail).getByRole('button', { name: 'Syncing peers: 1 computer syncing (this one)' }) as HTMLButtonElement;
     expect(busy.disabled).toBe(true);
     // A second press while syncing is ignored.
     fireEvent.click(busy);
     finish({ attempted: 3, synced: 2, blocked: 1 });
-    await within(rail).findByRole('button', { name: 'Sync peers' });
+    await within(rail).findByRole('button', { name: /^Sync peers/ });
     expect(harness.toasts.at(-1)).toEqual({ message: 'Synced 2/3; 1 blocked', kind: 'info' });
     expect(syncNow).toHaveBeenCalledOnce();
   });
