@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -11,7 +11,8 @@ import {
 let root: string;
 
 beforeEach(() => {
-  root = mkdtempSync(path.join(tmpdir(), "zcc-pi-launch-"));
+  // Real path: on macOS tmpdir() is a /var -> /private/var symlink and the resolver realpaths the CLI.
+  root = realpathSync(mkdtempSync(path.join(tmpdir(), "zcc-pi-launch-")));
   resetPiLaunchReportsForTests();
 });
 

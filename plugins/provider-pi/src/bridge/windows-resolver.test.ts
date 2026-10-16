@@ -1,4 +1,4 @@
-import fs, { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import fs, { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -14,7 +14,9 @@ const PACKAGE_SEGMENTS = ["node_modules", "@earendil-works", "pi-coding-agent"];
 let root: string;
 
 beforeEach(() => {
-  root = mkdtempSync(path.join(tmpdir(), "zcc-win-pi-"));
+  // The resolver realpaths the CLI path; on macOS tmpdir() is a /var -> /private/var symlink,
+  // so start from the real path or expectations differ only by that prefix.
+  root = realpathSync(mkdtempSync(path.join(tmpdir(), "zcc-win-pi-")));
 });
 
 afterEach(() => {
