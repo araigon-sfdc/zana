@@ -15,6 +15,7 @@ export interface PeerLinkDirectoryEntry {
   peerName: string;
   state: Exclude<PeerLinkState, 'unclaimed'>;
   reason?: string;
+  paused?: boolean;
 }
 
 /**
@@ -27,6 +28,9 @@ export interface PeerLinkDirectory {
   describe(hostId: string): PeerLinkDirectoryEntry | undefined;
   release?(hostId: string, pluginId: string, scope: string | undefined): Promise<{ linkRemoved: boolean } | undefined>;
   remove?(hostId: string): Promise<{ linkRemoved: true } | undefined>;
+  /** Owner Disconnect / Reconnect: `undefined` means the owner store does not claim a pausable link on this host. */
+  pause?(hostId: string): Promise<{ paused: true } | undefined>;
+  resume?(hostId: string): Promise<{ paused: false } | undefined>;
 }
 
 type LinkCtx = ProductHttpContext;
@@ -45,6 +49,7 @@ function toPeerLink(host: HostRow, directory: PeerLinkDirectory | undefined, con
     connected: connected.has(host.id),
     uses: uses.map(({ pluginId, label, scope, since }) => ({ pluginId, label, scope, since }))
   };
+  if (entry?.paused) link.paused = true;
   if (entry?.reason) link.reason = entry.reason.slice(0, REASON_MAX);
   return link;
 }
@@ -102,4 +107,27 @@ export async function removePeerLink(ctx: LinkCtx, hostId: string): Promise<Peer
   try { delegated = await ctx.peerLinkDirectory?.remove?.(hostId); } catch { return { status: 'unavailable' }; }
   if (delegated) return { status: 'ok', linkRemoved: true };
   return teardownLink(ctx, host);
+}
+
+export type PeerLinkPause =
+  | { status: 'ok'; paused: boolean }
+  | { status: 'not-found' }
+  | { status: 'unavailable' };
+
+/** Owner gesture: close the connection but keep the link, its uses and keys. */
+export async function pausePeerLink(ctx: LinkCtx, hostId: string): Promise<PeerLinkPause> {
+  if (!pluginLink(ctx, hostId)) return { status: 'not-found' };
+  try {
+    const result = await ctx.peerLinkDirectory?.pause?.(hostId);
+    return result ? { status: 'ok', paused: true } : { status: 'not-found' };
+  } catch { return { status: 'unavailable' }; }
+}
+
+/** Owner gesture: clear the pause and resume connecting. */
+export async function resumePeerLink(ctx: LinkCtx, hostId: string): Promise<PeerLinkPause> {
+  if (!pluginLink(ctx, hostId)) return { status: 'not-found' };
+  try {
+    const result = await ctx.peerLinkDirectory?.resume?.(hostId);
+    return result ? { status: 'ok', paused: false } : { status: 'not-found' };
+  } catch { return { status: 'unavailable' }; }
 }

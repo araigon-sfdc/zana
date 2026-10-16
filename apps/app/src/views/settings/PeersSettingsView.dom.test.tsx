@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const api = vi.hoisted(() => ({ list: vi.fn(), removeUse: vi.fn(), removeLink: vi.fn() }));
+const api = vi.hoisted(() => ({ list: vi.fn(), removeUse: vi.fn(), removeLink: vi.fn(), disconnect: vi.fn(), reconnect: vi.fn() }));
 vi.mock('../../lib/product-client.js', () => ({ peerLinks: api }));
 
 import { PeersSettingsView } from './PeersSettingsView';
@@ -24,6 +24,8 @@ beforeEach(() => {
   api.list.mockReset().mockResolvedValue({ links: [link()] });
   api.removeUse.mockReset().mockResolvedValue({ ok: true, linkRemoved: false });
   api.removeLink.mockReset().mockResolvedValue({ ok: true, linkRemoved: true });
+  api.disconnect.mockReset().mockResolvedValue({ ok: true, paused: true });
+  api.reconnect.mockReset().mockResolvedValue({ ok: true, paused: false });
 });
 afterEach(cleanup);
 
@@ -53,16 +55,64 @@ describe('PeersSettingsView', () => {
     expect(screen.queryByText('Connected')).toBeNull();
   });
 
-  it('removes a single use with its scope and reloads', async () => {
+  it('stops syncing a single use with its scope and reloads', async () => {
     render(<PeersSettingsView />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Remove Beta plugin use' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Stop syncing Beta plugin' }));
     await waitFor(() => expect(api.removeUse).toHaveBeenCalledWith('h1', 'b', 'proj-2'));
     await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText('Remove use')).toBeNull();
+  });
+
+  it('shows Stop syncing only when the machine has more than one plugin', async () => {
+    api.list.mockResolvedValue({ links: [link({ uses: [{ pluginId: 'a', label: 'Alpha plugin', scope: 'proj-1', since: 1 }] })] });
+    render(<PeersSettingsView />);
+    expect(await screen.findByText('Alpha plugin')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Stop syncing/ })).toBeNull();
+  });
+
+  it('puts Disconnect and Remove link in the machine header, not the card bottom', async () => {
+    render(<PeersSettingsView />);
+    const header = (await screen.findByText('Studio laptop')).closest('.peers-link-header') as HTMLElement;
+    expect(within(header).getByRole('button', { name: 'Disconnect' })).toBeTruthy();
+    expect(within(header).getByRole('button', { name: 'Remove link' })).toBeTruthy();
+    expect(within(header).getByText('Connected')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Reconnect' })).toBeNull();
+    fireEvent.click(within(header).getByRole('button', { name: 'Disconnect' }));
+    await waitFor(() => expect(api.disconnect).toHaveBeenCalledWith('h1'));
+    await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
+  });
+
+  it('shows Paused and Reconnect for a paused link, and Reconnect when the connection is down', async () => {
+    api.list.mockResolvedValue({ links: [link({ paused: true, connected: false }), link({ hostId: 'h2', peerName: 'Other', connected: false })] });
+    render(<PeersSettingsView />);
+    expect(await screen.findByText('Paused')).toBeTruthy();
+    expect(screen.queryByText('Connected')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Disconnect' })).toBeNull();
+    const buttons = screen.getAllByRole('button', { name: 'Reconnect' });
+    expect(buttons).toHaveLength(2);
+    fireEvent.click(buttons[0]!);
+    await waitFor(() => expect(api.reconnect).toHaveBeenCalledWith('h1'));
+  });
+
+  it('offers no Disconnect or Reconnect for an unclaimed link', async () => {
+    api.list.mockResolvedValue({ links: [link({ state: 'unclaimed', connected: false, uses: [] })] });
+    render(<PeersSettingsView />);
+    expect(await screen.findByRole('button', { name: 'Remove link' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Disconnect|Reconnect/ })).toBeNull();
+  });
+
+  it('surfaces a disconnect failure', async () => {
+    api.disconnect.mockRejectedValueOnce(new Error('busy'));
+    render(<PeersSettingsView />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Disconnect' }));
+    expect((await screen.findByRole('alert')).textContent).toBe('busy');
   });
 
   it('requires confirmation before removing a link, and can back out', async () => {
     render(<PeersSettingsView />);
     fireEvent.click(await screen.findByRole('button', { name: 'Remove link' }));
+    expect(screen.getByText(/Delete this link for all plugins and remove this machine's access/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Disconnect' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Keep link' }));
     expect(api.removeLink).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Remove link' }));
@@ -80,7 +130,7 @@ describe('PeersSettingsView', () => {
   it('surfaces a removal failure and a non-Error rejection', async () => {
     api.removeUse.mockRejectedValueOnce(new Error('denied'));
     render(<PeersSettingsView />);
-    fireEvent.click(await screen.findByRole('button', { name: 'Remove Alpha plugin use' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Stop syncing Alpha plugin' }));
     expect((await screen.findByRole('alert')).textContent).toBe('denied');
     api.removeLink.mockRejectedValueOnce('boom');
     fireEvent.click(screen.getByRole('button', { name: 'Remove link' }));

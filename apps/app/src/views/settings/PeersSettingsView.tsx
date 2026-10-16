@@ -70,6 +70,8 @@ export function PeersSettingsView() {
   const removeUse = (target: Extract<Pending, { kind: 'use' }>) =>
     run(`use:${target.hostId}:${target.pluginId}:${target.scope}`, () => peerLinks.removeUse(target.hostId, target.pluginId, target.scope));
   const removeLink = (hostId: string) => run(`link:${hostId}`, () => peerLinks.removeLink(hostId));
+  const disconnect = (hostId: string) => run(`pause:${hostId}`, () => peerLinks.disconnect(hostId));
+  const reconnect = (hostId: string) => run(`resume:${hostId}`, () => peerLinks.reconnect(hostId));
 
   return (
     <Section
@@ -91,7 +93,26 @@ export function PeersSettingsView() {
                 <div className="peers-link-header">
                   <h4 className="peers-link-name">{link.peerName}</h4>
                   <span className="peers-state" data-state={link.state}>{STATE_LABELS[link.state] ?? link.state}</span>
-                  {link.connected && <span className="peers-state" data-state="connected">Connected</span>}
+                  {link.paused ? <span className="peers-state" data-state="paused">Paused</span>
+                    : link.connected && <span className="peers-state" data-state="connected">Connected</span>}
+                  <div className="peers-link-actions">
+                    {confirming === link.hostId ? (
+                      <>
+                        <span className="peers-confirm-text">Delete this link for all plugins and remove this machine&apos;s access?</span>
+                        <button type="button" className="btn danger" disabled={busy !== null} onClick={() => void removeLink(link.hostId)}>Confirm remove</button>
+                        <button type="button" className="btn" onClick={() => setConfirming(null)}>Keep link</button>
+                      </>
+                    ) : (
+                      <>
+                        {link.state === 'linked' && (link.paused || !link.connected ? (
+                          <button type="button" className="btn" disabled={busy !== null} onClick={() => void reconnect(link.hostId)}>Reconnect</button>
+                        ) : (
+                          <button type="button" className="btn" disabled={busy !== null} onClick={() => void disconnect(link.hostId)}>Disconnect</button>
+                        ))}
+                        <button type="button" className="btn" disabled={busy !== null} onClick={() => setConfirming(link.hostId)}>Remove link</button>
+                      </>
+                    )}
+                  </div>
                 </div>
                 {link.reason && <p className="peers-reason">{link.reason}</p>}
                 {link.uses.length === 0 ? (
@@ -104,31 +125,22 @@ export function PeersSettingsView() {
                         <li key={key} className="peers-use" data-testid="peer-link-use">
                           <span className="peers-use-label">{use.label}</span>
                           <span className="peers-use-meta" title={use.scope}>{use.scope} · since {sinceText(use.since)}</span>
-                          <button
-                            type="button"
-                            className="btn"
-                            disabled={busy !== null}
-                            aria-label={`Remove ${use.label} use`}
-                            onClick={() => void removeUse({ kind: 'use', hostId: link.hostId, pluginId: use.pluginId, scope: use.scope })}
-                          >
-                            Remove use
-                          </button>
+                          {link.uses.length > 1 && (
+                            <button
+                              type="button"
+                              className="btn"
+                              disabled={busy !== null}
+                              aria-label={`Stop syncing ${use.label}`}
+                              onClick={() => void removeUse({ kind: 'use', hostId: link.hostId, pluginId: use.pluginId, scope: use.scope })}
+                            >
+                              Stop syncing
+                            </button>
+                          )}
                         </li>
                       );
                     })}
                   </ul>
                 )}
-                <div className="peers-link-actions">
-                  {confirming === link.hostId ? (
-                    <>
-                      <span>Remove this link and every use on it?</span>
-                      <button type="button" className="btn danger" disabled={busy !== null} onClick={() => void removeLink(link.hostId)}>Confirm remove</button>
-                      <button type="button" className="btn" onClick={() => setConfirming(null)}>Keep link</button>
-                    </>
-                  ) : (
-                    <button type="button" className="btn" disabled={busy !== null} onClick={() => setConfirming(link.hostId)}>Remove link</button>
-                  )}
-                </div>
               </li>
             ))}
           </ul>

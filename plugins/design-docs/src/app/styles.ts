@@ -113,7 +113,29 @@ export const DESIGN_DOCS_STYLES = `
 .dd-peers-view-title { margin: 0; }
 .dd-peers-view-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; }
 .dd-peers-view-body { max-width: 760px; margin: 0 auto; padding: 18px 20px 28px; }
-.dd-settings-tabs { height: auto; padding: 0; border-bottom: 0; margin-left: 6px; }
+.dd-settings-view { container-type: inline-size; }
+.dd-settings-header { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; padding: 10px 14px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.dd-settings-header-icon { color: var(--accent-blue); flex: 0 0 auto; }
+.dd-settings-heading { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.dd-settings-heading h2 { margin: 0; font-size: 14px; font-weight: 600; }
+.dd-settings-heading p { margin: 0; font-size: 11px; color: var(--text-muted); }
+.dd-settings-body { flex: 1 1 auto; min-height: 0; display: flex; overflow: hidden; }
+.dd-settings-nav { width: 184px; flex: 0 0 auto; display: flex; flex-direction: column; gap: 14px; padding: 20px 10px; overflow-y: auto; border-right: 1px solid var(--border); }
+.dd-nav-group { display: flex; flex-direction: column; gap: 2px; }
+.dd-nav-group-label { padding: 0 8px 4px; font-size: 10px; font-weight: 600; letter-spacing: 0.6px; text-transform: uppercase; color: var(--text-muted); }
+.dd-nav-row { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 32px; padding: 6px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--text-muted); font-size: 12px; text-align: left; cursor: pointer; transition: background 0.12s, color 0.12s; }
+.dd-nav-row:hover, .dd-nav-row.active { background: var(--bg-hover); color: var(--text-primary); }
+.dd-nav-row.active { font-weight: 550; }
+.dd-settings-section-head { margin-bottom: 16px; }
+.dd-settings-section-head h3 { margin: 0; font-size: 15px; font-weight: 650; }
+.dd-settings-section-head p { margin: 4px 0 0; font-size: 12px; line-height: 1.6; }
+@container (max-width: 640px) {
+  .dd-settings-body { flex-direction: column; }
+  .dd-settings-nav { width: 100%; flex-direction: row; gap: 12px; padding: 8px; overflow-x: auto; overflow-y: hidden; border-right: 0; border-bottom: 1px solid var(--border); }
+  .dd-nav-group { flex-direction: row; }
+  .dd-nav-group-label { display: none; }
+  .dd-nav-row { width: auto; white-space: nowrap; }
+}
 .dd-agent-settings { display: flex; flex-direction: column; gap: 10px; }
 .dd-agent-intro, .dd-agent-help { margin: 0; font-size: 12px; line-height: 1.5; }
 .dd-agent-order { margin: 0; padding-left: 18px; font-size: 12px; line-height: 1.6; }

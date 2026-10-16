@@ -265,6 +265,7 @@ export {
   useSettings,
   useZccContext,
   useZccNavigate,
+  useZccDeepLinks,
   useWindowTitle,
   useComposer,
   useComposerView,

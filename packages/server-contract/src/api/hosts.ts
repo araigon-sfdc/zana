@@ -115,6 +115,8 @@ export const peerLinkSchema = z.object({
   /** Stated reason for `failed` links. */
   reason: z.string().max(200).optional(),
   connected: z.boolean(),
+  /** Owner disconnected the link: record and keys are kept, nothing connects until Reconnect. */
+  paused: z.boolean().optional(),
   uses: z.array(peerLinkUseSchema).max(32),
 });
 export type PeerLink = z.infer<typeof peerLinkSchema>;
@@ -129,6 +131,9 @@ export const removePeerLinkResponseSchema = z.object({
   linkRemoved: z.boolean(),
 });
 export type RemovePeerLinkResponse = z.infer<typeof removePeerLinkResponseSchema>;
+/** Owner Disconnect / Reconnect of a link; the record survives either way. */
+export const pausePeerLinkResponseSchema = z.object({ ok: z.literal(true), paused: z.boolean() });
+export type PausePeerLinkResponse = z.infer<typeof pausePeerLinkResponseSchema>;
 
 /** Forward-only link the installer created from an approved introduction. Never carries codes, keys or routes. */
 export const peerInstallationSchema = z.object({

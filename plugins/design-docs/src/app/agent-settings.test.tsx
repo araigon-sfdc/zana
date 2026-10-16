@@ -6,15 +6,16 @@ import { createHarness } from './test-harness.js';
 
 const USER = { kind: 'user' as const, label: 'You', threadId: null };
 
-describe('Design Docs settings: Agent tab', () => {
+describe('Design Docs settings: Agent section', () => {
   it('explains that agents follow the project AI harness, with no controls', async () => {
     const harness = createHarness();
     harness.render(<ProjectTab pluginId="design-docs" projectId="p1" />);
     fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
-    fireEvent.click(screen.getByRole('tab', { name: 'Agent' }));
-    expect(screen.getByRole('tab', { name: 'Agent' }).getAttribute('aria-selected')).toBe('true');
-    expect(screen.getByRole('tab', { name: 'Peers' }).getAttribute('aria-selected')).toBe('false');
+    fireEvent.click(screen.getByRole('button', { name: 'Agent' }));
+    expect(screen.getByRole('button', { name: 'Agent' }).getAttribute('aria-current')).toBe('page');
+    expect(screen.getByRole('button', { name: 'Peers' }).getAttribute('aria-current')).toBeNull();
     expect(screen.queryByRole('region', { name: 'Database sync peers' })).toBeNull();
+    expect(screen.getByRole('heading', { name: 'Agent harness' })).toBeTruthy();
     const section = screen.getByRole('region', { name: 'Agent harness' });
     expect([...section.querySelectorAll('li')].map((item) => item.textContent)).toEqual([
       'the doc’s project;'.replace('’', "'"),
@@ -24,7 +25,7 @@ describe('Design Docs settings: Agent tab', () => {
     expect(section.textContent).toContain("the agent won't start and the error names that setting");
     expect(section.textContent).toContain('Settings → AI Harness');
     expect(section.querySelector('input, select, button')).toBeNull();
-    // The tab choice is remembered for the next visit.
+    // The section choice is remembered for the next visit.
     expect(localStorage.getItem('zcc.design-docs.settings-tab')).toBe(JSON.stringify('agent'));
   });
 });

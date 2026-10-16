@@ -6,7 +6,7 @@ import { sharedProductFamily } from './shared-product.js';
 import { sharedExtensions } from './shared-extensions.js';
 import type { CcApi } from '@zana-ai/zcc-desktop-contract';
 import type { Host } from '@zana-ai/zcc-domain/thread-runtime';
-import type { PeerLinkListResponse, RemovePeerLinkResponse } from '@zana-ai/zcc-server-contract';
+import type { PausePeerLinkResponse, PeerLinkListResponse, RemovePeerLinkResponse } from '@zana-ai/zcc-server-contract';
 import type {
   AgentMessage,
   AgentRecord,
@@ -1394,7 +1394,11 @@ export const peerLinks = {
       { method: 'DELETE' }
     ),
   removeLink: async (hostId: string): Promise<RemovePeerLinkResponse> =>
-    apiJson<RemovePeerLinkResponse>(`/peer-links/${encodeURIComponent(hostId)}`, { method: 'DELETE' })
+    apiJson<RemovePeerLinkResponse>(`/peer-links/${encodeURIComponent(hostId)}`, { method: 'DELETE' }),
+  disconnect: async (hostId: string): Promise<PausePeerLinkResponse> =>
+    apiJson<PausePeerLinkResponse>(`/peer-links/${encodeURIComponent(hostId)}/disconnect`, { method: 'POST' }),
+  reconnect: async (hostId: string): Promise<PausePeerLinkResponse> =>
+    apiJson<PausePeerLinkResponse>(`/peer-links/${encodeURIComponent(hostId)}/reconnect`, { method: 'POST' })
 };
 
 export const product: CcApi = new Proxy({} as CcApi, {

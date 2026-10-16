@@ -182,6 +182,59 @@ describe('DELETE peer-link uses', () => {
   });
 });
 
+describe('POST peer-link disconnect / reconnect', () => {
+  const post = (path: string) => fetch(url(path), { method: 'POST', headers: JSON_HEADERS });
+
+  it('delegates to the owner store and reports the paused flag', async () => {
+    const s = await start();
+    const { link } = seed(s);
+    const pause = vi.fn(async () => ({ paused: true as const }));
+    const resume = vi.fn(async () => ({ paused: false as const }));
+    s.ctx.peerLinkDirectory = { describe: () => undefined, pause, resume };
+    const down = await post(`/peer-links/${link.id}/disconnect`);
+    expect(down.status).toBe(200);
+    expect(await down.json()).toEqual({ ok: true, paused: true });
+    expect(await (await post(`/peer-links/${link.id}/reconnect`)).json()).toEqual({ ok: true, paused: false });
+    expect(pause).toHaveBeenCalledWith(link.id);
+    expect(resume).toHaveBeenCalledWith(link.id);
+    // The record survives either way.
+    expect(getHost(s.ctx.db, link.id)?.destroyedAt).toBeNull();
+  });
+
+  it('404s an unknown host, an execution host, a destroyed link and a link no owner store claims', async () => {
+    const s = await start();
+    const { exec, link } = seed(s);
+    const pause = vi.fn(async () => ({ paused: true as const }));
+    s.ctx.peerLinkDirectory = { describe: () => undefined, pause, resume: async () => undefined };
+    for (const path of ['/peer-links/nope/disconnect', `/peer-links/${exec.id}/disconnect`, `/peer-links/${exec.id}/reconnect`, `/peer-links/${link.id}/reconnect`]) {
+      expect((await post(path)).status).toBe(404);
+    }
+    expect(pause).not.toHaveBeenCalled();
+    s.ctx.peerLinkDirectory = undefined;
+    expect((await post(`/peer-links/${link.id}/disconnect`)).status).toBe(404);
+    destroyHost(s.ctx.db, link.id);
+    expect((await post(`/peer-links/${link.id}/disconnect`)).status).toBe(404);
+  });
+
+  it('answers 503 when the owner store fails', async () => {
+    const s = await start();
+    const { link } = seed(s);
+    s.ctx.peerLinkDirectory = { describe: () => undefined, pause: async () => { throw new Error('boom'); }, resume: async () => { throw new Error('boom'); } };
+    expect((await post(`/peer-links/${link.id}/disconnect`)).status).toBe(503);
+    expect((await post(`/peer-links/${link.id}/reconnect`)).status).toBe(503);
+  });
+
+  it('refuses the mobile proxy and lists the paused flag', async () => {
+    const s = await start();
+    const { link } = seed(s);
+    const response = await fetch(url(`/peer-links/${link.id}/disconnect`), { method: 'POST', headers: { ...JSON_HEADERS, 'x-zcc-app-surface': 'mobile' } });
+    expect(response.status).toBe(403);
+    s.ctx.peerLinkDirectory = { describe: () => ({ peerInstanceId: 'inst', peerName: 'Ada', state: 'linked', paused: true }) };
+    const body = await fetch(url('/peer-links')).then(r => r.json()) as { links: Array<Record<string, unknown>> };
+    expect(body.links[0]).toMatchObject({ paused: true });
+  });
+});
+
 describe('DELETE peer-link', () => {
   it('removes the link and its uses, tearing down the session', async () => {
     const s = await start();

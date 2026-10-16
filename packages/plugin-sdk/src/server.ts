@@ -693,7 +693,7 @@ export interface PluginPeerLink {
   role: 'inviter' | 'redeemer';
   phase: 'pending' | 'exchanged' | 'enrolled' | 'linked' | 'failed' | 'removed';
   state: 'connected' | 'reconnecting' | 'disconnected';
-  reason?: 'ssh-down' | 'credential-expired' | 'peer-offline' | 'revoked';
+  reason?: 'ssh-down' | 'credential-expired' | 'peer-offline' | 'paused' | 'revoked';
   failure?: 'expired' | 'fenced' | 'conflict' | 'unreachable';
   retryInMs?: number;
   /** @deprecated Never set: a link rides an SSH tunnel with a per-link key that has no expiry; it is rotated by `reconnectPeer`. */

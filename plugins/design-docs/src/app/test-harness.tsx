@@ -42,6 +42,10 @@ export interface HarnessOptions {
   context?: { projectId?: string | null; threadId?: string | null };
   /** Serve standalone pages at this URL (`pageLink`); unset, the RPC refuses. */
   pageUrl?(docId: string, path: string): string;
+  /** `deepLinks.base()`; unset uses the SDK default, null models a build without links. */
+  deepLinkBase?: string | null;
+  /** Replace RPC methods on top of the real handlers (e.g. a stubbed pairing flow). */
+  rpcOverrides?: Record<string, (args?: any) => unknown>;
 }
 
 function escapeHtml(text: string): string {
@@ -74,6 +78,8 @@ export interface Harness {
   asAgent<T>(mutate: (store: DesignDocStore) => T): Promise<T>;
   render(element: ReactElement): RenderResult;
   call(method: string, args?: unknown): Promise<unknown>;
+  /** Deliver a deep link to the handlers the app registered with `deepLinks.on(route, …)`. */
+  emitDeepLink(route: string, payload?: string | null): void;
 }
 
 export function createHarness(options: HarnessOptions = {}): Harness {
@@ -107,7 +113,8 @@ export function createHarness(options: HarnessOptions = {}): Harness {
     ])
   );
 
-  const installed = installTestPluginRuntime({ rpc, context: options.context ?? {}, panelAgent: options.panelAgent });
+  Object.assign(rpc, options.rpcOverrides);
+  const installed = installTestPluginRuntime({ rpc, deepLinkBase: options.deepLinkBase, context: options.context ?? {}, panelAgent: options.panelAgent });
   const runtime = (globalThis as { __ZCC_PLUGIN_RUNTIME__?: Record<string, unknown> }).__ZCC_PLUGIN_RUNTIME__!;
   const toasts: Toast[] = [];
   runtime.toast = (message: string, kind: 'info' | 'error' = 'info') => {
@@ -165,6 +172,7 @@ export function createHarness(options: HarnessOptions = {}): Harness {
       return result;
     },
     render: (element) => render(element),
-    call: (method, args) => rpc[method]!(args ?? null) as Promise<unknown>
+    call: (method, args) => rpc[method]!(args ?? null) as Promise<unknown>,
+    emitDeepLink: (route, payload) => act(() => installed.emitDeepLink(route, payload))
   };
 }

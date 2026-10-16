@@ -1143,6 +1143,15 @@ const api: CcApi = {
   commands: {
     list: (projectPath?: string) => ipcRenderer.invoke(IPC.commands.list, projectPath)
   },
+  deepLinks: {
+    config: () => ipcRenderer.invoke(IPC.deepLinks.config),
+    open: (raw: string) => ipcRenderer.invoke(IPC.deepLinks.open, raw),
+    onLink: (cb) => {
+      const handler = (_e: unknown, delivery: Parameters<typeof cb>[0]) => cb(delivery);
+      ipcRenderer.on(IPC.deepLinks.onLink, handler);
+      return () => ipcRenderer.off(IPC.deepLinks.onLink, handler);
+    }
+  },
   scheduler: {
     list: () => ipcRenderer.invoke(IPC.scheduler.list),
     get: (id) => ipcRenderer.invoke(IPC.scheduler.get, id),

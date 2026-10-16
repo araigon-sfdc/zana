@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { installTestPluginRuntime } from '@zana-ai/zcc-plugin-sdk/testing/app';
 import { INVITE_POLL_MS, INVITE_WAITING_POLL_MS, PeerSettings } from './PeerSettings.js';
 import type { InviteItem, InviteView, PeerLink } from './api.js';
@@ -8,6 +8,8 @@ import { createHarness } from './test-harness.js';
 import { createApi } from './api.js';
 
 afterEach(() => { vi.useRealTimers(); });
+// These tests cover the code format; the link format is covered in invite-links.test.tsx.
+beforeEach(() => localStorage.setItem('zcc.design-docs.invite-format', JSON.stringify('code')));
 /** Manual Refresh is gone: status reloads on the poll interval, so tests drive that interval. */
 const fakePolling = () => vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
 const pollOnce = () => act(async () => { vi.advanceTimersByTime(INVITE_WAITING_POLL_MS); });
@@ -74,6 +76,9 @@ describe('database peer settings UI', () => {
     try {
       harness.render(<PeerSettings />);
       await screen.findByText('Sync group: 2 of 8 computers');
+      expect(screen.getByText('This computer: connected')).toBeTruthy();
+      expect(screen.getByText('Unnamed computer: connected').getAttribute('title')).toBe('Computer id app-b');
+      expect(screen.getByText('Unnamed computer: connected').textContent).not.toContain('app-b');
       expect(screen.getByRole('button', { name: 'Remove Member' })).toHaveProperty('disabled', true);
       expect(screen.getByRole('button', { name: 'Leave Group' })).toHaveProperty('disabled', true);
       fireEvent.click(screen.getByRole('button', { name: 'Disable Link' }));
@@ -128,7 +133,7 @@ describe('database peer settings UI', () => {
     installTestPluginRuntime({ rpc: { groupStatus: async () => status } });
     harness.render(<PeerSettings />);
     await screen.findByText('Sync group: 3 of 8 computers');
-    expect(screen.getByText(/app-b: retiring - waiting for committed frontier; data sync disabled/)).toBeTruthy();
+    expect(screen.getByText(/Unnamed computer: retiring - waiting for committed frontier; data sync disabled/)).toBeTruthy();
     expect(screen.getAllByRole('button', { name: 'Remove Member' })[0]).toHaveProperty('disabled', true);
     expect(screen.getAllByRole('button', { name: 'Disable Link' })[0]).toHaveProperty('disabled', false);
     expect(screen.getByText(/app-b: blocked: waiting for committed frontier/)).toBeTruthy();
@@ -260,8 +265,8 @@ describe('invitation pairing UI', () => {
     expect(await screen.findByText(/Expires in 9:30/)).toBeTruthy();
     expect((screen.getByLabelText('Invitation') as HTMLInputElement).value).toBe('zccinv1.first');
     expect(writeText).toHaveBeenCalledWith('zccinv1.first');
-    await screen.findByRole('button', { name: 'Copied' });
-    fireEvent.click(screen.getByRole('button', { name: 'Copied' }));
+    await screen.findByRole('button', { name: 'Copy invitation' });
+    fireEvent.click(screen.getByRole('button', { name: 'Copy invitation' }));
     expect(writeText).toHaveBeenCalledTimes(2);
     fireEvent.click(screen.getByRole('button', { name: 'New invitation' }));
     await waitFor(() => expect((screen.getByLabelText('Invitation') as HTMLInputElement).value).toBe('zccinv1.second'));
@@ -307,7 +312,7 @@ describe('invitation pairing UI', () => {
     Object.defineProperty(document, 'execCommand', { value: exec, configurable: true });
     mount({ createInvitation: async () => ({ invitationId: 'inv-1', token: 'zccinv1.legacy', expiresAt: Date.now() + 600_000 }) });
     fireEvent.click(await screen.findByRole('button', { name: 'Add peer' }));
-    expect(await screen.findByRole('button', { name: 'Copied' })).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'Copy invitation' })).toBeTruthy();
     expect(exec).toHaveBeenCalledWith('copy');
     expect(screen.queryByText(/Copy failed/)).toBeNull();
     Object.defineProperty(document, 'execCommand', { value: undefined, configurable: true });
@@ -503,6 +508,7 @@ describe('invitation pairing UI', () => {
       lnk({ pairingId: 'p4', peerInstanceId: 'app-e', state: 'disconnected', reason: 'ssh-down' }),
       lnk({ pairingId: 'p5', peerInstanceId: 'app-f', state: 'disconnected', reason: 'revoked' }),
       lnk({ pairingId: 'p6', peerInstanceId: 'app-g', state: 'disconnected' }),
+      lnk({ pairingId: 'p10', peerInstanceId: 'app-j', state: 'disconnected', reason: 'paused' }),
       lnk({ pairingId: 'p7', peerInstanceId: 'app-h', phase: 'removed', state: 'disconnected' }),
       // A declined or replayed attempt never linked: not shown, and it never shadows the live link to the same peer.
       lnk({ pairingId: 'p8', peerInstanceId: 'app-i', phase: 'failed', state: 'disconnected', reason: 'peer-offline' }),
@@ -514,10 +520,11 @@ describe('invitation pairing UI', () => {
     expect(rows).toEqual([
       'Laptop: Connected', 'app-c: Reconnecting automatically... (the other computer is offline)Reconnect',
       'app-d: Disconnected (the link credential expired)Reconnect', 'app-e: Disconnected (the secure connection to the other computer is down)Reconnect',
-      'app-f: Disconnected (the link was revoked). Add peer to pair again.', 'app-g: DisconnectedReconnect']);
+      'app-f: Disconnected (the link was revoked). Add peer to pair again.', 'app-g: DisconnectedReconnect', 'app-j: Paused (Disconnected on this computer. Reconnect from Settings → Peers.)']);
     const alerts = screen.getAllByRole('alert').map((alert) => alert.textContent);
     expect(alerts).toContain('Disconnected from app-d (the link credential expired). Sync is paused and resumes when the link is back.');
     expect(alerts).toContain('Disconnected from app-g. Sync is paused and resumes when the link is back.');
+    expect(alerts.some((text) => text?.includes('app-j'))).toBe(false);
     expect(alerts.some((text) => text?.includes('app-h') || text?.includes('app-i') || text?.includes('Laptop'))).toBe(false);
     fireEvent.click(within(list).getAllByRole('button', { name: 'Reconnect' })[1]!);
     await waitFor(() => expect(reconnect).toHaveBeenCalledExactlyOnceWith({ peerId: 'app-d' }));

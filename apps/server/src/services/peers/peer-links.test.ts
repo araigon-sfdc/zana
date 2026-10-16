@@ -1101,3 +1101,134 @@ describe('startup, reconcile, sweep, views, dispose', () => {
     links.dispose(); // idempotent
   });
 });
+
+describe('pause (owner Disconnect) and unpause (Reconnect)', () => {
+  it('redeemer pause closes connector and tunnel, keeps record and keys, reports paused (not revoked)', async () => {
+    const f = await fixture(), links = f.make();
+    const ctx = await f.redeemerLinked(links);
+    expect(await links.pause(ctx.peer.id)).toBe(true);
+    expect(f.conns.at(-1)!.close).toHaveBeenCalled();
+    expect(f.opened.at(-1)!.close).toHaveBeenCalled();
+    expect(f.recOf(links, ctx.id)).toMatchObject({ phase: 'linked', paused: true });
+    expect((await links.links(ctx.peer.id))[0]).toMatchObject({ state: 'disconnected', reason: 'paused', phase: 'linked' });
+    expect(links.directory.describe(ctx.inboundId)).toMatchObject({ state: 'linked', paused: true });
+    expect(f.ssh.dropLinkKey).not.toHaveBeenCalled();
+    expect(f.bridge.peerRemove).not.toHaveBeenCalled();
+    expect(f.sessions.get(ctx.inboundId)!.socket.close).toHaveBeenCalledWith(1001, 'peer-paused');
+  });
+
+  it('inviter pause keeps its authorized key and forwarder but stops its connector and refuses the peer connector', async () => {
+    const f = await fixture(), links = f.make();
+    const ctx = await f.inviterLinked(links);
+    expect(await links.pause(ctx.peer.id)).toBe(true);
+    expect(await links.pause(ctx.peer.id)).toBe(true); // idempotent
+    expect(f.conns.at(-1)!.close).toHaveBeenCalled();
+    expect(f.lines.has(`${ctx.id}:link`)).toBe(true);
+    expect(f.held.has(ctx.id)).toBe(true);
+    const peerSocket = f.sessions.get(ctx.mint.offer.hostId)!.socket;
+    peerSocket.close.mockClear();
+    links.onInboundConnected(ctx.mint.offer.hostId);
+    expect(peerSocket.close).toHaveBeenCalledWith(1001, 'peer-paused');
+    expect((await links.links(ctx.peer.id))[0]).toMatchObject({ state: 'disconnected', reason: 'paused' });
+  });
+
+  it('refuses a socket close that throws without failing', async () => {
+    const f = await fixture(), links = f.make();
+    const ctx = await f.inviterLinked(links);
+    await links.pause(ctx.peer.id);
+    f.sessions.get(ctx.mint.offer.hostId)!.socket.close.mockImplementation(() => { throw new Error('closing'); });
+    expect(() => links.onInboundConnected(ctx.mint.offer.hostId)).not.toThrow();
+    await links.unpause(ctx.peer.id);
+    await links.pause(ctx.peer.id);
+  });
+
+  it('persists across restart: start does not reopen tunnel or connector while paused', async () => {
+    const f = await fixture(), first = f.make();
+    const ctx = await f.redeemerLinked(first);
+    await first.pause(ctx.peer.id);
+    first.dispose(); await first.whenIdle();
+    f.ssh.openTunnel.mockClear(); f.connector.connect.mockClear();
+    const second = f.make();
+    await second.start();
+    expect(f.recOf(second, ctx.id).paused).toBe(true);
+    expect(f.ssh.openTunnel).not.toHaveBeenCalled();
+    expect(f.connector.connect).not.toHaveBeenCalled();
+    expect(f.sessions.get(ctx.inboundId)!.socket.close).toHaveBeenCalledWith(1001, 'peer-paused');
+  });
+
+  it('the reconnect loop is skipped while paused: sweep, heal, rotation and relink do nothing', async () => {
+    const f = await fixture(), links = f.make();
+    const ctx = await f.redeemerLinked(links);
+    await links.pause(ctx.peer.id);
+    f.ssh.openTunnel.mockClear(); f.connector.connect.mockClear(); f.bridge.peerRotate.mockClear(); f.bridge.peerRelink.mockClear();
+    f.clock.t += PEER_LINK_ROTATION_MS + PEER_OFFLINE_AFTER_MS;
+    await links.sweep();
+    await f.settle(links, PEER_RELINK_AFTER_MS * 3);
+    expect(f.ssh.openTunnel).not.toHaveBeenCalled();
+    expect(f.connector.connect).not.toHaveBeenCalled();
+    expect(f.bridge.peerRotate).not.toHaveBeenCalled();
+    expect(f.bridge.peerRelink).not.toHaveBeenCalled();
+    // Rotate and the peer's rotate/relink requests are ignored too.
+    expect(await links.rotate(ctx.peer.id)).toHaveLength(1);
+    expect(f.connector.connect).not.toHaveBeenCalled();
+    expect(await links.acceptRotate(ctx.peer.id, f.recOf(links, ctx.id).outbound.hostId, { code: joinToken(), expiresAt: f.clock.t + 60_000 }, new AbortController().signal))
+      .toEqual({ accepted: false });
+    expect(await links.acceptRelink(ctx.peer.id, ctx.inboundId, new AbortController().signal)).toEqual({ accepted: false });
+  });
+
+  it('unpause clears the flag and reopens tunnel and connector; the persisted flag is gone', async () => {
+    const f = await fixture(), links = f.make();
+    const ctx = await f.redeemerLinked(links);
+    await links.pause(ctx.peer.id);
+    f.ssh.openTunnel.mockClear(); f.connector.connect.mockClear();
+    expect(await links.unpause(ctx.peer.id)).toBe(true);
+    expect(f.recOf(links, ctx.id).paused).toBeUndefined();
+    expect(f.ssh.openTunnel).toHaveBeenCalledWith(ctx.id, expect.objectContaining({ localPort: LOCAL }), expect.any(Function));
+    expect(f.connector.connect).toHaveBeenCalledTimes(1);
+    f.conns.at(-1)!.set(true);
+    expect((await links.links(ctx.peer.id))[0]).toMatchObject({ state: 'connected' });
+    expect(links.directory.describe(ctx.inboundId)).not.toHaveProperty('paused');
+    // Unpausing a link that is not paused is harmless.
+    expect(await links.unpause(ctx.peer.id)).toBe(true);
+  });
+
+  it('inviter unpause reopens its connector', async () => {
+    const f = await fixture(), links = f.make();
+    const ctx = await f.inviterLinked(links);
+    await links.pause(ctx.peer.id);
+    f.connector.connect.mockClear();
+    await links.unpause(ctx.peer.id);
+    expect(f.connector.connect).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails for an unknown or unlinked peer and through the directory for unknown hosts', async () => {
+    const f = await fixture(), links = f.make();
+    expect(await links.pause(randomUUID())).toBe(false);
+    expect(await links.unpause(randomUUID())).toBe(false);
+    expect(await links.directory.pause(randomUUID())).toBeUndefined();
+    expect(await links.directory.resume(randomUUID())).toBeUndefined();
+    const pending = await f.inviterPulled(links);
+    expect(await links.directory.pause(pending.mint.offer.hostId)).toBeUndefined();
+    expect(await links.directory.resume(pending.mint.offer.hostId)).toBeUndefined();
+  });
+
+  it('directory pause and resume act on the inbound host', async () => {
+    const f = await fixture(), links = f.make();
+    const ctx = await f.redeemerLinked(links);
+    expect(await links.directory.pause(ctx.inboundId)).toEqual({ paused: true });
+    expect(f.recOf(links, ctx.id).paused).toBe(true);
+    expect(await links.directory.resume(ctx.inboundId)).toEqual({ paused: false });
+    expect(f.recOf(links, ctx.id).paused).toBeUndefined();
+  });
+
+  it('removing a paused link still tears everything down', async () => {
+    const f = await fixture(), links = f.make();
+    const ctx = await f.inviterLinked(links);
+    await links.pause(ctx.peer.id);
+    expect(await links.remove(ctx.peer.id)).toBe(true);
+    expect(f.lines.size).toBe(0);
+    expect(f.held.size).toBe(0);
+    expect(f.recOf(links, ctx.id)).toMatchObject({ phase: 'removed' });
+    expect(links.directory.describe(ctx.mint.offer.hostId)).not.toHaveProperty('paused');
+  });
+});

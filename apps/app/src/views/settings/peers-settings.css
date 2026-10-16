@@ -10,6 +10,8 @@
 .peers-use { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; font-size: 13px; }
 .peers-use-label { font-weight: 600; }
 .peers-use-meta { color: var(--text-muted); font-size: 12px; overflow-wrap: anywhere; flex: 1; min-width: 0; }
-.peers-link-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.peers-link-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: flex-end; margin-left: auto; }
+.peers-confirm-text { font-size: 13px; }
+.peers-state[data-state='paused'] { color: var(--warning, #b7791f); }
 .peers-empty, .peers-loading { color: var(--text-muted); font-size: 13px; }
 .peers-error { color: var(--danger, #d33); font-size: 13px; }

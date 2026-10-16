@@ -229,6 +229,22 @@ pairing.
   a restricted per-link key that is generated for just this pair. Both owners
   see an approval prompt showing the other computer's name and fingerprint. Compare the fingerprints; if they match, click **Approve**. An
   invitation works once and expires after **10 minutes**.
+- **Invitation formats.** An invitation is handed over either as a **code** (paste)
+  or as a **link** (clickable), and both carry the same content. After **Add peer**
+  the panel shows **Copy link** (`zana://plugin/design-docs/join?d=<code>`; `zana-dev://`
+  in `pnpm dev`) and **Copy invitation** (the raw code). Design Docs → Settings →
+  **Sharing** → **Invitation format** (`Link (clickable)` or `Code (paste)`) picks the
+  main button and what **Add peer** copies for you; the default is Link when this
+  build supports links, otherwise Code. Links are hidden when this build has no link
+  scheme (E2E, older hosts) or the code is too long for a link (4096 characters).
+  Opening a link, or pasting one into **Join peer**, never joins by itself: it opens
+  Settings → Peers with the field filled in and asks **Join &lt;computer&gt;?** with the
+  computer name and fingerprint; you still click **Join peer**, and both owners
+  still approve. A malformed or expired link shows an error and changes nothing.
+  The field accepts a raw code or a full link ("Paste an invitation code or link.").
+  Dev testing: macOS cannot register a scheme for an unpackaged dev Electron, so
+  run `pnpm dev:open-link "zana-dev://plugin/design-docs/join?d=<code>"` to deliver
+  a link to the running dev app (see `docs/plugin-deep-links.md`).
 - **Connection method.** Only the computer that created the invitation needs an SSH
   server (macOS Remote Login, or OpenSSH elsewhere). The other computer connects out
   to it and opens a reverse tunnel, so the first computer never needs SSH access to
@@ -248,6 +264,14 @@ pairing.
   tunnel uses, so avoid pairing on shared machines.
 - **Reconnecting.** If a peer was offline, the connecting computer retries on its
   own. If it stays disconnected, use **Reconnect** on the link.
+- **Disconnect, Reconnect and Remove link.** Each machine in **Settings → Peers**
+  has **Disconnect** (or **Reconnect** when paused or down) and **Remove link** in its
+  header. **Disconnect** keeps the link and its keys but closes the connection on this
+  computer and stops automatic reconnecting, even after a restart; the badge reads
+  **Paused** (Design Docs' Peers list shows **Paused** too and points back here) and the other computer just sees this one offline. **Reconnect** resumes
+  it. **Remove link** deletes the link for all plugins and removes this machine's
+  access. When a machine is used by more than one plugin, **Stop syncing** on a plugin
+  row ends only that plugin's use.
 - **Where links appear.** **Settings → Machines** lists execution machines only.
   **Settings → Peers** lists every peer link and its state (Connected, Connecting,
   or a specific reason why it cannot connect). See **Check your setup** for

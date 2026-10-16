@@ -23,7 +23,7 @@ import {
 import { readJsonBody, sendJson, beginNdjson } from './json.js';
 import type { ProductHttpContext } from './product-context.js';
 import { listPublicHosts, parseHostUpdate, toPublicHost } from '../services/hosts/host-public.js';
-import { listPeerLinks, removePeerLink, removePeerLinkUse, type PeerLinkRemoval } from '../services/hosts/peer-link-view.js';
+import { listPeerLinks, pausePeerLink, removePeerLink, removePeerLinkUse, resumePeerLink, type PeerLinkRemoval } from '../services/hosts/peer-link-view.js';
 import { relaunchLocalHostDaemon } from '../services/hosts/host-relaunch.js';
 import { HostUnavailableError } from './host-hub.js';
 import { bootstrapHostBySsh, bootstrapHostForProject, parseSshIdentity, reconcileRemoteProjectBindings, repairHost, type HostBootstrapEvent } from '../services/hosts/host-bootstrap.js';
@@ -89,6 +89,15 @@ export async function handleHostsApi(
     }
     if (path === '/api/v1/peer-links' && method === 'GET') {
       sendJson(response, 200, listPeerLinks(ctx));
+      return true;
+    }
+    const pauseParams = method === 'POST' ? routeParams(path, '/api/v1/peer-links/:hostId/disconnect') : null;
+    const resumeParams = method === 'POST' ? routeParams(path, '/api/v1/peer-links/:hostId/reconnect') : null;
+    if (pauseParams || resumeParams) {
+      const result = pauseParams ? await pausePeerLink(ctx, pauseParams.hostId!) : await resumePeerLink(ctx, resumeParams!.hostId!);
+      if (result.status === 'ok') sendJson(response, 200, { ok: true as const, paused: result.paused });
+      else if (result.status === 'not-found') sendJson(response, 404, { error: 'peer link not found' });
+      else sendJson(response, 503, { error: 'Could not change this link right now. Try again.' });
       return true;
     }
     const useParams = method === 'DELETE' ? routeParams(path, '/api/v1/peer-links/:hostId/uses/:pluginId') : null;

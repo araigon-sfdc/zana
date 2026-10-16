@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
 import type { GroupStatus } from '../shared/peer-group.js';
-import { experimental_requestApproval, useRealtime, type PluginApprovalResult } from '@zana-ai/zcc-plugin-sdk/app';
+import { experimental_requestApproval, useRealtime, useZccDeepLinks, type PluginApprovalResult } from '@zana-ai/zcc-plugin-sdk/app';
 import { PEER_STATE_CHANNEL, PLUGIN_ID } from '../shared/contract.js';
 import { errorMessage, toast, useApi, type InviteItem, type InviteView, type PeerLink, type PeerStatus } from './api.js';
 import { copyText } from './clipboard.js';
+import { buildInviteLink, parseInviteInput, parseJoinPayload, resolveInviteFormat, useInviteFormatPreference, type JoinRequest } from './invite-format.js';
 import { IconButton, Spinner } from './ui.js';
 
 export interface PeerSync {
@@ -166,6 +167,7 @@ const LINK_REASON_TEXT: Record<NonNullable<PeerLink['reason']>, string> = {
   'ssh-down': 'the secure connection to the other computer is down',
   'credential-expired': 'the link credential expired',
   'peer-offline': 'the other computer is offline',
+  paused: 'Disconnected on this computer. Reconnect from Settings → Peers.',
   revoked: 'the link was revoked'
 };
 const TERMINAL = new Set(['ready', 'denied', 'cancelled', 'expired', 'failed']);
@@ -218,13 +220,14 @@ const APPROVAL_TEXT: Record<string, string | null> = {
  * Pairing without Settings: Add peer (copy the invitation) on one computer, Join peer (paste it) on the other,
  * then each owner confirms once. The invitation is the transport and database-sync consent.
  */
-function InvitePanel({ invites, onChanged, requestApproval }: { invites: InviteView | null; onChanged(): void; requestApproval: RequestApproval }) {
+function InvitePanel({ invites, onChanged, requestApproval, joinRequest, onJoinRequestHandled }: { invites: InviteView | null; onChanged(): void; requestApproval: RequestApproval; joinRequest?: JoinRequest | null; onJoinRequestHandled?(): void }) {
   const api = useApi();
+  const deepLinks = useZccDeepLinks();
+  const [preference] = useInviteFormatPreference();
   const [created, setCreated] = useState<{ invitationId: string; token: string; expiresAt: number } | null>(null);
   const [paste, setPaste] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
   const [dismissed, setDismissed] = useState<string[]>([]);
   const mounted = useMounted();
   const now = useNow(!!created);
@@ -247,22 +250,39 @@ function InvitePanel({ invites, onChanged, requestApproval }: { invites: InviteV
     setError(null);
     void work().catch((failure) => { if (mounted.current) setError(errorMessage(failure)); }).finally(() => { if (mounted.current) { setBusy(false); onChanged(); } });
   };
-  const copy = async (token: string) => {
+  const copy = async (text: string, toastMessage: string) => {
     // The desktop session denies navigator.clipboard, so copyText falls back to the legacy copy path.
-    const ok = await copyText(token);
+    const ok = await copyText(text);
+    if (ok) toast(toastMessage);
     if (!mounted.current) return;
-    setCopied(ok);
     if (!ok) setError('Copy failed. Select the invitation text and copy it manually.');
   };
+  const linkFor = (token: string) => buildInviteLink(deepLinks.base(), token);
+  // Link only when this build has a scheme and the token fits a link; otherwise the code is the one format.
+  const format = (token: string) => (resolveInviteFormat(preference, deepLinks.base()) === 'link' && linkFor(token) ? 'link' : 'code');
+  const copyInvitation = (token: string) => copy(token, 'Invitation copied to clipboard');
+  const copyLink = (token: string) => copy(linkFor(token)!, 'Invitation link copied to clipboard');
+  // A received link only prefills the Join peer field; the user still has to read the confirmation and choose Join peer.
+  useEffect(() => {
+    if (!joinRequest) return;
+    const parsed = parseJoinPayload(joinRequest.payload);
+    if (parsed.kind === 'token') { setPaste(parsed.token); setError(null); }
+    else if (parsed.kind === 'invalid') setError(parsed.message);
+    onJoinRequestHandled?.();
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- one run per received link
+  }, [joinRequest]);
+  const pasted = paste.trim() ? parseInviteInput(paste) : null;
   const addPeer = () => act(async () => {
     if (created) await api.cancelInvitation(created.invitationId).catch(() => undefined);
-    setCreated(null); setCopied(false);
+    setCreated(null);
     const invitation = await api.createInvitation();
     if (mounted.current) setCreated(invitation);
-    await copy(invitation.token);
+    await (format(invitation.token) === 'link' ? copyLink(invitation.token) : copyInvitation(invitation.token));
   });
   const joinPeer = () => act(async () => {
-    await api.redeemInvitation(paste.trim());
+    const input = parseInviteInput(paste);
+    if (input.kind === 'invalid') throw new Error(input.message);
+    await api.redeemInvitation(input.token);
     setPaste('');
   });
   const approve = (item: InviteItem) => act(async () => {
@@ -275,6 +295,13 @@ function InvitePanel({ invites, onChanged, requestApproval }: { invites: InviteV
     await api.decideInvitation({ invitationId: item.invitationId, decision: 'approved', ownerProof: result.token });
   });
   const expired = created ? created.expiresAt <= now : false;
+  const copyButtons = (token: string) => {
+    const linkFirst = format(token) === 'link';
+    const code = <button key="code" type="button" className={linkFirst || !linkFor(token) ? 'btn' : 'btn primary'} onClick={() => void copyInvitation(token)}>Copy invitation</button>;
+    if (!linkFor(token)) return code;
+    const link = <button key="link" type="button" className={linkFirst ? 'btn primary' : 'btn'} onClick={() => void copyLink(token)}>Copy link</button>;
+    return linkFirst ? [link, code] : [code, link];
+  };
   return (
     <div className="dd-peers-guide" aria-label="Pair a peer">
       <h5 className="dd-peers-heading">Pair another computer</h5>
@@ -295,7 +322,7 @@ function InvitePanel({ invites, onChanged, requestApproval }: { invites: InviteV
             </>
           )}
           <div className="dd-actions">
-            {!expired ? <button type="button" className="btn" onClick={() => void copy(created.token)}>{copied ? 'Copied' : 'Copy invitation'}</button> : null}
+            {!expired ? copyButtons(created.token) : null}
             <button type="button" className="btn" disabled={busy} onClick={addPeer}>{expired ? 'Create new invitation' : 'New invitation'}</button>
             <button type="button" className="btn" disabled={busy} onClick={() => act(async () => { await api.cancelInvitation(created.invitationId); setCreated(null); })}>Cancel invitation</button>
           </div>
@@ -306,6 +333,10 @@ function InvitePanel({ invites, onChanged, requestApproval }: { invites: InviteV
           value={paste} onChange={(event) => setPaste(event.target.value)} disabled={unavailable} />
         <button type="button" className="btn" disabled={busy || unavailable || !paste.trim()} onClick={joinPeer}>Join peer</button>
       </div>
+      <p className="dd-peers-hint">Paste an invitation code or link.</p>
+      {pasted?.kind === 'token' ? (
+        <p role="status" className="dd-peers-block">Join {pasted.summary.name}? Its fingerprint is <code>{pasted.summary.fingerprint}</code>. Check that it matches the other computer, then choose Join peer.</p>
+      ) : null}
       {sshGuideFor(error) ? <SshGuideCard guide={sshGuideFor(error)!} /> : error ? <p role="alert" className="dd-banner dd-banner-error">{error}</p> : null}
       {items.length ? (
         <ul className="dd-peers-list" aria-label="Pairing">
@@ -374,9 +405,11 @@ function PeerLinks({ links, names, busy, onReconnect }: { links: PeerLink[]; nam
   if (!live.length) return null;
   const label = (link: PeerLink) => names.get(link.peerInstanceId) ?? link.peerInstanceId;
   const detail = (link: PeerLink) => link.reason ? ` (${LINK_REASON_TEXT[link.reason]})` : '';
+  // Paused is the owner's choice (Settings → Peers), not a fault: no error banner and no Reconnect here.
+  const isPaused = (link: PeerLink) => link.reason === 'paused';
   return (
     <>
-      {live.filter((link) => link.state === 'disconnected').map((link) => (
+      {live.filter((link) => link.state === 'disconnected' && !isPaused(link)).map((link) => (
         <p key={`notice-${link.pairingId}`} role="alert" className="dd-banner dd-banner-error">
           Disconnected from {label(link)}{detail(link)}. Sync is paused and resumes when the link is back.
         </p>
@@ -384,9 +417,9 @@ function PeerLinks({ links, names, busy, onReconnect }: { links: PeerLink[]; nam
       <ul className="dd-peers-list" aria-label="Peer links">
         {live.map((link) => (
           <li key={link.pairingId} className="dd-peers-member">
-            <span className="dd-peers-member-name">{label(link)}: {link.state === 'connected' ? 'Connected' : link.state === 'reconnecting' ? 'Reconnecting automatically...' : 'Disconnected'}{link.state === 'connected' ? '' : detail(link)}{link.reason === 'revoked' ? '. Add peer to pair again.' : ''}</span>
+            <span className="dd-peers-member-name">{label(link)}: {link.state === 'connected' ? 'Connected' : link.state === 'reconnecting' ? 'Reconnecting automatically...' : isPaused(link) ? 'Paused' : 'Disconnected'}{link.state === 'connected' ? '' : detail(link)}{link.reason === 'revoked' ? '. Add peer to pair again.' : ''}</span>
             <span className="dd-actions">
-              {link.state !== 'connected' && link.reason !== 'revoked' ? (
+              {link.state !== 'connected' && link.reason !== 'revoked' && !isPaused(link) ? (
                 <button type="button" className="btn" disabled={busy} onClick={() => onReconnect(link.peerInstanceId)}>Reconnect</button>
               ) : null}
             </span>
@@ -401,7 +434,7 @@ function PeerLinks({ links, names, busy, onReconnect }: { links: PeerLink[]; nam
  * Database sync peers: pairing, group status, and lifecycle actions.
  * Self-contained (no router), so it renders in the Peers view or on its own.
  */
-export function PeerSettings({ requestApproval = experimental_requestApproval }: { requestApproval?: RequestApproval } = {}) {
+export function PeerSettings({ requestApproval = experimental_requestApproval, joinRequest, onJoinRequestHandled }: { requestApproval?: RequestApproval; joinRequest?: JoinRequest | null; onJoinRequestHandled?(): void } = {}) {
   const api = useApi();
   const [status, setStatus] = useState<GroupStatus | null>(null);
   const [invites, setInvites] = useState<InviteView | null>(null);
@@ -472,7 +505,7 @@ export function PeerSettings({ requestApproval = experimental_requestApproval }:
   return (
     <section className="dd-peers" aria-label="Database sync peers">
       <p>Sync this entire Design Docs database with other Zana apps. Existing documents stay local until you use Sync.</p>
-      <InvitePanel invites={invites} onChanged={() => { loadInvites(); void api.groupStatus().then((value) => { if (mounted.current) setStatus(value); }).catch(() => undefined); }} requestApproval={requestApproval} />
+      <InvitePanel invites={invites} onChanged={() => { loadInvites(); void api.groupStatus().then((value) => { if (mounted.current) setStatus(value); }).catch(() => undefined); }} requestApproval={requestApproval} joinRequest={joinRequest} onJoinRequestHandled={onJoinRequestHandled} />
       {invites?.enableError ? <p role="alert" className="dd-banner dd-banner-error">{invites.enableError}</p> : null}
       <PeerLinks links={links} names={names} busy={busy}
         onReconnect={(id) => { setBusy(true); setError(null); void api.reconnectPeer(id).catch((failure) => { if (mounted.current) setError(errorMessage(failure)); }).finally(() => { if (mounted.current) { setBusy(false); loadInvites(); } }); }} />
@@ -498,16 +531,18 @@ export function PeerSettings({ requestApproval = experimental_requestApproval }:
             <ul className="dd-peers-list" aria-label="Members">
               {status.members.map((member) => (
                 <li key={member.replicaId} className="dd-peers-member">
-                  <span className="dd-peers-member-name">{member.machineId}: {memberState(member)}</span>
+                  <span className="dd-peers-member-name" title={`Computer id ${member.machineId}`}>
+                    {member.replicaId === status.replicaId ? 'This computer' : names.get(member.machineId) ?? 'Unnamed computer'}: {memberState(member)}
+                  </span>
                   <span className="dd-actions">
                     {member.replicaId !== status.replicaId ? (
-                      <button type="button" className="btn" disabled={busy || !status.lifecycleAvailable}
+                      <button type="button" className="btn" title="Stop syncing with this computer from here. It stays in the group." disabled={busy || !status.lifecycleAvailable}
                         onClick={() => { if (window.confirm('Disable this local database link? Group membership is unchanged.')) run(() => api.revokePeer(member.machineId)); }}>
                         Disable Link
                       </button>
                     ) : null}
                     {status.configured ? (
-                      <button type="button" className="btn" disabled={busy || !status.lifecycleAvailable || status.members.length <= 2 || member.retiring}
+                      <button type="button" className="btn" title={member.replicaId === status.replicaId ? 'Remove this computer from the sync group.' : 'Remove this computer from the sync group for everyone.'} disabled={busy || !status.lifecycleAvailable || status.members.length <= 2 || member.retiring}
                         onClick={() => { if (window.confirm('Remove this member? Syncing with them stops on this computer now. If they are offline, removal finishes when they reconnect.')) run(() => api.removePeer(member.replicaId)); }}>
                         {member.replicaId === status.replicaId ? 'Leave Group' : 'Remove Member'}
                       </button>

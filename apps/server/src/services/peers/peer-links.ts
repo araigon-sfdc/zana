@@ -72,7 +72,7 @@ const ENROLL_BUDGET_MS = 45_000, NOTICE_MS = 5_000, REPLY_DELAY_MS = 1_000, CONT
 const LABEL_MAX = 80;
 
 export type PeerLinkState = 'connected' | 'reconnecting' | 'disconnected';
-export type PeerLinkReason = 'ssh-down' | 'peer-offline' | 'revoked';
+export type PeerLinkReason = 'ssh-down' | 'peer-offline' | 'paused' | 'revoked';
 export type PeerLinkFailure = 'expired' | 'fenced' | 'conflict' | 'unreachable';
 export type PeerLinkViewPhase = 'pending' | 'exchanged' | 'enrolled' | 'linked' | 'failed' | 'removed';
 
@@ -151,7 +151,9 @@ const recordSchema = z.object({
   /** A rotated code for the outbound host, received from the peer, applied until it expires. */
   pendingRotate: z.object({ code: joinCode, expiresAt: int }).strict().optional(),
   /** Destination side: last scheduled rotation of the own inbound host. */
-  lastRotatedAt: int.optional()
+  lastRotatedAt: int.optional(),
+  /** Owner Disconnect: the record and keys stay, but nothing connects, heals or rotates until Reconnect. Missing means false. */
+  paused: z.boolean().optional()
 }).strict();
 type Rec = z.infer<typeof recordSchema>;
 const stateSchema = z.object({ version: z.literal(1), records: z.array(recordSchema).max(PEER_LINK_MAX_RECORDS) }).strict();
@@ -250,6 +252,7 @@ export class PeerLinks implements PeerLinksControlPort {
       const rec = this.byInbound(hostId);
       if (!rec?.peer) return undefined;
       return { peerInstanceId: rec.peer, peerName: rec.peerName || 'Peer', state: rec.phase,
+        ...(rec.paused && !TERMINAL.has(rec.phase) ? { paused: true } : {}),
         ...(rec.failure ? { reason: rec.failure } : rec.removal ? { reason: rec.removal } : {}) };
     },
     release: async (hostId, pluginId, scope) => {
@@ -264,6 +267,16 @@ export class PeerLinks implements PeerLinksControlPort {
       if (!rec?.peer || TERMINAL.has(rec.phase)) return undefined;
       await this.remove(rec.peer, 'removed');
       return { linkRemoved: true };
+    },
+    pause: async hostId => {
+      const rec = this.byInbound(hostId);
+      if (!rec?.peer || rec.phase !== 'linked') return undefined;
+      return (await this.pause(rec.peer)) ? { paused: true } : undefined;
+    },
+    resume: async hostId => {
+      const rec = this.byInbound(hostId);
+      if (!rec?.peer || rec.phase !== 'linked') return undefined;
+      return (await this.unpause(rec.peer)) ? { paused: false } : undefined;
     }
   };
 
@@ -510,6 +523,11 @@ export class PeerLinks implements PeerLinksControlPort {
     const session = this.options.hostHub.getSession(hostId);
     if (!session || !PEER_ID.test(session.instanceId) || session.instanceId === this.options.instanceId) return;
     if (rec.peer && rec.peer !== session.instanceId) return;
+    if (rec.paused) {
+      // Not serving while paused. A plain close (not 4003, which is permanent) keeps the peer's connector retrying until we resume.
+      try { session.socket.close(1001, 'peer-paused'); } catch { /* already closing */ }
+      return;
+    }
     if (rec.phase === 'linked') {
       // The peer's connector (re)attached: it is reachable now, so a dead own connector heals with fresh pacing.
       // A peer that just (re)started gets the same grace for its side to come up before this app asks it to relink.
@@ -838,7 +856,7 @@ export class PeerLinks implements PeerLinksControlPort {
   async acceptRotate(senderId: string, hostId: string, rotate: { code: string; expiresAt: number }, _signal: AbortSignal): Promise<{ accepted: boolean }> {
     this.assertLive();
     const rec = [...this.mirror.values()].find(entry => entry.phase === 'linked' && entry.peer === senderId && entry.outbound?.hostId === hostId);
-    if (!rec || !joinCode.safeParse(rotate?.code).success || !Number.isSafeInteger(rotate.expiresAt) || rotate.expiresAt <= this.now()) return { accepted: false };
+    if (!rec || rec.paused || !joinCode.safeParse(rotate?.code).success || !Number.isSafeInteger(rotate.expiresAt) || rotate.expiresAt <= this.now()) return { accepted: false };
     await this.lane(rec.invitationId, () => this.update(rec.invitationId, entry => {
       entry.pendingRotate = { code: rotate.code, expiresAt: rotate.expiresAt };
     }));
@@ -854,7 +872,7 @@ export class PeerLinks implements PeerLinksControlPort {
   private async applyRotate(invitationId: string): Promise<boolean> {
     const rec = this.get(invitationId);
     const pending = rec?.pendingRotate;
-    if (!rec || !pending || rec.phase !== 'linked' || !rec.outbound?.url || !rec.peer || this.disposed) return false;
+    if (!rec || !pending || rec.phase !== 'linked' || rec.paused || !rec.outbound?.url || !rec.peer || this.disposed) return false;
     if (pending.expiresAt <= this.now()) { await this.update(invitationId, entry => { delete entry.pendingRotate; }); return false; }
     await this.closeConnection(invitationId);
     const budget = this.signal(ENROLL_BUDGET_MS);
@@ -877,7 +895,7 @@ export class PeerLinks implements PeerLinksControlPort {
   async acceptRelink(senderId: string, hostId: string, _signal: AbortSignal): Promise<RelinkReply> {
     this.assertLive();
     const rec = [...this.mirror.values()].find(entry => entry.phase === 'linked' && entry.peer === senderId && entry.inbound?.hostId === hostId);
-    if (!rec?.peer || !rec.inbound) return { accepted: false };
+    if (!rec?.peer || !rec.inbound || rec.paused) return { accepted: false };
     const key = `relinked-in:${rec.invitationId}`;
     if (this.now() - (this.relinked.get(key) ?? 0) < PEER_RELINK_ACCEPT_INTERVAL_MS) return { accepted: false };
     try {
@@ -931,7 +949,7 @@ export class PeerLinks implements PeerLinksControlPort {
     const rec = this.get(invitationId);
     const entry = this.live.get(invitationId);
     // Only the redeemer: it owns the tunnel, and a down tunnel is not a stale code (the ssh reconnect loop heals that).
-    if (!rec || rec.role !== 'redeemer' || rec.phase !== 'linked' || this.disposed || !rec.inbound || !rec.peer || !entry || entry.connected ||
+    if (!rec || rec.role !== 'redeemer' || rec.phase !== 'linked' || rec.paused || this.disposed || !rec.inbound || !rec.peer || !entry || entry.connected ||
       !this.tunnels.get(invitationId)?.up) return false;
     const now = this.now();
     const since = Math.max(entry.downSince ?? entry.openedAt, entry.openedAt, this.inboundSeen.get(invitationId) ?? 0);
@@ -962,6 +980,7 @@ export class PeerLinks implements PeerLinksControlPort {
     this.assertLive();
     const rec = this.linkedFor(peerInstanceId);
     if (!rec) throw new Error('peer is not linked');
+    if (rec.paused) return this.links(peerInstanceId);
     await this.lane(rec.invitationId, async () => {
       this.retries.delete(`open:${rec.invitationId}`);
       // Own connector down: re-keying the peer's side alone cannot help; ask the peer for a fresh code first, now.
@@ -1015,6 +1034,50 @@ export class PeerLinks implements PeerLinksControlPort {
     }
     if (recs.length) this.changed();
     return recs.length > 0;
+  }
+
+  /**
+   * Owner Disconnect: keeps the record and keys but closes this side's connector (and, for the redeemer, the ssh tunnel),
+   * stops the heal/rotate loops and refuses the peer's connector on the own inbound host. The peer just sees this app go
+   * offline (never `revoked`) and heals once Reconnect runs. Persisted, so a restart stays paused.
+   */
+  async pause(peerInstanceId: string): Promise<boolean> {
+    this.assertLive();
+    const rec = this.linkedFor(peerInstanceId);
+    if (!rec) return false;
+    await this.lane(rec.invitationId, async () => {
+      const current = this.get(rec.invitationId);
+      if (!current || current.phase !== 'linked') return;
+      if (!current.paused) await this.update(current.invitationId, entry => { entry.paused = true; });
+      for (const key of ['heal', 'apply', 'rotate']) {
+        const timer = this.timers.get(`${key}:${current.invitationId}`);
+        if (timer) { clearTimeout(timer); this.timers.delete(`${key}:${current.invitationId}`); }
+      }
+      this.healAt.delete(current.invitationId); this.relinkPace.delete(current.invitationId); this.inboundSeen.delete(current.invitationId);
+      await this.closeConnection(current.invitationId);
+      if (current.ssh.side === 'client') await this.closeTunnel(current.invitationId);
+      if (current.inbound) {
+        try { this.options.hostHub.getSession(current.inbound.hostId)?.socket.close(1001, 'peer-paused'); } catch { /* already closing */ }
+      }
+    });
+    this.changed();
+    return true;
+  }
+
+  /** Owner Reconnect: clears the pause and reopens the tunnel and connector now; the peer's connector heals on its own. */
+  async unpause(peerInstanceId: string): Promise<boolean> {
+    this.assertLive();
+    const rec = this.linkedFor(peerInstanceId);
+    if (!rec) return false;
+    await this.lane(rec.invitationId, async () => {
+      const current = this.get(rec.invitationId);
+      if (!current || current.phase !== 'linked') return;
+      if (current.paused) await this.update(current.invitationId, entry => { delete entry.paused; });
+      this.relinkPace.delete(current.invitationId);
+      await this.supervise(current.invitationId);
+    });
+    this.changed();
+    return true;
   }
 
   private async removeLinked(rec: Rec, removal: 'removed' | 'revoked', notify: boolean): Promise<void> {
@@ -1142,6 +1205,7 @@ export class PeerLinks implements PeerLinksControlPort {
     const outbound = rec.outbound;
     if (!outbound?.hostKey || !outbound.url || !rec.peer) throw new Error('peer enrollment incomplete');
     this.assertLive();
+    if (this.mirror.get(rec.invitationId)?.paused) return;
     const previous = this.live.get(rec.invitationId);
     await this.closeConnection(rec.invitationId);
     const daemonDir = this.daemonDir(rec.invitationId);
@@ -1184,6 +1248,8 @@ export class PeerLinks implements PeerLinksControlPort {
       return { ...base, state: 'reconnecting', ...(attempts ? { retryInMs: backoff(attempts - 1) } : {}) };
     }
     if (this.forwarderBlocked.has(rec.invitationId)) return { ...base, state: 'disconnected', reason: 'ssh-down' };
+    // The owner disconnected this link: plugins see `paused` (not an error, not retried); the other computer only sees this one offline.
+    if (rec.paused) return { ...base, state: 'disconnected', reason: 'paused' };
     const entry = this.live.get(rec.invitationId);
     if (entry?.connected) return { ...base, state: 'connected' };
     // The redeemer's tunnel is down: the connector cannot recover until ssh does (a brief blip is only reconnecting).
@@ -1203,7 +1269,7 @@ export class PeerLinks implements PeerLinksControlPort {
   /** Reopens what a restart dropped: A re-acquires the forwarder lease, B reopens its tunnel; then the connector. */
   private async resume(invitationId: string): Promise<void> {
     const rec = this.get(invitationId);
-    if (!rec || TERMINAL.has(rec.phase) || !rec.outbound?.hostKey) return;
+    if (!rec || TERMINAL.has(rec.phase) || !rec.outbound?.hostKey || rec.paused) return;
     if (rec.ssh.side === 'client') {
       // A failed tunnel does not block the connector: it retries against the stable local port and the sweep reopens the tunnel.
       await this.ensureTunnel(rec).catch(() => undefined);
@@ -1324,7 +1390,7 @@ export class PeerLinks implements PeerLinksControlPort {
 
   private async supervise(invitationId: string): Promise<void> {
     const rec = this.get(invitationId);
-    if (!rec || rec.phase !== 'linked' || this.disposed || this.forwarderBlocked.has(invitationId)) return;
+    if (!rec || rec.phase !== 'linked' || this.disposed || this.forwarderBlocked.has(invitationId) || rec.paused) return;
     if (rec.pendingRotate) {
       if (await this.applyRotate(invitationId).catch(() => false)) return;
     }

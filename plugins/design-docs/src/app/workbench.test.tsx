@@ -70,9 +70,7 @@ describe('peers view', () => {
     fireEvent.click(open);
 
     expect(screen.getByRole('heading', { name: 'Settings' })).toBeTruthy();
-    const peersTab = screen.getByRole('tab', { name: 'Peers' });
-    expect(peersTab.getAttribute('aria-selected')).toBe('true');
-    expect(screen.getByRole('tabpanel').getAttribute('aria-labelledby')).toBe(peersTab.id);
+    expect(screen.getByRole('button', { name: 'Peers' }).getAttribute('aria-current')).toBe('page');
     const peers = screen.getByRole('region', { name: 'Database sync peers' });
     expect(within(peers).getByRole('heading', { name: 'Pair another computer' })).toBeTruthy();
     expect(screen.queryByText('Payments API')).toBeNull();
@@ -91,6 +89,32 @@ describe('peers view', () => {
     expect(screen.queryByRole('region', { name: 'Database sync peers' })).toBeNull();
     // Leaving the Peers view re-reads the group, which may have changed there.
     await waitFor(() => expect(harness.rpcCalls.filter((call) => call.method === 'peerStatus').length).toBe(peerReads + 1));
+  });
+
+  it('lays settings out as header, grouped section rail and one section at a time', async () => {
+    const harness = createHarness();
+    harness.render(<ProjectTab pluginId="design-docs" projectId="p1" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
+    expect(screen.getByText('Manage Design Docs sync, agents and publishing preferences.')).toBeTruthy();
+    const nav = screen.getByRole('navigation', { name: 'Settings sections' });
+    expect([...nav.querySelectorAll('.dd-nav-group-label')].map((el) => el.textContent)).toEqual(['SYNC', 'AGENTS']);
+    expect([...nav.querySelectorAll('button')].map((el) => el.textContent)).toEqual(['Peers', 'Sharing', 'Agent']);
+    expect(nav.querySelectorAll('button svg')).toHaveLength(3);
+    // Default section: only Peers renders, under its own heading and description.
+    expect(screen.getByRole('heading', { name: 'Peers' })).toBeTruthy();
+    expect(screen.getByRole('region', { name: 'Database sync peers' })).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'Agent harness' })).toBeNull();
+    fireEvent.click(within(nav).getByRole('button', { name: 'Agent' }));
+    expect(screen.queryByRole('region', { name: 'Database sync peers' })).toBeNull();
+    expect(screen.getByRole('heading', { name: 'Agent harness' })).toBeTruthy();
+  });
+
+  it('falls back to Peers when the remembered section no longer exists', async () => {
+    localStorage.setItem('zcc.design-docs.settings-tab', JSON.stringify('bogus'));
+    const harness = createHarness();
+    harness.render(<ProjectTab pluginId="design-docs" projectId="p1" />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Settings' }));
+    expect(screen.getByRole('button', { name: 'Peers' }).getAttribute('aria-current')).toBe('page');
   });
 
   it('keeps project tab header actions in the Peers view', async () => {
