@@ -10,7 +10,8 @@ import type { ProjectMetadataRequest, ProjectMetadataResult, ProjectCatalogReque
 import type { ProjectHistoryRequest, ProjectHistoryResult } from '@zana-ai/zcc-contracts/project-history';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
-import { utilityProcess } from 'electron';
+import { utilityProcess, safeStorage } from 'electron';
+import { createProtectedPeerKeyProvider, PEER_BOOT_KEY_ENV } from '@zana-ai/zcc-server/services/peers/protected-key';
 import { join } from 'node:path';
 import { startStaticHost, type StaticHost } from '@zana-ai/zcc-server/static-host';
 import { serverPortFromEnv } from '@zana-ai/zcc-server/http/ports';
@@ -372,7 +373,7 @@ export async function requestPairingTarget(request: () => Promise<unknown>): Pro
 function processEnvRecord(): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
-    if (typeof value === 'string') env[key] = value;
+    if (typeof value === 'string' && key !== PEER_BOOT_KEY_ENV) env[key] = value;
   }
   return env;
 }
@@ -445,6 +446,17 @@ async function startUtilityRuntime(options: StartRuntimeSupervisorOptions & { to
   let renderer: { child: UtilityChild; url: string; hostId?: string; instanceId?: string };
   try {
     if (!host.hostId || !host.instanceId) throw new Error('host runtime did not return its identity');
+    // Never touch the real Keychain in isolated E2E, and never use its insecure substitutes.
+    const peerKey = options.dataDir && !process.env.ZCC_E2E_HOME
+      ? await createProtectedPeerKeyProvider(options.dataDir, {
+        isEncryptionAvailable: () => safeStorage.isEncryptionAvailable(),
+        encryptString: value => safeStorage.encryptString(value),
+        decryptString: value => safeStorage.decryptString(value),
+        ...(process.platform === 'linux' ? { getSelectedStorageBackend: () => safeStorage.getSelectedStorageBackend() } : {})
+      }).getKey().catch(() => null)
+      : null;
+    const peerEnv = { ...options.extraEnv, [PEER_BOOT_KEY_ENV]: peerKey ? Buffer.from(peerKey).toString('base64url') : '' };
+    peerKey?.fill(0);
     renderer = await startUtility(join(runtimeDir, 'server-runtime.js'), {
       type: 'start',
       protocolVersion: SERVER_RUNTIME_PROTOCOL_VERSION,
@@ -456,7 +468,7 @@ async function startUtilityRuntime(options: StartRuntimeSupervisorOptions & { to
       hostBinding: { hostId: host.hostId, instanceId: host.instanceId },
       bundledPluginsRoot: defaultBundledRoot(),
       version: options.version ?? ''
-    }, options.extraEnv);
+    }, peerEnv);
   } catch (error) {
     host.child.kill();
     throw error;

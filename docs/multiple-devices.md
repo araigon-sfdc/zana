@@ -210,6 +210,64 @@ machine transport carries enrollment, host WebSocket, authorized tool callbacks
 and installation artifacts through a closed route inventory. See
 [implementation contracts](./shared-instance-contracts.md) for the boundary.
 
+## Peer links between separate Zana installs
+
+Some plugins, such as Design Docs, can link two **independent** Zana installs
+over your local network for example to sync a database. A peer link is not an
+execution machine. It never runs threads, terminals or tools, and it does not
+share projects or files.
+
+**Both computers must be on the same network and reachable via `.local` hostname.**
+On macOS, you enable this in **System Settings → General → Sharing →** turn on
+**Remote Login**. See **Check your setup** below if you encounter errors during
+pairing.
+
+- **How to pair.** One computer creates an invitation, for example Design Docs →
+  Settings → Peers → **Add peer**. Copy the generated invitation code. On the other
+  computer, go to Design Docs → Settings → Peers → **Join peer** and paste it.
+  The remote side connects directly to the first computer's SSH server using
+  a restricted per-link key that is generated for just this pair. Both owners
+  see an approval prompt showing the other computer's name and fingerprint. Compare the fingerprints; if they match, click **Approve**. An
+  invitation works once and expires after **10 minutes**.
+- **Connection method.** Only the computer that created the invitation needs an SSH
+  server (macOS Remote Login, or OpenSSH elsewhere). The other computer connects out
+  to it and opens a reverse tunnel, so the first computer never needs SSH access to
+  the second. The invitation contains the first computer's hostname, port, SSH host
+  key (pinned, so there is no trust prompt) and a temporary key valid for 10 minutes.
+  Those keys only allow port forwarding to Zana's peer port; no shell. After both
+  owners approve, the temporary key is replaced by a key generated for just this
+  link. Your own SSH keys and `~/.ssh/config` are never used or changed. Removing
+  the peer removes its key line.
+- **Security limits.** The key line restricts TCP forwarding and runs no shell, but
+  OpenSSH cannot restrict Unix-socket forwarding per key (verified on OpenSSH 10.3).
+  A holder of a peer key could create a Unix socket in a location the first computer's
+  user can write. Only the sshd-wide `AllowStreamLocalForwarding no` setting blocks
+  this. Pair only with computers you trust. Removing a peer deletes its key line but
+  does not end an SSH session that is already open; it ends when the connection
+  drops. On a shared computer, another local user could occupy the loopback ports the
+  tunnel uses, so avoid pairing on shared machines.
+- **Reconnecting.** If a peer was offline, the connecting computer retries on its
+  own. If it stays disconnected, use **Reconnect** on the link.
+- **Where links appear.** **Settings → Machines** lists execution machines only.
+  **Settings → Peers** lists every peer link and its state (Connected, Connecting,
+  or a specific reason why it cannot connect). See **Check your setup** for
+  troubleshooting.
+- **Check your setup.** If pairing fails or a link stays disconnected:
+  - **Remote Login off on macOS?** Go to **System Settings → General → Sharing**
+    and turn on **Remote Login**. SSH is required; this is the most common cause
+    of `ssh_remote_login_off`.
+  - **Host unreachable?** Confirm both computers are on the same Wi-Fi or
+    network. Try `ping <hostname>.local` from Terminal on the connecting machine,
+    where `<hostname>` is the name shown in the Add peer screen on the first computer. If it fails,
+    the `.local` address is not reachable; connect both to the same network.
+  - **Permission denied or key mismatch?** A host-key mismatch card (`ssh_host_key_mismatch`) appears if the
+    remote machine replaced its SSH host key (for example after reinstalling its
+    OS). Generate a new invitation on the first machine; the old link cannot recover
+    from this change.
+  - **Timeout or other SSH errors?** Check that no firewall is blocking SSH port
+    22 between the machines. Some networks restrict machine-to-machine connections
+    on the local network.
+
 ---
 
 ## Legacy machine relay reachability

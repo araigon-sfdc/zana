@@ -5,6 +5,8 @@ import {
   hostDirectoryQuerySchema,
   hostProviderCliInstallRequestSchema,
   hostBootstrapRequestSchema,
+  peerIntroductionDecisionRequestSchema,
+  removePeerLinkUseQuerySchema,
   hostSshIdentityRequestSchema,
   hostPathsExistRequestSchema,
   hostPickFolderRequestSchema,
@@ -21,6 +23,7 @@ import {
 import { readJsonBody, sendJson, beginNdjson } from './json.js';
 import type { ProductHttpContext } from './product-context.js';
 import { listPublicHosts, parseHostUpdate, toPublicHost } from '../services/hosts/host-public.js';
+import { listPeerLinks, removePeerLink, removePeerLinkUse, type PeerLinkRemoval } from '../services/hosts/peer-link-view.js';
 import { relaunchLocalHostDaemon } from '../services/hosts/host-relaunch.js';
 import { HostUnavailableError } from './host-hub.js';
 import { bootstrapHostBySsh, bootstrapHostForProject, parseSshIdentity, reconcileRemoteProjectBindings, repairHost, type HostBootstrapEvent } from '../services/hosts/host-bootstrap.js';
@@ -54,10 +57,17 @@ function connectedSet(ctx: ProductHttpContext): Set<string> {
 
 const FOLDER_PICKER_TIMEOUT_MS = 10 * 60 * 1000;
 
+/** Execution hosts only: a plugin link is never addressable through the machine routes. */
 function requireHost(ctx: ProductHttpContext, id: string) {
   const row = getHost(ctx.db, id);
-  if (!row || row.destroyedAt) return null;
+  if (!row || row.destroyedAt || row.purpose.kind !== 'execution') return null;
   return row;
+}
+
+function sendPeerLinkRemoval(response: ServerResponse, result: PeerLinkRemoval): void {
+  if (result.status === 'ok') sendJson(response, 200, { ok: true as const, linkRemoved: result.linkRemoved });
+  else if (result.status === 'not-found') sendJson(response, 404, { error: 'peer link not found' });
+  else sendJson(response, 503, { error: 'Could not remove this link right now. Retry when your account connection is available.' });
 }
 
 /**
@@ -71,6 +81,31 @@ export async function handleHostsApi(
   method: string,
   requestUrl: URL
 ): Promise<boolean> {
+  if (path === '/api/v1/peer-links' || path.startsWith('/api/v1/peer-links/')) {
+    // Link management is an owner gesture on this machine; the phone proxy marks its requests.
+    if (request.headers['x-zcc-app-surface'] === 'mobile') {
+      sendJson(response, 403, { error: 'peer links are managed from the desktop app' });
+      return true;
+    }
+    if (path === '/api/v1/peer-links' && method === 'GET') {
+      sendJson(response, 200, listPeerLinks(ctx));
+      return true;
+    }
+    const useParams = method === 'DELETE' ? routeParams(path, '/api/v1/peer-links/:hostId/uses/:pluginId') : null;
+    if (useParams) {
+      const query = removePeerLinkUseQuerySchema.safeParse({ scope: requestUrl.searchParams.get('scope') ?? undefined });
+      if (!query.success) { sendJson(response, 400, { error: 'invalid peer link use' }); return true; }
+      sendPeerLinkRemoval(response, await removePeerLinkUse(ctx, useParams.hostId!, useParams.pluginId!, query.data.scope));
+      return true;
+    }
+    const linkParams = method === 'DELETE' ? routeParams(path, '/api/v1/peer-links/:hostId') : null;
+    if (linkParams) {
+      sendPeerLinkRemoval(response, await removePeerLink(ctx, linkParams.hostId!));
+      return true;
+    }
+    sendJson(response, 404, { error: 'not found' });
+    return true;
+  }
   const performanceHost = routeParams(path, '/api/v1/hosts/:id/performance');
   if (performanceHost && method === 'GET') {
     if (!requireHost(ctx, performanceHost.id!)) {
@@ -137,6 +172,35 @@ export async function handleHostsApi(
     }
     const issued = ctx.joinCodes.mint();
     sendJson(response, 201, issued);
+    return true;
+  }
+
+  if (path === '/api/v1/peers/introductions' && method === 'GET') {
+    sendJson(response, 200, { introductions: await ctx.peerAuthority.receivedIntroductions() });
+    return true;
+  }
+
+  const introductionParams = method === 'POST' ? routeParams(path, '/api/v1/peers/introductions/:id/decision') : null;
+  if (introductionParams) {
+    let body: unknown;
+    try { body = await readJsonBody(request); } catch { sendJson(response, 400, { error: 'invalid JSON' }); return true; }
+    const parsed = peerIntroductionDecisionRequestSchema.safeParse(body);
+    if (!parsed.success) { sendJson(response, 400, { error: 'invalid introduction decision' }); return true; }
+    try {
+      const decided = await ctx.peerAuthority.decideIntroduction(introductionParams.id!, parsed.data.decision);
+      // Consent is the trigger: a bounded, tracked forward-only enrollment; failures stay visible in installations.
+      if (decided.status === 'approved') void ctx.peerInstaller?.enroll(decided.introductionId).catch(() => undefined);
+      sendJson(response, 200, decided);
+    }
+    catch (error) { sendJson(response, 409, { error: error instanceof Error ? error.message : 'introduction unavailable' }); }
+    return true;
+  }
+
+  if (path === '/api/v1/hosts/forward-join-codes' && method === 'POST') {
+    let body: unknown = {};
+    try { body = await readJsonBody(request); } catch { sendJson(response, 400, { error: 'invalid JSON' }); return true; }
+    if (!createHostJoinCodeRequestSchema.safeParse(body).success) { sendJson(response, 400, { error: 'invalid join-code request' }); return true; }
+    sendJson(response, 201, ctx.joinCodes.mintForwardOnly());
     return true;
   }
 
@@ -268,6 +332,10 @@ export async function handleHostsApi(
     const parsed = updateHostPermissionCeilingRequestSchema.safeParse(body);
     if (!parsed.success) {
       sendJson(response, 400, { error: 'invalid permission ceiling' });
+      return true;
+    }
+    if (!requireHost(ctx, ceiling.id)) {
+      sendJson(response, 404, { error: 'host not found' });
       return true;
     }
     const updated = updateHostPermissionCeiling(ctx.db, ceiling.id, parsed.data.maxPermissionMode);

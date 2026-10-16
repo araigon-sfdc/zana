@@ -5,7 +5,7 @@
  * isolated clone of the exact object being pushed. CI remains merge authority.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, readFileSync, symlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -104,10 +104,20 @@ export function selectPush({ tuples, remoteUrl, aliases = {}, hasObject, mergeBa
       bases.add(base);
       for (const path of changed(base, tuple.localOid)) paths.add(path);
     } else {
-      if (!hasObject(tuple.remoteOid)) return { action: 'full', reason: `remote base ${tuple.remoteOid} is unavailable locally` };
-      if (!isAncestor(tuple.remoteOid, tuple.localOid)) return { action: 'full', reason: `non-ancestor update for ${tuple.remoteRef}` };
-      bases.add(tuple.remoteOid);
-      for (const path of changed(tuple.remoteOid, tuple.localOid)) paths.add(path);
+      if (hasObject(tuple.remoteOid) && isAncestor(tuple.remoteOid, tuple.localOid)) {
+        bases.add(tuple.remoteOid);
+        for (const path of changed(tuple.remoteOid, tuple.localOid)) paths.add(path);
+      } else {
+        // Force-push (rebase/squash) or an unknown remote tip: the old tip says nothing
+        // about this push, so measure the branch against main like a new branch. If main
+        // is unavailable there is no sound base, so fall back to full verification.
+        const why = hasObject(tuple.remoteOid) ? `non-ancestor update for ${tuple.remoteRef}` : `remote base ${tuple.remoteOid} is unavailable locally`;
+        if (!hasObject('origin/main')) return { action: 'full', reason: `${why}; no local origin/main base` };
+        const base = mergeBase('origin/main', tuple.localOid);
+        if (!base) return { action: 'full', reason: `${why}; no sound merge base with origin/main` };
+        bases.add(base);
+        for (const path of changed(base, tuple.localOid)) paths.add(path);
+      }
     }
     oids.add(tuple.localOid);
   }
@@ -181,6 +191,11 @@ function linkInstalledDependencies(snapshot, root) {
   return true;
 }
 
+/** Quotes one argument for the `sh -c` command line run-concurrent builds. */
+function shellQuote(value) {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
 function needsBroadChangedTests(paths) {
   return paths.some((path) => TEST_RUNNER_CONFIG.test(path));
 }
@@ -225,18 +240,26 @@ export function runFastVerification({ oid, base, paths = [], root = process.cwd(
       const assets = run('pnpm', ['--filter', 'zcc-plugin-slack-bridge-2ff2', 'package'], { cwd: snapshot, stdio: 'inherit' });
       if (assets.status !== 0) throw new Error('snapshot Slack runtime asset preparation failed');
     }
-    log('pre-push: fast (est. typecheck)');
-    const typecheck = run('pnpm', ['run', 'typecheck'], { cwd: snapshot, stdio: 'inherit' });
-    if (typecheck.status !== 0) throw new Error('verification failed: pnpm run typecheck');
     const inputs = testInputs(paths);
+    let tests = null;
     if (needsBroadChangedTests(paths)) {
-      log(`pre-push: fast (est. vitest --changed ${base.slice(0, 12)})`);
-      const changed = run('pnpm', ['exec', 'vitest', 'run', '--changed', base], { cwd: snapshot, stdio: 'inherit' });
-      if (changed.status !== 0) throw new Error('verification failed: vitest --changed');
+      tests = { label: `vitest --changed ${base.slice(0, 12)}`, name: 'vitest --changed', command: `pnpm exec vitest run --changed ${base}` };
     } else if (inputs.length) {
-      log(`pre-push: fast (est. vitest related ${inputs.length} input${inputs.length === 1 ? '' : 's'})`);
-      const related = run('pnpm', ['exec', 'vitest', 'related', ...inputs, '--run', '--passWithNoTests'], { cwd: snapshot, stdio: 'inherit' });
-      if (related.status !== 0) throw new Error('verification failed: vitest related');
+      tests = {
+        label: `vitest related ${inputs.length} input${inputs.length === 1 ? '' : 's'}`,
+        name: 'vitest related',
+        command: `pnpm exec vitest related ${inputs.map(shellQuote).join(' ')} --run --passWithNoTests`
+      };
+    }
+    if (tests) {
+      // Typecheck and tests are independent; run them together.
+      log(`pre-push: fast (est. typecheck + ${tests.label}, concurrent)`);
+      const checks = run('node', [join(root, 'scripts', 'run-concurrent.mjs'), 'typecheck=pnpm run typecheck', `tests=${tests.command}`], { cwd: snapshot, stdio: 'inherit' });
+      if (checks.status !== 0) throw new Error(`verification failed: typecheck or ${tests.name}`);
+    } else {
+      log('pre-push: fast (est. typecheck)');
+      const typecheck = run('pnpm', ['run', 'typecheck'], { cwd: snapshot, stdio: 'inherit' });
+      if (typecheck.status !== 0) throw new Error('verification failed: pnpm run typecheck');
     }
     const guards = guardTests(snapshot, run);
     if (guards.length) {
@@ -247,13 +270,50 @@ export function runFastVerification({ oid, base, paths = [], root = process.cwd(
   });
 }
 
-export function runPrePush({ input = readFileSync(0, 'utf8'), remoteUrl, root = process.cwd(), log = console.log, error = console.error, select = selectPush, verify = runFullVerification, fastVerify = runFastVerification, run = spawnSync } = {}) {
+const MAX_STAMPS = 50;
+
+/**
+ * Records trees that already passed verification so an unchanged tree (retried
+ * push after a dropped connection, amended message, repeated force-push) is not
+ * re-verified. Keyed by tree hash, so any content change invalidates it. Lives
+ * in the git dir; a full stamp covers any fast check of the same tree.
+ */
+export function createStampStore(root, runGit) {
+  const dir = () => {
+    const path = runGit(['rev-parse', '--git-path', 'pre-push-verified']);
+    return path ? resolve(root, path) : null;
+  };
+  return {
+    has(name) {
+      const base = dir();
+      return Boolean(base) && existsSync(join(base, name));
+    },
+    record(name) {
+      const base = dir();
+      if (!base) return;
+      mkdirSync(base, { recursive: true });
+      const tmp = join(base, `.${name}.${process.pid}.tmp`);
+      writeFileSync(tmp, `${new Date().toISOString()}\n`);
+      renameSync(tmp, join(base, name));
+      const stale = readdirSync(base).filter((entry) => !entry.startsWith('.'))
+        .map((entry) => ({ entry, mtime: statSync(join(base, entry)).mtimeMs }))
+        .sort((left, right) => right.mtime - left.mtime).slice(MAX_STAMPS);
+      for (const { entry } of stale) rmSync(join(base, entry), { force: true });
+    },
+  };
+}
+
+export function runPrePush({ input = readFileSync(0, 'utf8'), remoteUrl, root = process.cwd(), log = console.log, error = console.error, select = selectPush, verify = runFullVerification, fastVerify = runFastVerification, run = spawnSync, stamps } = {}) {
   if (!remoteUrl) {
     error('pre-push: Git did not provide remote URL; aborting push.');
     return 1;
   }
   const tuples = parseTuples(input);
   const runGit = (args) => gitOk(args, { cwd: root });
+  const store = stamps ?? createStampStore(root, runGit);
+  const treeOf = (oid) => runGit(['rev-parse', `${oid}^{tree}`]);
+  const verified = (accepted) => accepted.some((name) => { try { return store.has(name); } catch { return false; } });
+  const remember = (name) => { try { store.record(name); } catch { /* a missing stamp only costs a re-verify */ } };
   let selection = select({
     tuples,
     remoteUrl,
@@ -269,13 +329,28 @@ export function runPrePush({ input = readFileSync(0, 'utf8'), remoteUrl, root = 
   if (selection.action === 'skip') return 0;
   try {
     if (selection.action === 'fast') {
+      const tree = treeOf(selection.oid);
+      const fastName = tree && `${tree}-fast-${selection.base}`;
+      if (tree && verified([`${tree}-full`, fastName])) {
+        log('pre-push: tree already verified locally; skipping');
+        return 0;
+      }
       fastVerify({ oid: selection.oid, base: selection.base, paths: selection.paths, root, log, run });
+      if (tree) remember(fastName);
       return 0;
     }
     const oids = selection.oids ?? (selection.oid ? [selection.oid] : [...new Set((tuples ?? [])
       .filter((tuple) => !ZERO_OID.test(tuple.localOid)).map((tuple) => tuple.localOid))]);
     if (!oids.length) throw new Error('no pushed object available for full verification');
-    for (const oid of oids) verify({ oid, root, log });
+    for (const oid of oids) {
+      const tree = treeOf(oid);
+      if (tree && verified([`${tree}-full`])) {
+        log(`pre-push: tree of ${oid.slice(0, 12)} already fully verified locally; skipping`);
+        continue;
+      }
+      verify({ oid, root, log });
+      if (tree) remember(`${tree}-full`);
+    }
     return 0;
   } catch (cause) {
     error(`pre-push: ${cause.message}`);

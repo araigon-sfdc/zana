@@ -115,12 +115,13 @@ function FileRow({
   active: boolean;
   renaming: boolean;
   onOpen(): void;
-  onRename(): void;
+  onRename(file: DesignDocFileMeta): void;
   onRenameDone(to: string | null): void;
-  onDelete(): void;
+  onDelete(file: DesignDocFileMeta): void;
 }) {
   const api = useApi();
   const [menu, setMenu] = useState(false);
+  const menuSnapshot = useRef({ doc, file });
   const isEntry = doc.entryPath === file.path;
   const commentCount = doc.comments.filter((comment) => comment.status === 'open' && comment.path === file.path).length;
   if (renaming) {
@@ -136,7 +137,7 @@ function FileRow({
         type="button"
         className="dd-tree-open"
         onClick={onOpen}
-        onDoubleClick={onRename}
+        onDoubleClick={() => onRename(file)}
         title={`${file.path} · ${formatBytes(file.size)} · rev ${file.revision}`}
         aria-current={active ? 'page' : undefined}
       >
@@ -149,14 +150,17 @@ function FileRow({
         open={menu}
         onClose={() => setMenu(false)}
         className="dd-menu"
-        anchor={<IconButton icon={MoreHorizontal} label={`Actions for ${file.path}`} size={13} active={menu} onClick={() => setMenu(!menu)} />}
+        anchor={<IconButton icon={MoreHorizontal} label={`Actions for ${file.path}`} size={13} active={menu} onClick={() => {
+          if (!menu) menuSnapshot.current = { doc, file };
+          setMenu(!menu);
+        }} />}
       >
         <MenuItem
           icon={Pencil}
           label="Rename or move"
           onSelect={() => {
             setMenu(false);
-            onRename();
+            onRename(menuSnapshot.current.file);
           }}
         />
         {isEntry || isBinaryKind(file.kind) ? null : (
@@ -166,7 +170,7 @@ function FileRow({
             hint="Make this the doc's entry file"
             onSelect={() => {
               setMenu(false);
-              void api.update(doc.id, { entryPath: file.path }).catch((error: unknown) => toast(errorMessage(error), 'error'));
+              void api.update(doc.id, { entryPath: menuSnapshot.current.file.path, expectedHead: menuSnapshot.current.doc.head }).catch((error: unknown) => toast(errorMessage(error), 'error'));
             }}
           />
         )}
@@ -176,7 +180,7 @@ function FileRow({
           danger
           onSelect={() => {
             setMenu(false);
-            onDelete();
+            onDelete(menuSnapshot.current.file);
           }}
         />
       </Popover>
@@ -205,7 +209,7 @@ export function FileTree({
   const api = useApi();
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
   const [creating, setCreating] = useState(false);
-  const [renaming, setRenaming] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState<DesignDocFileMeta | null>(null);
   const [confirm, setConfirm] = useState<ConfirmRequest | null>(null);
   const uploadRef = useRef<HTMLInputElement | null>(null);
   const tree = buildTree(doc.files);
@@ -224,19 +228,20 @@ export function FileTree({
       return;
     }
     try {
-      await api.writeFile(doc.id, { path, content: starterContent(path) });
+      await api.writeFile(doc.id, { path, content: starterContent(path), baseRevision: 0, baseFileId: null });
       onOpen(path);
     } catch (error) {
       toast(`Could not create ${path}: ${errorMessage(error)}`, 'error');
     }
   };
 
-  const rename = (from: string, to: string | null) => {
+  const rename = (file: DesignDocFileMeta, to: string | null) => {
+    const from = file.path;
     setRenaming(null);
     if (!to || to === from) return;
     const run = async () => {
       try {
-        const result = await api.renameFile(doc.id, from, to);
+        const result = await api.renameFile(doc.id, from, to, file.revision, file.fileId);
         onPathChanged(from, result.path);
       } catch (error) {
         toast(`Could not rename ${from}: ${errorMessage(error)}`, 'error');
@@ -269,9 +274,10 @@ export function FileTree({
       }
       const asset = kind === 'image' || kind === 'svg' || kind === 'font';
       const path = `${folderOfActive || (asset ? 'assets/' : '')}${file.name.replace(/[^\w.-]+/g, '-')}`;
+      const observed = doc.files.find((entry) => entry.path === path);
       try {
         const body = await readUpload(file);
-        await api.writeFile(doc.id, { path, ...body });
+        await api.writeFile(doc.id, { path, ...body, baseRevision: observed?.revision ?? 0, baseFileId: observed?.fileId ?? null });
         const relative = path.slice(folderOfActive.length);
         toast(kind === 'font' || !asset ? `Added ${path}` : `Added ${path}. Reference it with ![${file.name}](${relative})`);
       } catch (error) {
@@ -294,7 +300,7 @@ export function FileTree({
       danger: true,
       run: async () => {
         try {
-          await api.deleteFile(doc.id, file.path);
+          await api.deleteFile(doc.id, file.path, file.revision, file.fileId);
           onPathChanged(file.path, null);
         } catch (error) {
           toast(`Could not delete ${file.path}: ${errorMessage(error)}`, 'error');
@@ -333,11 +339,11 @@ export function FileTree({
           name={node.name}
           depth={depth}
           active={node.path === activePath}
-          renaming={renaming === node.path}
+          renaming={renaming?.path === node.path}
           onOpen={() => onOpen(node.path)}
-          onRename={() => setRenaming(node.path)}
-          onRenameDone={(to) => void rename(node.path, to)}
-          onDelete={() => askDelete(node.file)}
+          onRename={setRenaming}
+          onRenameDone={(to) => { if (renaming) rename(renaming, to); }}
+          onDelete={askDelete}
         />
       );
     });

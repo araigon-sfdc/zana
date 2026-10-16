@@ -145,6 +145,7 @@ export const pluginZccManifestSchema = z
     extra: pluginExtraSchema.optional(),
     requires: z.array(requiredManifestString).max(PLUGIN_REQUIRES_MAX).optional(),
     projectTab: pluginProjectTabSchema.optional(),
+    peers: z.boolean().optional(),
     themes: z
       .array(
         z
@@ -208,6 +209,8 @@ export interface PluginManifest {
   extra: PluginExtra;
   requires: string[];
   projectTab: PluginZccManifest['projectTab'];
+  /** Declares the peer SDK (links to other installs); gates the core Peers settings page. */
+  peers: boolean;
   themes: NonNullable<PluginZccManifest['themes']>;
   engines: { zcc?: string; zccPluginSdk?: string };
 }
@@ -238,6 +241,7 @@ export function readPluginManifest(packageJson: unknown): PluginManifest {
     extra: parsed.zcc.extra ?? {},
     requires: parsePluginRequires(parsed.zcc.requires),
     projectTab: parsed.zcc.projectTab,
+    peers: parsed.zcc.peers === true,
     themes: parsed.zcc.themes ?? [],
     engines: {
       zcc: parsed.engines?.zcc,

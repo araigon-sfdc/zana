@@ -10,6 +10,7 @@ import { installTestPluginRuntime, type NavigateCall, type RpcCall } from '@zana
 import { RenderReports } from '../server/render-reports.js';
 import { createRpcHandlers } from '../server/rpc.js';
 import { DesignDocStore } from '../server/store.js';
+import type { DesignDocPeerService } from '../server/peer-service.js';
 import { createTestDatabase } from '../server/test-db.js';
 import { CHANGED_CHANNEL, type DocActor } from '../shared/contract.js';
 
@@ -31,7 +32,9 @@ export interface Toast {
 }
 
 export interface HarnessOptions {
-  projects?: Array<{ id: string; name: string }>;
+  store?: DesignDocStore;
+  peerSync?: DesignDocPeerService;
+  projects?: Array<{ id: string; name: string; quickAgent?: boolean }>;
   /** What `navigate.openThreadPanel` returns (false: no thread to attach to). */
   threadPanel?: boolean;
   /** Whether the page has a side panel for agents (`navigate.openPanelAgent`). */
@@ -74,7 +77,7 @@ export interface Harness {
 }
 
 export function createHarness(options: HarnessOptions = {}): Harness {
-  const store = new DesignDocStore(createTestDatabase());
+  const store = options.store ?? new DesignDocStore(createTestDatabase());
   const reports = new RenderReports();
   const listeners = new Map<string, Set<(payload: unknown) => void>>();
   const emit = (payload: unknown, channel = CHANGED_CHANNEL) => {
@@ -91,7 +94,7 @@ export function createHarness(options: HarnessOptions = {}): Harness {
     },
     projects: { list: async () => projects.map((project) => ({ ...project, path: `/work/${project.id}` })) }
   };
-  const handlers = createRpcHandlers({ store, changed: (docId) => emit({ docId }), sdk: sdk as never, pageUrl: options.pageUrl, reports });
+  const handlers = createRpcHandlers({ store, changed: (docId) => emit({ docId }), sdk: sdk as never, peerSync: options.peerSync, pageUrl: options.pageUrl, reports });
   const failures = new Map<string, string>();
   const rpc = Object.fromEntries(
     Object.entries(handlers).map(([name, handler]) => [

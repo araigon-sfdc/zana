@@ -1,0 +1,105 @@
+import {
+  destroyHost,
+  getHost,
+  listPluginLinkHosts,
+  removeHostLinkUse,
+  type HostRow
+} from '@zana-ai/zcc-db';
+import type { PeerLink, PeerLinkListResponse, PeerLinkState } from '@zana-ai/zcc-server-contract';
+import type { ProductHttpContext } from '../../http/product-context.js';
+import { revokeConnectHost } from './connect-enrollment.js';
+
+/** What an owner store (the thing that created a plugin link) knows about the peer. */
+export interface PeerLinkDirectoryEntry {
+  peerInstanceId: string;
+  peerName: string;
+  state: Exclude<PeerLinkState, 'unclaimed'>;
+  reason?: string;
+}
+
+/**
+ * Optional seam implemented by the link owners. Core never names a plugin: it only asks
+ * "who is this host's peer" and, for owner-gesture removal, lets the owner clean its own
+ * store. A `release`/`remove` that returns `undefined` did not claim the host and core
+ * performs the generic teardown itself.
+ */
+export interface PeerLinkDirectory {
+  describe(hostId: string): PeerLinkDirectoryEntry | undefined;
+  release?(hostId: string, pluginId: string, scope: string | undefined): Promise<{ linkRemoved: boolean } | undefined>;
+  remove?(hostId: string): Promise<{ linkRemoved: true } | undefined>;
+}
+
+type LinkCtx = ProductHttpContext;
+
+const REASON_MAX = 200;
+
+function toPeerLink(host: HostRow, directory: PeerLinkDirectory | undefined, connected: ReadonlySet<string>): PeerLink {
+  const uses = host.purpose.kind === 'plugin-link' ? host.purpose.uses : [];
+  const entry = directory?.describe(host.id);
+  const link: PeerLink = {
+    hostId: host.id,
+    peerInstanceId: entry?.peerInstanceId ?? null,
+    peerName: entry?.peerName || host.name || 'Unknown peer',
+    // A forward host no owner store claims and with no uses is surfaced for removal, not hidden.
+    state: entry?.state ?? (uses.length > 0 ? 'linked' : 'unclaimed'),
+    connected: connected.has(host.id),
+    uses: uses.map(({ pluginId, label, scope, since }) => ({ pluginId, label, scope, since }))
+  };
+  if (entry?.reason) link.reason = entry.reason.slice(0, REASON_MAX);
+  return link;
+}
+
+export function listPeerLinks(ctx: LinkCtx): PeerLinkListResponse {
+  const connected = new Set(ctx.hostHub.connectedHostIds());
+  return { links: listPluginLinkHosts(ctx.db).map((host) => toPeerLink(host, ctx.peerLinkDirectory, connected)) };
+}
+
+export type PeerLinkRemoval =
+  | { status: 'ok'; linkRemoved: boolean }
+  | { status: 'not-found' }
+  | { status: 'unavailable' };
+
+/** Only a live plugin link is addressable here; an execution host id is indistinguishable from a missing one. */
+function pluginLink(ctx: LinkCtx, hostId: string): HostRow | null {
+  const host = getHost(ctx.db, hostId);
+  return host && !host.destroyedAt && host.purpose.kind === 'plugin-link' ? host : null;
+}
+
+async function teardownLink(ctx: LinkCtx, host: HostRow): Promise<PeerLinkRemoval> {
+  // Cloud revocation precedes local deletion; a failure keeps the link visible for a retry.
+  try { await revokeConnectHost(ctx, host.id); } catch { return { status: 'unavailable' }; }
+  ctx.hostHub.getSession(host.id)?.socket.close(4003, 'host-removed');
+  ctx.hostHub.detach(host.id, 'removed');
+  ctx.joinCodes.invalidateHost(host.id);
+  destroyHost(ctx.db, host.id);
+  return { status: 'ok', linkRemoved: true };
+}
+
+/** Owner gesture: drop one plugin's use of a link. The last use removes the link itself. */
+export async function removePeerLinkUse(
+  ctx: LinkCtx,
+  hostId: string,
+  pluginId: string,
+  scope?: string
+): Promise<PeerLinkRemoval> {
+  const host = pluginLink(ctx, hostId);
+  if (!host || host.purpose.kind !== 'plugin-link') return { status: 'not-found' };
+  if (!host.purpose.uses.some((use) => use.pluginId === pluginId && (scope === undefined || use.scope === scope))) {
+    return { status: 'not-found' };
+  }
+  let delegated: { linkRemoved: boolean } | undefined;
+  try { delegated = await ctx.peerLinkDirectory?.release?.(hostId, pluginId, scope); } catch { return { status: 'unavailable' }; }
+  if (delegated) return { status: 'ok', linkRemoved: delegated.linkRemoved };
+  if (removeHostLinkUse(ctx.db, hostId, pluginId, scope) > 0) return { status: 'ok', linkRemoved: false };
+  return teardownLink(ctx, host);
+}
+
+/** Owner gesture: remove the link and every use on it. */
+export async function removePeerLink(ctx: LinkCtx, hostId: string): Promise<PeerLinkRemoval> {
+  const host = pluginLink(ctx, hostId);
+  if (!host) return { status: 'not-found' };
+  let delegated: { linkRemoved: true } | undefined;
+  try { delegated = await ctx.peerLinkDirectory?.remove?.(hostId); } catch { return { status: 'unavailable' }; }
+  if (delegated) return { status: 'ok', linkRemoved: true };
+  return teardownLink(ctx, host);
+}

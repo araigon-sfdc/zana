@@ -16,7 +16,7 @@ function MoveDialog({
   doc: Pick<DesignDocSummary, 'projectId'>;
   projects: ProjectInfo[];
   onClose(): void;
-  onMove(projectId: string | null): Promise<void>;
+  onMove(projectId: string | null): Promise<boolean>;
 }) {
   const [target, setTarget] = useState(doc.projectId ?? '');
   return (
@@ -32,7 +32,7 @@ function MoveDialog({
             type="button"
             className="btn primary"
             disabled={target === (doc.projectId ?? '')}
-            onClick={() => void onMove(target || null).then(onClose)}
+            onClick={() => void onMove(target || null).then((moved) => { if (moved) onClose(); })}
           >
             Move
           </button>
@@ -66,7 +66,7 @@ export function AlternativeDialog({
 }: {
   doc: Pick<DesignDocSummary, 'id' | 'title' | 'projectId' | 'alternativeTo'>;
   onClose(): void;
-  onPick(alternativeTo: string | null): Promise<void>;
+  onPick(alternativeTo: string | null): Promise<boolean>;
 }) {
   const docs = useDocs({ ...(doc.projectId ? { projectId: doc.projectId } : {}), status: 'active' });
   const [target, setTarget] = useState(doc.alternativeTo ?? '');
@@ -86,7 +86,7 @@ export function AlternativeDialog({
             type="button"
             className="btn primary"
             disabled={target === (doc.alternativeTo ?? '') || ownAlternatives > 0}
-            onClick={() => void onPick(target || null).then(onClose)}
+            onClick={() => void onPick(target || null).then((saved) => { if (saved) onClose(); })}
           >
             Save
           </button>
@@ -138,9 +138,11 @@ export function useDocActions(projects: ProjectInfo[]): {
 
   const update = async (doc: DesignDocSummary, patch: UpdateArgs) => {
     try {
-      await api.update(doc.id, patch);
+      await api.update(doc.id, { ...patch, expectedHead: doc.head });
+      return true;
     } catch (error) {
       toast(`Could not update the doc: ${errorMessage(error)}`, 'error');
+      return false;
     }
   };
 

@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -85,6 +85,25 @@ describe('dev-local turbo TUI', () => {
       PATH: '/usr/bin'
     });
     expect(prepared.env.ZCC_APP_URL).toMatch(/^https:\/\/.+/);
+  });
+
+  it('gives dev servers a persistent 0600 peer key so invitations work without Electron safeStorage', () => {
+    const dataDir = join(makeTempDir(), 'zcc');
+    mkdirSync(dataDir, { recursive: true });
+    const first = prepareLocalDevEnv({ ZCC_DATA_DIR: dataDir, PATH: '/usr/bin' }).env.ZCC_PEER_STORAGE_BOOT_KEY;
+    expect(first).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(statSync(join(dataDir, 'dev-peer-key')).mode & 0o777).toBe(0o600);
+    expect(prepareLocalDevEnv({ ZCC_DATA_DIR: dataDir, PATH: '/usr/bin' }).env.ZCC_PEER_STORAGE_BOOT_KEY).toBe(first);
+    // A corrupt key file is replaced rather than trusted.
+    writeFileSync(join(dataDir, 'dev-peer-key'), 'short');
+    const replaced = prepareLocalDevEnv({ ZCC_DATA_DIR: dataDir, PATH: '/usr/bin' }).env.ZCC_PEER_STORAGE_BOOT_KEY;
+    expect(replaced).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(replaced).not.toBe(first);
+    // An explicit key wins; the packaged target never gets the file-backed dev key.
+    expect(prepareLocalDevEnv({ ZCC_DATA_DIR: dataDir, ZCC_PEER_STORAGE_BOOT_KEY: 'explicit', PATH: '/usr/bin' }).env.ZCC_PEER_STORAGE_BOOT_KEY).toBe('explicit');
+    const packagedDir = join(makeTempDir(), 'zcc');
+    mkdirSync(packagedDir, { recursive: true });
+    expect(prepareLocalDevEnv({ ZCC_DATA_DIR: packagedDir, PATH: '/usr/bin' }, { target: 'packaged' }).env.ZCC_PEER_STORAGE_BOOT_KEY).toBeUndefined();
   });
 
   it('honors an explicit ZCC_POSTHOG_API_KEY', () => {

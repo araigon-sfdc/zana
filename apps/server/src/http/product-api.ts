@@ -11,6 +11,9 @@ import { projectGit } from './project-git.js';
 import { usesConnect } from '../services/hosts/connect-enrollment.js';
 import { reconcileRemoteProjectBindings } from '../services/hosts/host-bootstrap.js';
 import { handleSharedProductApi } from './shared-product-api.js';
+import { handleScopedLinkApi } from '../services/peers/scoped-link-api.js';
+import { handlePeerControlApi } from '../services/peers/peer-control-api.js';
+import { handlePeerInstallerApi } from '../services/peers/peer-installer-api.js';
 import { projectSources } from '@zana-ai/zcc-domain/project';
 import { projectConfigCompatibility } from '@zana-ai/zcc-domain/harness-config-compatibility';
 import { getPrimaryHost, countConversationThreadsForQuit } from '@zana-ai/zcc-db';
@@ -24,6 +27,7 @@ import { productServerHasDesktopCredential } from './cli-agent-ops.js';
 import { setProductConfig } from './product-config.js';
 import { assertPlanRevision, planImplementationMode, planImplementationPrompt } from '../services/threads/conversation-plan-implementation.js';
 import { readPluginHttpBody, PluginHttpBodyTooLarge } from './plugin-http-body.js';
+import { handlePeerApi } from './peer-api.js';
 import { conversationHistoryAsync } from '../services/threads/conversation-history.js';
 import { randomUUID } from 'node:crypto';
 import { isAbsolute, join, relative, sep, posix } from 'node:path';
@@ -154,7 +158,7 @@ import { mergeHealthIntoExtraInstalled, probeInstalledProviderHealth } from '../
 import { isSafeRelPath, listLibraryDocs, listQuickPrompts, readLibraryDoc } from './library-via-host.js';
 import { listProjectDir, listProjectPaths, readProjectFile, parseProjectFileScope } from './project-fs-via-host.js';
 import { listHostFiles, listHostPaths, mkdirHostPath, moveHostPath, readHostFile, removeHostPath, writeHostFile } from './files-via-host.js';
-import { getConversationThread, getEnvironment, getHost, getConversationThreadEventAfter, listConversationThreadEventsWindow, ConversationHistoryReadLimitError, listConversationThreadsByProject, listHosts, listVisibleConversationThreads, nextConversationEventSequence, pinConversationThread, reorderPinnedConversationThread, unpinConversationThread, updateConversationThreadTitle } from '@zana-ai/zcc-db';
+import { getConversationThread, getEnvironment, getHost, getConversationThreadEventAfter, listConversationThreadEventsWindow, ConversationHistoryReadLimitError, listConversationThreadsByProject, listExecutionHosts, listVisibleConversationThreads, nextConversationEventSequence, pinConversationThread, reorderPinnedConversationThread, unpinConversationThread, updateConversationThreadTitle } from '@zana-ai/zcc-db';
 import { handleHostsApi } from './hosts-api.js';
 import { handleDesktopBrowsersApi } from './desktop-browsers-api.js';
 import { handleCliAgentsApi } from './cli-agents-api.js';
@@ -389,7 +393,7 @@ async function resolveExecutionOptionsScope(args: {
       project,
       remoteToolProxy: false,
       remoteDefaultPath: ctx.config.getConfig().remoteDefaultPath,
-      hosts: listHosts(ctx.db).map(toRemoteStartPathHost),
+      hosts: listExecutionHosts(ctx.db).map(toRemoteStartPathHost),
       probeHostHome: async () => {
         const listing = await ctx.hostHub.callHostOnlineRpc<{ directory: string }>({
           hostId,
@@ -466,6 +470,7 @@ export async function handleProductHttp(
   response: ServerResponse,
   ctx: ProductHttpContext
 ): Promise<boolean> {
+  if (await handlePeerControlApi(request, response, ctx)) return true;
   const requestUrl = new URL(request.url ?? '/', 'http://127.0.0.1');
   if (!requestUrl.pathname.startsWith('/api/')) return false;
 
@@ -511,6 +516,9 @@ export async function handleProductHttp(
 
   try {
     if (await handlePreviewsApi(request, response, ctx, path, method)) return true;
+    if (await handleScopedLinkApi(request, response, ctx, path, method)) return true;
+    if (await handlePeerInstallerApi(request, response, ctx, path, method)) return true;
+    if (await handlePeerApi(request, response, ctx, path, method)) return true;
     if (path === '/api/v1/file-preview/video' && (method === 'GET' || method === 'HEAD')) {
       try {
         await sendVideoPreview(request, response, ctx, requestUrl.searchParams);

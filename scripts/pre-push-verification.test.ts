@@ -1,8 +1,9 @@
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, it, vi } from 'vitest';
-import { changedPaths, configuredAliases, githubRepository, parseTuples, runFastVerification, runFullVerification, runPrePush, selectPush } from './pre-push-verification.mjs';
+import { changedPaths, configuredAliases, createStampStore, githubRepository, parseTuples, runFastVerification, runFullVerification, runPrePush, selectPush } from './pre-push-verification.mjs';
 
 const OID = 'a'.repeat(40);
 const BASE = 'b'.repeat(40);
@@ -74,10 +75,78 @@ it('uses changed-test verification for infrastructure paths and large feature ch
 it('uses strictest full policy for unsafe refs, bases, remote identity, and multiple objects', () => {
   expect(selectPush({ tuples: [{ ...feature, remoteRef: 'refs/heads/main' }], remoteUrl: 'https://github.com/salesforce/zana', ...services() })).toMatchObject({ action: 'full', reason: expect.stringContaining('protected') });
   expect(selectPush({ tuples: [feature], remoteUrl: 'https://github.com/fork/zana', ...services() })).toMatchObject({ action: 'full', reason: expect.stringContaining('remote') });
-  expect(selectPush({ tuples: [feature], remoteUrl: 'https://github.com/salesforce/zana', ...services(), isAncestor: () => false })).toMatchObject({ action: 'full', reason: expect.stringContaining('non-ancestor') });
   expect(selectPush({ tuples: [feature, { ...feature, localOid: 'c'.repeat(40), remoteRef: 'refs/heads/other' }], remoteUrl: 'https://github.com/salesforce/zana', ...services() })).toMatchObject({ action: 'full', reason: expect.stringContaining('multiple') });
   expect(selectPush({ tuples: [feature, { ...feature, remoteRef: 'refs/heads/other', remoteOid: 'c'.repeat(40) }], remoteUrl: 'https://github.com/salesforce/zana', ...services() })).toMatchObject({ action: 'full', reason: expect.stringContaining('bases') });
   expect(selectPush({ tuples: [{ ...feature, remoteRef: 'refs/changes/1' }], remoteUrl: 'https://github.com/salesforce/zana', ...services() })).toMatchObject({ action: 'full', reason: expect.stringContaining('unknown') });
+});
+
+it('measures a force-push against main, and falls back to full only without a sound main base', () => {
+  const url = 'https://github.com/salesforce/zana';
+  const forced = { ...services(), isAncestor: () => false };
+  expect(selectPush({ tuples: [feature], remoteUrl: url, ...forced })).toMatchObject({ action: 'fast', oid: OID, base: BASE });
+  expect(selectPush({ tuples: [feature], remoteUrl: url, ...forced, hasObject: (object: string) => object !== 'origin/main' })).toMatchObject({ action: 'full', reason: expect.stringContaining('non-ancestor') });
+  expect(selectPush({ tuples: [feature], remoteUrl: url, ...forced, mergeBase: () => null })).toMatchObject({ action: 'full', reason: expect.stringContaining('merge base') });
+  // Unknown remote tip is treated the same way instead of forcing full verification.
+  expect(selectPush({ tuples: [feature], remoteUrl: url, ...services(), hasObject: (object: string) => object === 'origin/main' })).toMatchObject({ action: 'fast', base: BASE });
+  expect(selectPush({ tuples: [feature], remoteUrl: url, ...services(), hasObject: () => false })).toMatchObject({ action: 'full', reason: expect.stringContaining('unavailable') });
+  expect(selectPush({ tuples: [feature], remoteUrl: url, ...forced, changed: () => ['docs/guide.md'] })).toMatchObject({ action: 'skip' });
+});
+
+it('skips re-verifying a tree that already passed, and records new passes', () => {
+  const recorded = new Set<string>();
+  const stamps = { has: vi.fn((name: string) => recorded.has(name)), record: vi.fn((name: string) => { recorded.add(name); }) };
+  const fastVerify = vi.fn(); const verify = vi.fn(); const log = vi.fn();
+  const base = { input: '', remoteUrl: 'https://github.com/salesforce/zana', run: () => ({ status: 1 }), log, error: vi.fn(), fastVerify, verify, stamps };
+  const root = mkdtempSync(join(tmpdir(), 'zana-push-stamp-'));
+  const sh = (args: string[]) => execFileSync('git', args, { cwd: root, encoding: 'utf8' });
+  try {
+    sh(['init', '-q']); sh(['config', 'user.email', 'a@b.c']); sh(['config', 'user.name', 'a']);
+    sh(['commit', '-q', '--allow-empty', '-m', 'one']);
+    const oid = sh(['rev-parse', 'HEAD']).trim();
+    const tree = sh(['rev-parse', 'HEAD^{tree}']).trim();
+    const fast = { action: 'fast', reason: 'r', oid, base: BASE, paths: ['a.ts'] };
+    const full = { action: 'full', reason: 'r', oid };
+    expect(runPrePush({ ...base, root, select: () => fast })).toBe(0);
+    expect(fastVerify).toHaveBeenCalledTimes(1);
+    expect(stamps.record).toHaveBeenCalledWith(`${tree}-fast-${BASE}`);
+    expect(runPrePush({ ...base, root, select: () => fast })).toBe(0);
+    expect(fastVerify).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalledWith('pre-push: tree already verified locally; skipping');
+    // A fast stamp for another base does not satisfy this one, and never satisfies full.
+    expect(runPrePush({ ...base, root, select: () => ({ ...fast, base: 'c'.repeat(40) }) })).toBe(0);
+    expect(fastVerify).toHaveBeenCalledTimes(2);
+    expect(runPrePush({ ...base, root, select: () => full })).toBe(0);
+    expect(verify).toHaveBeenCalledTimes(1);
+    expect(runPrePush({ ...base, root, select: () => full })).toBe(0);
+    expect(verify).toHaveBeenCalledTimes(1);
+    // A full stamp covers a fast check of the same tree.
+    expect(runPrePush({ ...base, root, select: () => ({ ...fast, base: 'd'.repeat(40) }) })).toBe(0);
+    expect(fastVerify).toHaveBeenCalledTimes(2);
+    // Failed verification records nothing; stamp store errors never fail the push.
+    const fresh = { has: vi.fn(() => false), record: vi.fn() };
+    fastVerify.mockImplementationOnce(() => { throw new Error('boom'); });
+    expect(runPrePush({ ...base, root, stamps: fresh, select: () => fast })).toBe(1);
+    expect(fresh.record).not.toHaveBeenCalled();
+    fresh.has.mockImplementation(() => { throw new Error('disk'); });
+    fresh.record.mockImplementation(() => { throw new Error('disk'); });
+    expect(runPrePush({ ...base, root, stamps: fresh, select: () => fast })).toBe(0);
+    expect(fastVerify).toHaveBeenCalledTimes(4);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+it('persists stamps in the git dir, prunes old ones, and ignores a missing git dir', () => {
+  const root = mkdtempSync(join(tmpdir(), 'zana-push-store-'));
+  try {
+    const runGit = (args: string[]) => (args[0] === 'rev-parse' ? '.git/pre-push-verified' : null);
+    const store = createStampStore(root, runGit);
+    expect(store.has('t-full')).toBe(false);
+    for (let index = 0; index < 55; index++) store.record(`t${index}-full`);
+    expect(store.has('t54-full')).toBe(true);
+    expect(readdirSync(join(root, '.git', 'pre-push-verified'))).toHaveLength(50);
+    const none = createStampStore(root, () => null);
+    expect(none.has('x')).toBe(false);
+    expect(() => none.record('x')).not.toThrow();
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 it('handles new branches and deletion-only pushes conservatively', () => {
@@ -125,8 +194,7 @@ it('installs dependencies and prepares Slack assets only when Slack source chang
       ['git', ['checkout', '--detach', OID]],
       ['pnpm', ['install', '--frozen-lockfile', '--prefer-offline']],
       ['pnpm', ['--filter', 'zcc-plugin-slack-bridge-2ff2', 'package']],
-      ['pnpm', ['run', 'typecheck']],
-      ['pnpm', ['exec', 'vitest', 'related', 'plugins/slack-bridge-2ff2/src/index.ts', '--run', '--passWithNoTests']],
+      ['node', [join(root, 'scripts', 'run-concurrent.mjs'), 'typecheck=pnpm run typecheck', "tests=pnpm exec vitest related 'plugins/slack-bridge-2ff2/src/index.ts' --run --passWithNoTests"]],
       ['fd', ['-e', 'ts', 'guard\\.test']],
       ['pnpm', ['exec', 'vitest', 'run', 'apps/app/src/__tests__/rule6.guard.test.ts', 'scripts/install-seam.guard.test.ts']],
     ]);
@@ -156,7 +224,7 @@ it('uses an install when dependency inputs change and broad tests for runner con
   try {
     runFastVerification({ oid: OID, base: BASE, paths: ['pnpm-lock.yaml', 'vitest.config.ts'], root, run, log: vi.fn() });
     expect(run).toHaveBeenCalledWith('pnpm', ['install', '--frozen-lockfile', '--prefer-offline'], expect.anything());
-    expect(run).toHaveBeenCalledWith('pnpm', ['exec', 'vitest', 'run', '--changed', BASE], expect.anything());
+    expect(run).toHaveBeenCalledWith('node', [join(root, 'scripts', 'run-concurrent.mjs'), 'typecheck=pnpm run typecheck', `tests=pnpm exec vitest run --changed ${BASE}`], expect.anything());
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -181,15 +249,14 @@ it('uses broad changed-test selection for test and runner configuration inputs',
   });
   try {
     runFastVerification({ oid: OID, base: BASE, paths: ['vitest.config.ts'], root, run, log: vi.fn() });
-    expect(run).toHaveBeenCalledWith('pnpm', ['exec', 'vitest', 'run', '--changed', BASE], expect.anything());
+    expect(run).toHaveBeenCalledWith('node', [join(root, 'scripts', 'run-concurrent.mjs'), 'typecheck=pnpm run typecheck', `tests=pnpm exec vitest run --changed ${BASE}`], expect.anything());
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 it.each([
   ['install', 4, 'snapshot dependency install failed'],
-  ['typecheck', 5, 'verification failed: pnpm run typecheck'],
-  ['related vitest', 6, 'verification failed: vitest related'],
-  ['guard discovery', 7, 'could not list source-text guard tests'],
+  ['typecheck or related vitest', 5, 'verification failed: typecheck or vitest related'],
+  ['guard discovery', 6, 'could not list source-text guard tests'],
 ])('fast verification fails when %s fails', (_stage, failedCall, message) => {
   const root = mkdtempSync(join(tmpdir(), 'zana-push-fast-failure-'));
   let calls = 0;

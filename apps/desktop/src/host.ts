@@ -8703,12 +8703,6 @@ async function bootstrapNormal() {
       }
     })
     .catch((err) => logMainError('startMcpServer', err));
-  // Start the Zana Mobile gateway if the user has enabled phone access. A start
-  // failure (e.g. port already held by `mobile:serve`) is recorded on the manager
-  // and surfaced through `mobile:status`; it must never abort boot.
-  if (store.getConfig().mobileGatewayEnabled === true) {
-    mobileGateway.start().catch((err) => logMainError('mobileGateway.start', err));
-  }
   // Bind the PTY/agent-status → renderer bridge ONCE for the process lifetime,
   // before the first window. Must not live in createWindow() (re-entrant on
   // macOS reactivate) or every reopen would double-send PTY output.
@@ -8741,6 +8735,16 @@ async function bootstrapNormal() {
   } catch (error) {
     normalBootstrapStarted = false;
     throw error;
+  }
+  // Start the Zana Mobile gateway if the user has enabled phone access. It must
+  // start only after ensureRendererStaticHost() has called
+  // setProductionRendererOrigin(): the gateway resolves its loopback upstream
+  // (productServerUrl) at start, and before that it falls back to :8780, which
+  // makes peer/phone connections close with 1011 after an app restart. A start
+  // failure (e.g. port already held by `mobile:serve`) is recorded on the manager
+  // and surfaced through `mobile:status`; it must never abort boot.
+  if (store.getConfig().mobileGatewayEnabled === true) {
+    mobileGateway.start().catch((err) => logMainError('mobileGateway.start', err));
   }
   if (!unscopedWindow()) createWindow();
   void sharedClient.restore().catch(error => logMainError('sharedClient.restore', error));

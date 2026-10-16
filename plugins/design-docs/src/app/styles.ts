@@ -107,6 +107,34 @@ export const DESIGN_DOCS_STYLES = `
 .dd-icon-btn.danger:hover:not(:disabled) { color: var(--danger); }
 .dd-icon-btn:disabled { opacity: 0.35; cursor: default; }
 
+/* ── Peers view (inside the workbench) ──────────────────────────────── */
+.dd-peers-view { display: flex; flex-direction: column; flex: 1 1 auto; min-width: 0; min-height: 0; background: var(--bg-base); }
+.dd-peers-view-head { gap: 8px; }
+.dd-peers-view-title { margin: 0; }
+.dd-peers-view-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; }
+.dd-peers-view-body { max-width: 760px; margin: 0 auto; padding: 18px 20px 28px; }
+.dd-settings-tabs { height: auto; padding: 0; border-bottom: 0; margin-left: 6px; }
+.dd-agent-settings { display: flex; flex-direction: column; gap: 10px; }
+.dd-agent-intro, .dd-agent-help { margin: 0; font-size: 12px; line-height: 1.5; }
+.dd-agent-order { margin: 0; padding-left: 18px; font-size: 12px; line-height: 1.6; }
+.dd-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.dd-peers { display: flex; flex-direction: column; gap: 12px; min-width: 0; font-size: 13px; color: var(--text-primary); }
+.dd-peers p { margin: 0; }
+.dd-peers *, .dd-peers *::before, .dd-peers *::after { box-sizing: border-box; }
+.dd-peers code { font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.92em; }
+.dd-peers .dd-banner-error { margin: 0; }
+.dd-peers-guide { padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-elevated); }
+.dd-peers-guide { display: flex; flex-direction: column; gap: 12px; }
+.dd-peers-guide > p, .dd-peers-guide > .dd-peers-heading { margin: 0; }
+.dd-peers-guide ol { margin: 6px 0 0; padding-left: 20px; display: flex; flex-direction: column; gap: 6px; line-height: 1.5; }
+.dd-peers-heading { margin: 0; font-size: 12.5px; font-weight: 650; }
+.dd-peers-block { display: flex; flex-direction: column; gap: 4px; }
+.dd-peers-list { display: flex; flex-direction: column; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.dd-peers-member { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.dd-peers-member-name { min-width: 0; overflow-wrap: anywhere; }
+.dd-peers-hint { color: var(--text-muted); }
+.dd-peers-note { font-size: 12px; line-height: 1.5; }
+
 /* ── Banners, empty states ──────────────────────────────────────────── */
 .dd-banner {
   display: flex;
@@ -251,8 +279,8 @@ export const DESIGN_DOCS_STYLES = `
 .dd-list {
   display: flex;
   flex-direction: column;
-  flex: 0 0 280px;
-  width: 280px;
+  flex: 0 0 296px;
+  width: 296px;
   min-height: 0;
   border-right: 1px solid var(--border);
   background: var(--bg-base);
@@ -265,8 +293,10 @@ export const DESIGN_DOCS_STYLES = `
   padding: 0 10px 0 14px;
   border-bottom: 1px solid var(--border);
 }
-.dd-list-title { font-size: 13px; font-weight: 650; }
-.dd-list-count { color: var(--text-dim); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.dd-list-head { gap: 4px; }
+.dd-list-head .dd-list-count { margin-left: 2px; }
+.dd-list-title { min-width: 0; overflow: hidden; font-size: 13px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.dd-list-count { flex: 0 0 auto; color: var(--text-dim); font-size: 11.5px; font-variant-numeric: tabular-nums; }
 .dd-list-collapsed {
   display: flex;
   flex-direction: column;
@@ -278,7 +308,26 @@ export const DESIGN_DOCS_STYLES = `
   border-right: 1px solid var(--border);
   background: var(--bg-base);
 }
-.dd-new { height: 26px; padding: 0 10px; }
+.dd-head-btn {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 5px;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
+}
+.dd-head-btn:not(.primary) { background: var(--bg-elevated); color: var(--text-primary); }
+.dd-head-btn:not(.primary):hover:not(:disabled) { background: var(--bg-hover); border-color: var(--border-strong, var(--border)); }
+.dd-head-btn:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 1px; }
+.dd-head-btn[aria-pressed='true'] { border-color: var(--border-strong, var(--border)); }
+.dd-head-icon { justify-content: center; width: 26px; padding: 0; }
+.dd-settings-toggle:not(.dd-head-icon) { gap: 4px; padding: 0 7px; }
+.dd-head-count { font-variant-numeric: tabular-nums; }
 .dd-list-tools { display: flex; align-items: center; gap: 4px; padding: 8px 8px 6px 10px; }
 .dd-search {
   display: flex;

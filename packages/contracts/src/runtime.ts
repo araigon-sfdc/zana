@@ -487,6 +487,7 @@ export const PluginAppSnapshotSchema = z.object({
   appUrl: z.string().max(4096).nullable(),
   availableVersion: z.string().min(1).max(256).optional(),
   projectTab: PluginAppProjectTabSchema.optional(),
+  peers: z.boolean().optional(),
   skillNames: z.array(z.string().min(1).max(256)).max(64).optional(),
   mcpServers: z.array(z.object({
     name: z.string().min(1).max(256),

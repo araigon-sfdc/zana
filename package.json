@@ -25,7 +25,7 @@
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "verify:fast": "pnpm run typecheck && pnpm exec vitest run --changed origin/main && pnpm exec vitest run $(fd -e ts 'guard\\.test')",
-    "verify:full": "pnpm run typecheck && pnpm exec vitest run && pnpm exec vitest run --config plugins/tasks/vitest.config.ts && pnpm --dir plugins/provider-pi exec vitest run --config vitest.config.ts && pnpm exec vitest run --config vitest.release-coverage.config.ts",
+    "verify:full": "node scripts/run-concurrent.mjs \"typecheck=pnpm run typecheck\" \"tests=pnpm exec vitest run && pnpm exec vitest run --config plugins/tasks/vitest.config.ts && pnpm --dir plugins/provider-pi exec vitest run --config vitest.config.ts && pnpm exec vitest run --config vitest.release-coverage.config.ts\"",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "node scripts/run-electron-e2e.mjs --build",

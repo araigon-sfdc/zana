@@ -1,0 +1,554 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { RefreshCw } from 'lucide-react';
+import type { GroupStatus } from '../shared/peer-group.js';
+import { experimental_requestApproval, useRealtime, type PluginApprovalResult } from '@zana-ai/zcc-plugin-sdk/app';
+import { PEER_STATE_CHANNEL, PLUGIN_ID } from '../shared/contract.js';
+import { errorMessage, toast, useApi, type InviteItem, type InviteView, type PeerLink, type PeerStatus } from './api.js';
+import { copyText } from './clipboard.js';
+import { IconButton, Spinner } from './ui.js';
+
+export interface PeerSync {
+  /** Sync group status, null until loaded or when it cannot be read. */
+  peer: PeerStatus | null;
+  syncing: boolean;
+  /** Sync the whole database with every group member now; reports the result as a toast. */
+  sync(): void;
+  /** Re-read the group status, e.g. after leaving the Peers view. */
+  refresh(): void;
+}
+
+/** One sync implementation shared by the doc-list header and the collapsed rail. */
+/** True until the component unmounts; async completions check it before touching state. */
+function useMounted(): { readonly current: boolean } {
+  const mounted = useRef(true);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
+  return mounted;
+}
+
+export function usePeerSync(): PeerSync {
+  const api = useApi();
+  const [peer, setPeer] = useState<PeerStatus | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const mounted = useMounted();
+  const refresh = useCallback(() => {
+    void api.peerStatus().then((value) => { if (mounted.current) setPeer(value); }).catch(() => { if (mounted.current) setPeer(null); });
+  }, [api, mounted]);
+  useEffect(refresh, [refresh]);
+  const sync = () => {
+    if (syncing) return;
+    setSyncing(true);
+    void api
+      .syncNow()
+      .then((result) => toast(result.blocked ? `Synced ${result.synced}/${result.attempted}; ${result.blocked} blocked` : `Synced ${result.synced} peers`))
+      .catch((error) => toast(errorMessage(error), 'error'))
+      .finally(() => { if (mounted.current) setSyncing(false); });
+  };
+  return { peer, syncing, sync, refresh };
+}
+
+/**
+ * Sync now, only once a group is configured: a bordered square in the doc-list
+ * header (sized like New), or a plain icon in the collapsed rail.
+ */
+export function SyncButton({ peerSync, compact = false }: { peerSync: PeerSync; compact?: boolean }) {
+  const { peer, syncing, sync } = peerSync;
+  if (!peer?.configured) return null;
+  if (compact) return <IconButton icon={RefreshCw} label={syncing ? 'Syncing peers' : 'Sync peers'} disabled={syncing} onClick={sync} />;
+  return (
+    <button
+      type="button"
+      className="btn dd-head-btn dd-head-icon dd-sync"
+      disabled={syncing}
+      onClick={sync}
+      aria-label={syncing ? 'Syncing' : 'Sync'}
+      title={`Sync group: ${peer.members.length} members`}
+    >
+      <RefreshCw size={13} aria-hidden className={syncing ? 'spin' : undefined} />
+    </button>
+  );
+}
+
+function memberState(member: GroupStatus['members'][number]): string {
+  if (member.retiring) return 'retiring - waiting for committed frontier; data sync disabled';
+  if (!member.authorized) return 'not authorized';
+  return member.connected ? 'connected' : 'offline';
+}
+
+/**
+ * Plain-language setup help for each way the secure link between the two computers can fail. The first computer
+ * (the one that clicked Add peer) hosts the link, so most fixes happen there.
+ */
+interface SshGuide { title: string; steps: string[] }
+const SSH_GUIDES: Record<string, SshGuide> = {
+  ssh_remote_login_off: {
+    title: 'Remote Login is turned off on the computer that clicked Add peer',
+    steps: [
+      'On the computer that clicked Add peer (the first computer), open System Settings > General > Sharing.',
+      'Turn on Remote Login. On Windows or Linux, start the OpenSSH Server service instead.',
+      'Come back here and choose Add peer again to get a new invitation.'
+    ]
+  },
+  ssh_unreachable: {
+    title: 'The other computer cannot be reached',
+    steps: [
+      'Check that both computers are awake and on the same Wi-Fi or wired network.',
+      'Check that Remote Login is on for the computer that clicked Add peer: System Settings > General > Sharing > Remote Login.',
+      'If your network blocks computers from finding each other (some office and guest networks do), try a different network.',
+      'Then choose Add peer again for a new invitation.'
+    ]
+  },
+  ssh_auth_refused: {
+    title: 'The first computer would not accept the connection',
+    steps: [
+      'On the computer that clicked Add peer, open System Settings > General > Sharing and make sure Remote Login is on and allows your user account.',
+      'Zana needs to add a line to your ~/.ssh/authorized_keys file. If that folder or file is locked or owned by another user, fix its permissions.',
+      'Then choose Add peer again for a new invitation.'
+    ]
+  },
+  ssh_forwarding_refused: {
+    title: 'Remote Login is on, but it does not allow the connection Zana needs',
+    steps: [
+      'On the computer that clicked Add peer, a security setting or an administrator policy is blocking port forwarding.',
+      'Ask your administrator to allow TCP forwarding for your account in the Remote Login (sshd) settings.',
+      'Then choose Add peer again for a new invitation.'
+    ]
+  },
+  ssh_host_key_mismatch: {
+    title: 'The computer you reached is not the one that made the invitation',
+    steps: [
+      'The invitation points at a different computer than the one that answered, or its security key changed.',
+      'This can also mean someone else is on your network. Do not continue with this invitation.',
+      'On the computer that wants to host, choose Add peer to make a new invitation and paste the new one here.'
+    ]
+  }
+};
+
+function sshGuideFor(text: string | null | undefined): SshGuide | null {
+  return (text && SSH_GUIDES[text]) || null;
+}
+
+const REMOTE_LOGIN_PATH = 'System Settings > General > Sharing > Remote Login';
+const SAME_NETWORK_NOTE = 'Both computers must be on the same network (for example the same Wi-Fi) and awake while you pair.';
+
+function SshGuideCard({ guide }: { guide: SshGuide }) {
+  return (
+    <div role="alert" className="dd-banner dd-banner-error dd-ssh-guide">
+      <p><strong>{guide.title}</strong></p>
+      <ol>{guide.steps.map((step) => <li key={step}>{step}</li>)}</ol>
+    </div>
+  );
+}
+
+const REASON_TEXT: Record<string, string> = {
+  invalid_invitation: 'This invitation is not valid. Ask for a new one.',
+  own_invitation: 'This invitation was created on this computer. Paste it on the other computer.',
+  wrong_plugin: 'This invitation is for a different plugin.',
+  expired: 'This invitation expired. Start a new invitation.',
+  denied: 'Pairing was declined.',
+  cancelled: 'Pairing was cancelled.',
+  already_redeemed: 'This invitation was already used. Start a new invitation.',
+  attempt_limit: 'This invitation was locked after too many attempts. Start a new invitation.',
+  identity_mismatch: 'The other computer did not prove the identity in the invitation. Start a new invitation.',
+  unreachable: 'The other computer is not reachable yet; retrying. Keep both computers open and online.',
+  not_found: 'Invitation not found.',
+  capacity: 'Too many open invitations. Cancel one and try again.',
+  replay: 'That request was already processed.',
+  stale_generation: 'The pairing attempt changed. Start a new invitation.',
+  owner_proof_required: 'Owner approval is required.',
+  not_ready: 'Pairing is not ready for that action.',
+  fenced: 'Pairing consent is no longer valid. Start a new invitation.',
+  unavailable: 'Pairing is unavailable right now. Check that both computers are on the same network and that Remote Login is on, then try again.'
+};
+const STATE_TEXT: Record<string, string> = {
+  expired: REASON_TEXT.expired!, denied: REASON_TEXT.denied!, cancelled: REASON_TEXT.cancelled!, failed: 'Pairing failed. Start a new invitation.'
+};
+const LINK_REASON_TEXT: Record<NonNullable<PeerLink['reason']>, string> = {
+  'ssh-down': 'the secure connection to the other computer is down',
+  'credential-expired': 'the link credential expired',
+  'peer-offline': 'the other computer is offline',
+  revoked: 'the link was revoked'
+};
+const TERMINAL = new Set(['ready', 'denied', 'cancelled', 'expired', 'failed']);
+/** Terminal outcomes a fresh invitation fixes: offer it in one click. */
+const RENEWABLE = new Set(['expired', 'attempt_limit', 'already_redeemed']);
+/** Invite list polling: fast while a pairing is moving, slow while it waits on an owner (the host also throttles refresh). */
+export const INVITE_POLL_MS = 5000;
+export const INVITE_WAITING_POLL_MS = 30_000;
+
+function renewable(item: InviteItem): boolean {
+  return item.state === 'expired' || (item.state === 'failed' && !!item.reason && RENEWABLE.has(item.reason));
+}
+
+/** Local wall-clock time as HH:MM (24 h), stable across locales. */
+function clockTime(at: number): string {
+  const date = new Date(at);
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+}
+
+function blockedText(item: InviteItem): string {
+  return (item.reason && REASON_TEXT[item.reason]) || STATE_TEXT[item.state] || 'Pairing could not continue.';
+}
+
+function countdown(expiresAt: number, now: number): string {
+  const seconds = Math.max(0, Math.ceil((expiresAt - now) / 1000));
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+}
+
+function useNow(active: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [active]);
+  return now;
+}
+
+type RequestApproval = (pluginId: string, request: Parameters<typeof experimental_requestApproval>[1]) => Promise<PluginApprovalResult>;
+
+const APPROVAL_TEXT: Record<string, string | null> = {
+  cancelled: null,
+  unavailable: 'Approval needs the Zana desktop app on this computer.',
+  busy: 'Another approval is already open on this window.',
+  invalid: 'The approval could not be shown. Refresh and try again.'
+};
+
+/**
+ * Pairing without Settings: Add peer (copy the invitation) on one computer, Join peer (paste it) on the other,
+ * then each owner confirms once. The invitation is the transport and database-sync consent.
+ */
+function InvitePanel({ invites, onChanged, requestApproval }: { invites: InviteView | null; onChanged(): void; requestApproval: RequestApproval }) {
+  const api = useApi();
+  const [created, setCreated] = useState<{ invitationId: string; token: string; expiresAt: number } | null>(null);
+  const [paste, setPaste] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [dismissed, setDismissed] = useState<string[]>([]);
+  const mounted = useMounted();
+  const now = useNow(!!created);
+  const unavailable = invites?.available === false;
+  const items = (invites?.invitations ?? []).filter((item) => !dismissed.includes(item.invitationId));
+  // The token is shown only while the invitation is open; any later state (or expiry) clears it.
+  const live = created ? invites?.invitations.find((item) => item.invitationId === created.invitationId) : undefined;
+  useEffect(() => { if (created && live && live.state !== 'open') setCreated(null); }, [created, live]);
+  // The host returns the token once; after a remount or tab switch ask the plugin server (memory only) for the still-open one.
+  const openId = invites?.invitations.find((item) => item.role === 'inviter' && item.state === 'open')?.invitationId;
+  const shownId = created?.invitationId;
+  useEffect(() => {
+    if (!openId || shownId === openId) return;
+    let active = true;
+    void api.openInvitation().then((invitation) => { if (active && invitation?.invitationId === openId) setCreated(invitation); }).catch(() => undefined);
+    return () => { active = false; };
+  }, [api, openId, shownId]);
+  const act = (work: () => Promise<unknown>) => {
+    setBusy(true);
+    setError(null);
+    void work().catch((failure) => { if (mounted.current) setError(errorMessage(failure)); }).finally(() => { if (mounted.current) { setBusy(false); onChanged(); } });
+  };
+  const copy = async (token: string) => {
+    // The desktop session denies navigator.clipboard, so copyText falls back to the legacy copy path.
+    const ok = await copyText(token);
+    if (!mounted.current) return;
+    setCopied(ok);
+    if (!ok) setError('Copy failed. Select the invitation text and copy it manually.');
+  };
+  const addPeer = () => act(async () => {
+    if (created) await api.cancelInvitation(created.invitationId).catch(() => undefined);
+    setCreated(null); setCopied(false);
+    const invitation = await api.createInvitation();
+    if (mounted.current) setCreated(invitation);
+    await copy(invitation.token);
+  });
+  const joinPeer = () => act(async () => {
+    await api.redeemInvitation(paste.trim());
+    setPaste('');
+  });
+  const approve = (item: InviteItem) => act(async () => {
+    const result = await requestApproval(PLUGIN_ID, await api.invitationApproval(item.invitationId));
+    if (!result.approved) {
+      const message = APPROVAL_TEXT[result.reason];
+      if (message) setError(message);
+      return;
+    }
+    await api.decideInvitation({ invitationId: item.invitationId, decision: 'approved', ownerProof: result.token });
+  });
+  const expired = created ? created.expiresAt <= now : false;
+  return (
+    <div className="dd-peers-guide" aria-label="Pair a peer">
+      <h5 className="dd-peers-heading">Pair another computer</h5>
+      <p>Pair two Zana apps without any machine setup. On one computer choose <strong>Add peer</strong> and copy the invitation; on the other choose <strong>Join peer</strong> and paste it. On the computer that clicked Add peer, Remote Login must be on (macOS: {REMOTE_LOGIN_PATH}). An invitation works once and must be pasted on the other computer within 10 minutes. After it is pasted, both owners have longer to approve. This invitation is only for setting up the pairing. Once paired, the connection stays up and reconnects by itself.</p>
+      <p className="dd-peers-hint">{SAME_NETWORK_NOTE}</p>
+      {unavailable ? <p role="note" className="dd-peers-hint">{invites?.reason ? `${invites.reason[0]!.toUpperCase()}${invites.reason.slice(1)}` : 'Host cannot invite peers'}. Your existing sync group keeps working.</p> : null}
+      <div className="dd-actions">
+        <button type="button" className="btn primary" disabled={busy || unavailable} onClick={addPeer}>Add peer</button>
+      </div>
+      {created ? (
+        <div className="dd-peers-block">
+          {expired ? (
+            <p role="status">Invitation expired. Create a new one and paste it on the other computer within 10 minutes.</p>
+          ) : (
+            <>
+              <p role="status">Invitation ready. Expires in {countdown(created.expiresAt, now)}. Paste it on the other computer before then.</p>
+              <input className="dd-input" aria-label="Invitation" readOnly value={created.token} onFocus={(event) => event.currentTarget.select()} />
+            </>
+          )}
+          <div className="dd-actions">
+            {!expired ? <button type="button" className="btn" onClick={() => void copy(created.token)}>{copied ? 'Copied' : 'Copy invitation'}</button> : null}
+            <button type="button" className="btn" disabled={busy} onClick={addPeer}>{expired ? 'Create new invitation' : 'New invitation'}</button>
+            <button type="button" className="btn" disabled={busy} onClick={() => act(async () => { await api.cancelInvitation(created.invitationId); setCreated(null); })}>Cancel invitation</button>
+          </div>
+        </div>
+      ) : null}
+      <div className="dd-actions">
+        <input className="dd-input" aria-label="Paste invitation" placeholder="Paste an invitation from the other computer" autoComplete="off" spellCheck={false}
+          value={paste} onChange={(event) => setPaste(event.target.value)} disabled={unavailable} />
+        <button type="button" className="btn" disabled={busy || unavailable || !paste.trim()} onClick={joinPeer}>Join peer</button>
+      </div>
+      {sshGuideFor(error) ? <SshGuideCard guide={sshGuideFor(error)!} /> : error ? <p role="alert" className="dd-banner dd-banner-error">{error}</p> : null}
+      {items.length ? (
+        <ul className="dd-peers-list" aria-label="Pairing">
+          {items.map((item) => <InviteRow key={item.invitationId} item={item} busy={busy} canRenew={!unavailable}
+            onRenew={() => { setDismissed((current) => [...current, item.invitationId]); addPeer(); }}
+            onApprove={() => approve(item)}
+            onDeny={() => act(() => api.decideInvitation({ invitationId: item.invitationId, decision: 'denied' }))}
+            onCancel={() => act(() => api.cancelInvitation(item.invitationId))}
+            onDismiss={() => setDismissed((current) => [...current, item.invitationId])} />)}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
+function InviteRow({ item, busy, onApprove, onDeny, onCancel, onDismiss, onRenew, canRenew }: { item: InviteItem; busy: boolean; canRenew: boolean; onApprove(): void; onDeny(): void; onCancel(): void; onDismiss(): void; onRenew(): void }) {
+  const name = item.peer?.name ?? 'the other computer';
+  let text: string;
+  let blocked = false;
+  if (item.state === 'open') text = 'Pending: waiting for the other computer to paste the invitation.';
+  else if (item.state === 'redeeming') text = 'Pending: contacting the other computer.';
+  else if (item.state === 'reserved') text = item.awaitingMyApproval ? `Approve pairing with ${name}.` : `Awaiting the other owner's approval for ${name}.`;
+  else if (item.state === 'consented' || item.state === 'connecting') text = `Approved. Connecting to ${name}.`;
+  else if (item.state === 'ready') text = `Ready: paired with ${name}.`;
+  else { text = blockedText(item); blocked = true; }
+  const guide = blocked ? sshGuideFor(item.reason) : null;
+  if (guide) text = guide.title;
+  return (
+    <li className="dd-peers-member" data-state={item.state}>
+      <span className="dd-peers-member-name">
+        <span role={blocked ? 'alert' : 'status'}>{text}</span>
+        {item.state === 'reserved' && item.peer ? (
+          <span className="dd-peers-hint"> {item.peer.name} fingerprint <code>{item.peer.fingerprint}</code>. Confirm this matches the other machine's screen.
+            {item.awaitingMyApproval ? ' Approving allows Design Docs database sync with this peer only.' : ''}
+            {item.consentExpiresAt ? ` Approve by ${clockTime(item.consentExpiresAt)}.` : ''}</span>
+        ) : null}
+        {guide ? <ol className="dd-peers-hint">{guide.steps.map((step) => <li key={step}>{step}</li>)}</ol> : null}
+      </span>
+      <span className="dd-actions">
+        {item.awaitingMyApproval ? (
+          <>
+            <button type="button" className="btn primary" disabled={busy} onClick={onApprove}>Approve</button>
+            <button type="button" className="btn" disabled={busy} onClick={onDeny}>Deny</button>
+          </>
+        ) : null}
+        {item.state === 'open' || item.state === 'redeeming' || item.state === 'reserved' ? (
+          <button type="button" className="btn" disabled={busy} onClick={onCancel}>Cancel</button>
+        ) : null}
+        {renewable(item) ? <button type="button" className="btn primary" disabled={busy || !canRenew} onClick={onRenew}>Start new invitation</button> : null}
+        {TERMINAL.has(item.state) ? <button type="button" className="btn" onClick={onDismiss}>Dismiss</button> : null}
+      </span>
+    </li>
+  );
+}
+
+const isLiveLink = (link: PeerLink): boolean => link.phase !== 'removed' && link.phase !== 'failed';
+
+/**
+ * Per-peer transport status of this plugin's invitation-founded links (the host lists only links Design Docs uses), with
+ * the exact reason and a Reconnect action that re-keys the link.
+ */
+function PeerLinks({ links, names, busy, onReconnect }: { links: PeerLink[]; names: Map<string, string>; busy: boolean; onReconnect(peerId: string): void }) {
+  // One row per peer: the newest live link wins (an older ended invitation must not shadow it). A failed attempt (declined,
+  // replayed, expired before linking) never carried sync, so it is not a link to show.
+  const live = [...new Map(links.filter(isLiveLink).map((link) => [link.peerInstanceId, link])).values()];
+  if (!live.length) return null;
+  const label = (link: PeerLink) => names.get(link.peerInstanceId) ?? link.peerInstanceId;
+  const detail = (link: PeerLink) => link.reason ? ` (${LINK_REASON_TEXT[link.reason]})` : '';
+  return (
+    <>
+      {live.filter((link) => link.state === 'disconnected').map((link) => (
+        <p key={`notice-${link.pairingId}`} role="alert" className="dd-banner dd-banner-error">
+          Disconnected from {label(link)}{detail(link)}. Sync is paused and resumes when the link is back.
+        </p>
+      ))}
+      <ul className="dd-peers-list" aria-label="Peer links">
+        {live.map((link) => (
+          <li key={link.pairingId} className="dd-peers-member">
+            <span className="dd-peers-member-name">{label(link)}: {link.state === 'connected' ? 'Connected' : link.state === 'reconnecting' ? 'Reconnecting automatically...' : 'Disconnected'}{link.state === 'connected' ? '' : detail(link)}{link.reason === 'revoked' ? '. Add peer to pair again.' : ''}</span>
+            <span className="dd-actions">
+              {link.state !== 'connected' && link.reason !== 'revoked' ? (
+                <button type="button" className="btn" disabled={busy} onClick={() => onReconnect(link.peerInstanceId)}>Reconnect</button>
+              ) : null}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+}
+
+/**
+ * Database sync peers: pairing, group status, and lifecycle actions.
+ * Self-contained (no router), so it renders in the Peers view or on its own.
+ */
+export function PeerSettings({ requestApproval = experimental_requestApproval }: { requestApproval?: RequestApproval } = {}) {
+  const api = useApi();
+  const [status, setStatus] = useState<GroupStatus | null>(null);
+  const [invites, setInvites] = useState<InviteView | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [peerId, setPeerId] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [outOfSync, setOutOfSync] = useState(false);
+  const [dismissed, setDismissed] = useState(false);
+  const mounted = useMounted();
+  const inviteSeq = useRef(0);
+  // Latest request wins, and a failure keeps the last good view so the "host cannot invite" note and controls stay correct.
+  const loadInvites = useCallback(() => {
+    const seq = ++inviteSeq.current;
+    void api.inviteState().then((value) => { if (mounted.current && seq === inviteSeq.current) setInvites(value); }).catch(() => undefined);
+  }, [api, mounted]);
+  // Once every live pairing is reserved (waiting on an owner's approval) there is nothing to hurry: back off.
+  const waiting = !!invites?.invitations.length && invites.invitations.every((item) => TERMINAL.has(item.state) || item.state === 'reserved')
+    && invites.invitations.some((item) => item.state === 'reserved');
+  useEffect(() => {
+    let active = true;
+    const load = () => {
+      void api
+        .groupStatus()
+        .then((value) => { if (active) setStatus(value); })
+        .catch((failure) => { if (active) setError(errorMessage(failure)); });
+      loadInvites();
+    };
+    load();
+    const timer = setInterval(load, waiting ? INVITE_WAITING_POLL_MS : INVITE_POLL_MS);
+    return () => { active = false; clearInterval(timer); };
+  }, [api, waiting, loadInvites]);
+  const configured = !!status?.configured;
+  // Boolean only. A dismissed (Cancel) notice stays away until the sides converge once, so a later drift shows it again.
+  const checkDrift = useCallback((isActive: () => boolean = () => true) => {
+    void api.peersOutOfSync()
+      .then((value) => { if (!isActive()) return; setOutOfSync(value.outOfSync); if (!value.outOfSync) setDismissed(false); })
+      .catch(() => { if (isActive()) setOutOfSync(false); });
+  }, [api]);
+  useEffect(() => {
+    if (!configured) { setOutOfSync(false); setDismissed(false); return; }
+    let active = true;
+    const check = () => checkDrift(() => active);
+    check();
+    const timer = setInterval(check, 15000);
+    return () => { active = false; clearInterval(timer); };
+  }, [checkDrift, configured]);
+  // A paired peer finished a Sync Now: re-check right away instead of waiting for the next poll.
+  useRealtime(PEER_STATE_CHANNEL, () => { if (configured) checkDrift(); });
+  const run = (action: () => Promise<GroupStatus>) => {
+    setBusy(true);
+    setError(null);
+    void action().then((value) => { if (mounted.current) setStatus(value); }).catch((failure) => { if (mounted.current) setError(errorMessage(failure)); })
+      .finally(() => { if (mounted.current) setBusy(false); });
+  };
+  const syncNow = () => {
+    setBusy(true);
+    void api.syncNow()
+      .then((result) => { toast(result.blocked ? `Synced ${result.synced}/${result.attempted}; ${result.blocked} blocked` : `Synced ${result.synced} peers`); if (mounted.current) checkDrift(); })
+      .catch((failure) => { if (mounted.current) setError(errorMessage(failure)); })
+      .finally(() => { if (mounted.current) setBusy(false); });
+  };
+  const pendingJobs = status?.jobs.filter((job) => job.state !== 'done') ?? [];
+  const links = invites?.links ?? [];
+  const invited = new Set(links.filter(isLiveLink).map((link) => link.peerInstanceId));
+  // Invitation-founded peers enable themselves; the button is only for peers enrolled through the older Machines flow.
+  const legacy = status?.enrolled.filter((peer) => !invited.has(peer.id)) ?? [];
+  const names = new Map((status?.enrolled ?? []).map((peer) => [peer.id, peer.name]));
+  return (
+    <section className="dd-peers" aria-label="Database sync peers">
+      <p>Sync this entire Design Docs database with other Zana apps. Existing documents stay local until you use Sync.</p>
+      <InvitePanel invites={invites} onChanged={() => { loadInvites(); void api.groupStatus().then((value) => { if (mounted.current) setStatus(value); }).catch(() => undefined); }} requestApproval={requestApproval} />
+      {invites?.enableError ? <p role="alert" className="dd-banner dd-banner-error">{invites.enableError}</p> : null}
+      <PeerLinks links={links} names={names} busy={busy}
+        onReconnect={(id) => { setBusy(true); setError(null); void api.reconnectPeer(id).catch((failure) => { if (mounted.current) setError(errorMessage(failure)); }).finally(() => { if (mounted.current) { setBusy(false); loadInvites(); } }); }} />
+      {outOfSync && !dismissed ? (
+        <div className="dd-peers-block">
+          <p role="status">This database and a paired peer are out of sync.</p>
+          <div className="dd-actions">
+            <button type="button" className="btn primary" disabled={busy} onClick={syncNow}>Sync Now</button>
+            <button type="button" className="btn" disabled={busy} onClick={() => setDismissed(true)}>Cancel</button>
+          </div>
+        </div>
+      ) : null}
+      {sshGuideFor(error) ? <SshGuideCard guide={sshGuideFor(error)!} /> : error ? <p role="alert" className="dd-banner dd-banner-error">{error}</p> : null}
+      {status ? (
+        <>
+          <div className="dd-peers-block">
+            <p>{status.roster ? `Sync group: ${status.members.length} of 8 computers` : 'No sync group configured.'}</p>
+            {status.setup ? (
+              <p role="status">Setup {status.setup.state}: {status.setup.peerId}{status.setup.error ? `: ${status.setup.error}` : ''}</p>
+            ) : null}
+          </div>
+          {status.members.length ? (
+            <ul className="dd-peers-list" aria-label="Members">
+              {status.members.map((member) => (
+                <li key={member.replicaId} className="dd-peers-member">
+                  <span className="dd-peers-member-name">{member.machineId}: {memberState(member)}</span>
+                  <span className="dd-actions">
+                    {member.replicaId !== status.replicaId ? (
+                      <button type="button" className="btn" disabled={busy || !status.lifecycleAvailable}
+                        onClick={() => { if (window.confirm('Disable this local database link? Group membership is unchanged.')) run(() => api.revokePeer(member.machineId)); }}>
+                        Disable Link
+                      </button>
+                    ) : null}
+                    {status.configured ? (
+                      <button type="button" className="btn" disabled={busy || !status.lifecycleAvailable || status.members.length <= 2 || member.retiring}
+                        onClick={() => { if (window.confirm('Remove this member? Syncing with them stops on this computer now. If they are offline, removal finishes when they reconnect.')) run(() => api.removePeer(member.replicaId)); }}>
+                        {member.replicaId === status.replicaId ? 'Leave Group' : 'Remove Member'}
+                      </button>
+                    ) : null}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {pendingJobs.length ? (
+            <ul className="dd-peers-list" aria-label="Pending work">
+              {pendingJobs.map((job) => <li key={job.id}>{job.peerId}: {job.state}{job.error ? `: ${job.error}` : ''}</li>)}
+            </ul>
+          ) : null}
+          {legacy.length ? (
+            <label className="dd-field-inline">
+              Enrolled peer
+              <select className="dd-input dd-select" aria-label="Enrolled peer" value={peerId} onChange={(event) => setPeerId(event.target.value)}>
+                <option value="">Choose one peer</option>
+                {legacy.map((peer) => (
+                  <option key={peer.id} value={peer.id} disabled={!peer.connected}>{peer.name}{peer.connected ? '' : ' - offline'}</option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+          {!status.lifecycleAvailable ? (
+            <p className="dd-peers-hint">Database sync cannot start on this app yet: Core peer lifecycle needs protected key storage. Pairing and Enable Database Sync stay off until it is ready.</p>
+          ) : !status.introductionsAvailable ? (
+            <p className="dd-peers-hint">Automatic introductions are unavailable on this app, so new members are not introduced to the rest of the group.</p>
+          ) : null}
+        </>
+      ) : error ? null : <Spinner label="Loading peers" />}
+      <div className="dd-actions">
+        {status ? (
+          <>
+            {legacy.length ? (
+              <button type="button" className="btn primary" disabled={busy || !peerId || !status.lifecycleAvailable} onClick={() => run(() => api.enablePeer(peerId))}>Enable Database Sync</button>
+            ) : null}
+          </>
+        ) : null}
+      </div>
+    </section>
+  );
+}

@@ -149,6 +149,20 @@ describe('PluginService', () => {
     await expect(service.callRpc('evolving', 'ping', {})).resolves.toMatchObject({ ok: true });
   });
 
+  it('surfaces the manifest peers capability on the renderer snapshot only when declared', async () => {
+    const dataDir = root();
+    const peerDir = writePlugin(join(root(), 'peerful'), 'peerful', undefined, { peers: true });
+    const plainDir = writePlugin(join(root(), 'plain'), 'plain');
+    const service = createPluginService({ dataDir, bundledRoot: root() });
+    await service.install(peerDir);
+    await service.install(plainDir);
+    const rows = service.snapshot();
+    expect(rows.find((row) => row.id === 'peerful')?.peers).toBe(true);
+    expect(rows.find((row) => row.id === 'plain')?.peers).toBe(false);
+    expect(toPluginAppSnapshot(rows.find((row) => row.id === 'peerful')!)).toMatchObject({ peers: true });
+    expect(toPluginAppSnapshot(rows.find((row) => row.id === 'plain')!)).not.toHaveProperty('peers');
+  });
+
   it('rebuilds a stale frontend on direct reload and keeps the generation on failure', async () => {
     const pluginDir = writePlugin(join(root(), 'freshness'), 'freshness', undefined, { app: './app.tsx' });
     const service = createPluginService({ dataDir: root(), bundledRoot: root() });
