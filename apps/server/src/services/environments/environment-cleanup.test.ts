@@ -409,6 +409,15 @@ describe('environment retire grace period', () => {
     expect(destroys()).toHaveLength(0);
   });
 
+  it('ignores a session or thread without an environment', async () => {
+    const { ctx, destroys } = retireContext();
+    scheduleEnvironmentRetire(ctx, null, 1_000);
+    scheduleEnvironmentRetire(ctx, undefined, 1_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(destroys()).toHaveLength(0);
+    expect(getEnvironment).not.toHaveBeenCalled();
+  });
+
   it('swallows a store failure when the timer fires', async () => {
     const { ctx, destroys } = retireContext();
     vi.mocked(getEnvironment).mockImplementation(() => {

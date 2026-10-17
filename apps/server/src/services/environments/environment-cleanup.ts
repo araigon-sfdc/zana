@@ -91,9 +91,10 @@ const retireTimers = new WeakMap<object, Map<string, ReturnType<typeof setTimeou
 
 export function scheduleEnvironmentRetire(
   ctx: ProductHttpContext,
-  environmentId: string,
+  environmentId: string | null | undefined,
   delayMs = ENVIRONMENT_RETIRE_GRACE_MS
 ): void {
+  if (!environmentId) return;
   let timers = retireTimers.get(ctx.db);
   if (!timers) {
     timers = new Map();
@@ -176,6 +177,6 @@ export async function archiveThread(ctx: ProductHttpContext, threadId: string): 
   } catch {
     // Host may already have dropped the PTY (exit, disconnect). Archive anyway.
   }
-  if (thread.environmentId) scheduleEnvironmentRetire(ctx, thread.environmentId);
+  scheduleEnvironmentRetire(ctx, thread.environmentId);
   return true;
 }

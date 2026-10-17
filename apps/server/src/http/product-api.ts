@@ -3591,9 +3591,7 @@ export async function handleProductHttp(
         session.finishedAt = Date.now();
         ctx.terminalSessions.set(session.id, session);
         ctx.hub.emit('terminals:updated', publicTerminal(session));
-        if (session.workspaceEnvironmentId) {
-          scheduleEnvironmentRetire(ctx, session.workspaceEnvironmentId);
-        }
+        scheduleEnvironmentRetire(ctx, session.workspaceEnvironmentId);
         sendJson(response, 200, { ok: true });
       } catch (error) {
         sendHostFailure(response, error);
