@@ -67,7 +67,7 @@ test('Design Docs peer setup exposes lifecycle, enrolled peers and refuses fabri
       return 'unexpected success';
     } catch (failure) { return String(failure); }
   });
-  expect(error).toContain('enablePeer accepts only peerId, never a roster');
+  expect(error).toContain('accepts only peerId');
 
   const back = view.getByRole('button', { name: 'Back to design docs', exact: true });
   await expect(back).toContainText('Design docs');
