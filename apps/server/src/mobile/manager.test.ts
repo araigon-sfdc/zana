@@ -7,6 +7,9 @@ import { MobileDeviceStore } from './device-store.js';
 import type { startMobileGateway } from './gateway.js';
 import { MobileConnectionStore } from './connection.js';
 
+const defaultRelay = vi.hoisted(() => vi.fn(() => ({ state: () => 'connected', close: vi.fn() })));
+vi.mock('../../../../services/mobile-relay/client.mjs', async (orig) => ({ ...(await orig<object>()), connectRelay: defaultRelay }));
+
 const connectConfig = { mode: 'connect' as const, publicUrl: 'https://computer.example', relayToken: 'a'.repeat(43), accountUrl: 'https://account.example', serverId: 'computer-1' };
 function remoteManager(deps: MobileGatewayManagerDeps) {
   const store = new MobileConnectionStore(); void store.write(connectConfig);
@@ -166,6 +169,19 @@ describe('remote phone connection lifecycle', () => {
     state = 'connected'; await expect(manager.pair()).resolves.toEqual(code);
     expect(JSON.stringify(manager.status())).not.toContain('a'.repeat(43));
     await manager.stop(); expect(close).toHaveBeenCalledOnce();
+  });
+  it('opens the default Connect tunnel with this product instance identity', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'mobile-instance-'));
+    const startGateway = vi.fn(async () => fakeHandle());
+    const store = new MobileConnectionStore(); void store.write(connectConfig);
+    const manager = new MobileGatewayManager({ devices: new MobileDeviceStore(), connectionStore: store, upstream: 'http://127.0.0.1:8780', dataDir,
+      startGateway: startGateway as unknown as typeof startMobileGateway });
+    try {
+      await manager.start();
+      const instanceId = (startGateway.mock.calls[0] as unknown as [{ connectInstanceId: string }])[0].connectInstanceId;
+      expect(instanceId).toEqual(expect.any(String));
+      expect(defaultRelay).toHaveBeenCalledWith(expect.objectContaining({ publicUrl: 'https://computer.example', productInstanceId: instanceId }));
+    } finally { await manager.close(); rmSync(dataDir, { recursive: true, force: true }); }
   });
   it('serializes start/stop', async () => {
     const handle = fakeHandle();
