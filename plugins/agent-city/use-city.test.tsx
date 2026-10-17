@@ -43,6 +43,13 @@ it('pauses offscreen and hidden animation, respects reduced motion, responds to 
   unmount(); expect(disconnect).toHaveBeenCalledTimes(3); expect(media.removeEventListener).toHaveBeenCalled(); expect(cancelAnimationFrame).toHaveBeenCalled();
   renderer.draw.mockClear(); act(() => { frame(300); resize(); }); expect(renderer.draw).not.toHaveBeenCalled();
 });
+it('shows reduced motion from the running loop when the media change event is deferred', () => {
+  setup(); render(<Harness/>);
+  act(() => frame(100)); expect(screen.getByText('motion')).toBeTruthy();
+  vi.mocked(requestAnimationFrame).mockClear();
+  act(() => { media.matches = true; frame(200); });
+  expect(screen.getByText('reduced')).toBeTruthy(); expect(requestAnimationFrame).not.toHaveBeenCalled();
+});
 it('reports unavailable canvas without creating observers or animation', () => {
   setup(); vi.mocked(createCityRenderer).mockReturnValueOnce(null); render(<Harness/>);
   expect(screen.getByText('unavailable')).toBeTruthy(); expect(requestAnimationFrame).not.toHaveBeenCalled();
