@@ -1,6 +1,9 @@
 import {
   cloneElement,
   Fragment,
+  useCallback,
+  useRef,
+  useState,
   useSyncExternalStore,
   type HTMLAttributes,
   type MouseEvent as ReactMouseEvent,
@@ -11,7 +14,7 @@ import {
 import { DndContext } from '@dnd-kit/core';
 import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { Link } from 'react-router-dom';
-import { Bug, Smartphone, Settings } from 'lucide-react';
+import { Bug, Ellipsis, Smartphone, Settings } from 'lucide-react';
 import { openBugReport } from '../lib/report-bug.js';
 import { useUi } from '../store.js';
 import { useRouteState } from '../hooks/useRouteState.js';
@@ -25,8 +28,10 @@ import { SidebarResizer } from './SidebarResizer.js';
 import {
   SortableNavItem,
   SortableSidebarSection,
+  PROJECT_NAV_ORDER_KEY,
   useSortableSidebarNav
 } from './sidebarSortable.js';
+import { SidebarNavigationPopup, type SidebarNavigationPopupState } from './sidebar/SidebarNavigationPopup.js';
 import { usePaneContentSplitDrag } from './sidebar/useThreadRowSplitDrag.js';
 import { usePaneContentSplitIndicator } from './sidebar/paneContentSplitIndicator.js';
 import { SplitPaneMiniMap } from './sidebar/SplitPaneMiniMap.js';
@@ -95,6 +100,16 @@ export function SidebarRail({
   const savedCollapsed = useUi((s) => s.sidebarCollapsed);
   const dismissMobileNav = useMobileNavDismiss();
   const collapsed = savedCollapsed && !dismissMobileNav;
+  const hiddenIds = useUi((s) => storageKey === PROJECT_NAV_ORDER_KEY ? s.projectSidebarNavHidden : s.sidebarNavHidden);
+  const hidden = new Set(hiddenIds ?? []);
+  const moreButton = useRef<HTMLButtonElement>(null);
+  const [popup, setPopup] = useState<SidebarNavigationPopupState | null>(null);
+  const [saveError, setSaveError] = useState(false);
+  const closePopup = useCallback(() => setPopup(null), []);
+  const saveHidden = (ids: string[], resetOrder?: string[]) => {
+    setSaveError(false);
+    void useUi.getState().setSidebarNavHidden(storageKey, ids, resetOrder).catch(() => setSaveError(true));
+  };
   const { nav, settingsTab } = useRouteState();
   const routeMemory = useAppSettingsRouteMemory();
   const footerActions = useSyncExternalStore(
@@ -103,6 +118,12 @@ export function SidebarRail({
     listSidebarFooterActions
   );
   const itemsById = new Map(items.map((item) => [item.id, item]));
+  const drag = useSortableSidebarNav(
+    storageKey,
+    items.map((item) => item.id),
+    pinnedIds,
+    trailingIds
+  );
   const {
     pinnedNavIds,
     sortableNavIds,
@@ -113,18 +134,25 @@ export function SidebarRail({
     onDragCancel,
     onDragEnd,
     consumeNavClick
-  } = useSortableSidebarNav(
-    storageKey,
-    items.map((item) => item.id),
-    pinnedIds,
-    trailingIds
-  );
+  } = drag;
+  const orderedIds = [...pinnedNavIds, ...sortableNavIds, ...trailingNavIds];
+  const rows = orderedIds.map((id) => itemsById.get(id)!).filter((item): item is SidebarRailRow => item.kind === 'row');
+  const hiddenRows = rows.filter((row) => hidden.has(row.id));
+  const visibleIds = (ids: readonly string[]) => ids.filter((id) => itemsById.get(id)?.kind === 'section' || !hidden.has(id));
+  const openContextMenu = (event: ReactMouseEvent<HTMLElement>) => {
+    const target = event.target as HTMLElement;
+    const row = target.closest<HTMLElement>('[data-sidebar-nav-id]');
+    if (!row && target.closest('.sidebar-section-sortable')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setPopup({ kind: 'context', itemId: row?.dataset.sidebarNavId, x: event.clientX, y: event.clientY });
+  };
 
   const onNavigate = (event: { preventDefault: () => void }) => {
     if (consumeNavClick()) event.preventDefault();
   };
 
-  const renderItem = (id: string, sortable: boolean) => {
+  const renderItem = (id: string, sortable: boolean, inMenu = false) => {
     const item = itemsById.get(id);
     if (!item) return null;
     if (item.kind === 'section') {
@@ -148,7 +176,7 @@ export function SidebarRail({
         </SortableSidebarSection>
       );
     }
-    const row = item.splitContent && !dismissMobileNav ? (
+    const row = item.splitContent && !dismissMobileNav && !inMenu ? (
       <SplitEnabledNavRow
         item={item}
         collapsed={collapsed}
@@ -159,7 +187,7 @@ export function SidebarRail({
         label={item.label}
         icon={item.icon}
         active={item.active}
-        collapsed={collapsed}
+        collapsed={inMenu ? false : collapsed}
         title={item.title}
         testId={item.testId}
         badge={item.badge}
@@ -167,6 +195,8 @@ export function SidebarRail({
         to={item.to}
         disabled={item.disabled}
         disabledReason={item.disabledReason}
+        role={inMenu ? 'menuitem' : undefined}
+        data-sidebar-nav-id={item.id}
         onClick={(event) => {
           if (item.disabled) {
             event.preventDefault();
@@ -194,7 +224,7 @@ export function SidebarRail({
       {header}
       {dismissMobileNav ? (
         <MobileSidebarNav
-          items={[...pinnedNavIds, ...sortableNavIds, ...trailingNavIds].map((id) => itemsById.get(id)!)}
+          items={visibleIds(orderedIds).map((id) => itemsById.get(id)!)}
           navAriaLabel={navAriaLabel}
           renderItem={(id) => renderItem(id, false)}
         />
@@ -205,20 +235,47 @@ export function SidebarRail({
         onDragCancel={onDragCancel}
         onDragEnd={onDragEnd}
       >
-        <div className="sidebar-sections">
+        <div className="sidebar-sections" onContextMenu={openContextMenu}>
           <nav
             className="sidebar-nav sidebar-nav--sortable"
             aria-label={navAriaLabel}
             data-testid="sidebar-navigation"
+            onKeyDown={(event) => {
+              if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return;
+              const row = (event.target as HTMLElement).closest<HTMLElement>('[data-sidebar-nav-id]');
+              if (!row) return;
+              event.preventDefault();
+              const rect = row.getBoundingClientRect();
+              setPopup({ kind: 'context', itemId: row.dataset.sidebarNavId, x: rect.right, y: rect.top });
+            }}
           >
-            {pinnedNavIds.map((id) => renderItem(id, false))}
-            <SortableContext items={sortableNavIds} strategy={verticalListSortingStrategy}>
-              {sortableNavIds.map((id) => renderItem(id, true))}
+            {visibleIds(pinnedNavIds).map((id) => renderItem(id, false))}
+            <SortableContext items={visibleIds(sortableNavIds)} strategy={verticalListSortingStrategy}>
+              {visibleIds(sortableNavIds).map((id) => renderItem(id, true))}
             </SortableContext>
-            {trailingNavIds.map((id) => renderItem(id, false))}
+            {visibleIds(trailingNavIds).map((id) => renderItem(id, false))}
           </nav>
         </div>
       </DndContext>}
+      <div className="sidebar-navigation-tools">
+        <button ref={moreButton} type="button" className={`nav-item sidebar-navigation-more${hiddenRows.some((row) => row.active) ? ' active' : ''}`}
+          aria-label="More" title="More" aria-haspopup="menu" aria-expanded={popup !== null}
+          onClick={() => {
+            if (popup) { closePopup(); return; }
+            const rect = moreButton.current!.getBoundingClientRect();
+            setPopup({ kind: 'more', x: rect.right + 4, y: rect.top });
+          }}>
+          <span className="nav-item-icon"><Ellipsis size={16} aria-hidden="true" /></span>
+          <span className="nav-item-label">More</span>
+        </button>
+        {saveError && <span role="alert" className="sidebar-navigation-error">Couldn’t save sidebar visibility. Try again.</span>}
+      </div>
+      {popup && <SidebarNavigationPopup popup={popup} rows={rows} hidden={hidden} pinnedIds={pinnedIds} drag={drag}
+        returnFocus={moreButton} onClose={closePopup}
+        onCustomize={() => setPopup({ ...popup, kind: 'customize' })}
+        onVisibleChange={(id, visible) => saveHidden(visible ? (hiddenIds ?? []).filter((key) => key !== id) : [...(hiddenIds ?? []), id])}
+        onReset={() => saveHidden([], items.map((item) => item.id))}
+        renderHiddenItem={(id) => renderItem(id, false, true)} />}
       <div className="sidebar-utility-bar" aria-label="Sidebar utilities">
         {utilityStart}
         <Link
@@ -307,6 +364,7 @@ function SplitEnabledNavRow({
   return (
     <SidebarNavRow
       {...sortableRest}
+      data-sidebar-nav-id={item.id}
       label={item.label}
       icon={item.icon}
       active={item.active}

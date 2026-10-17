@@ -552,6 +552,9 @@ interface UiState {
   sidebarNavOrder: unknown;
   projectSidebarNavOrder: unknown;
   setSidebarNavOrder: (storageKey: string, order: string[]) => void;
+  sidebarNavHidden: string[];
+  projectSidebarNavHidden: string[];
+  setSidebarNavHidden: (storageKey: string, ids: string[], resetOrder?: string[]) => Promise<void>;
   setNav: (n: NavId) => void;
   /** Cross-panel deep-link prefilter: a Plugin row's "4 skills" chip writes
    *  `catalogueFilter.skills = pluginName`, then navs to skills. The skills
@@ -1088,6 +1091,23 @@ export const useUi = create<UiState>((set, get) => ({
     }),
   sidebarNavOrder: readStoredNavOrder('zcc.sidebarNavOrder'),
   projectSidebarNavOrder: readStoredNavOrder('zcc.projectSidebarNavOrder'),
+  sidebarNavHidden: [],
+  projectSidebarNavHidden: [],
+  setSidebarNavHidden: async (storageKey, ids, resetOrder) => {
+    const key = storageKey === 'zcc.projectSidebarNavOrder' ? 'projectSidebarNavHidden' : 'sidebarNavHidden';
+    const orderKey = storageKey === 'zcc.projectSidebarNavOrder' ? 'projectSidebarNavOrder' : 'sidebarNavOrder';
+    const previous = get()[key];
+    const previousOrder = get()[orderKey];
+    const patch = { [key]: ids, ...(resetOrder ? { [orderKey]: resetOrder } : {}) };
+    set(patch);
+    try {
+      await product.config.set(patch);
+    } catch (error) {
+      if (get()[key] === ids) set({ [key]: previous });
+      if (resetOrder && get()[orderKey] === resetOrder) set({ [orderKey]: previousOrder });
+      throw error;
+    }
+  },
   setSidebarNavOrder: (storageKey, order) => {
     if (storageKey === 'zcc.projectSidebarNavOrder') {
       persistSidebarChrome({ projectSidebarNavOrder: order });
@@ -1989,7 +2009,9 @@ function applySidebarChrome(config: AppConfig) {
     hideSchedulelessProjects: config.hideSchedulelessProjects === true,
     collapsedSections: config.collapsedSections ?? {},
     sidebarNavOrder: config.sidebarNavOrder ?? null,
-    projectSidebarNavOrder: config.projectSidebarNavOrder ?? null
+    projectSidebarNavOrder: config.projectSidebarNavOrder ?? null,
+    sidebarNavHidden: config.sidebarNavHidden ?? [],
+    projectSidebarNavHidden: config.projectSidebarNavHidden ?? []
   });
 }
 

@@ -869,6 +869,12 @@ export function normalizeConfig(input: Partial<AppConfig>): Partial<AppConfig> {
     const order = normalizeNavOrder(input.projectSidebarNavOrder);
     if (order) normalized.projectSidebarNavOrder = order;
   }
+  for (const key of ['sidebarNavHidden', 'projectSidebarNavHidden'] as const) {
+    if (key in input) {
+      const ids = normalizeNavOrder(input[key]);
+      if (ids) normalized[key] = ids;
+    }
+  }
   if (typeof input.sidebarWidth === 'number' && Number.isFinite(input.sidebarWidth)) {
     normalized.sidebarWidth = Math.max(256, Math.min(480, Math.round(input.sidebarWidth)));
   }
