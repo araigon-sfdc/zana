@@ -6,6 +6,7 @@ import { MobileConnectionStore, validateMobileConnection as validate } from './c
 
 const dirs: string[] = [];
 const token = 'x'.repeat(43);
+const connect = { mode: 'connect', publicUrl: 'https://one.connect.example', accountUrl: 'https://account.example', serverId: 'computer-1', relayToken: token };
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 function path() { const dir = mkdtempSync(join(tmpdir(), 'mobile-settings-')); dirs.push(dir); return join(dir, 'connection.json'); }
 describe('phone connection configuration', () => {
@@ -14,8 +15,18 @@ describe('phone connection configuration', () => {
     expect(() => validate({ mode: 'local', publicUrl: 'bad', relayToken: token })).toThrow('Local-network');
     expect(new MobileConnectionStore(path()).read()).toEqual({ mode: 'unconfigured' });
   });
-  it('accepts relay HTTPS origins', () => {
-    expect(validate({ mode: 'relay', publicUrl: 'https://example.herokuapp.com', relayToken: token })).toMatchObject({ mode: 'relay', relayToken: token });
+  it('accepts Connect enrollments with HTTPS origins', () => {
+    expect(validate({ ...connect, publicUrl: 'https://one.connect.example/' })).toEqual(connect);
+  });
+  it('rejects the retired Heroku relay and loads a saved relay connection as unconfigured', async () => {
+    expect(() => validate({ mode: 'relay', publicUrl: 'https://example.herokuapp.com', relayToken: token })).toThrow('Sign in to Zana Connect');
+    const file = path();
+    const legacy = JSON.stringify({ mode: 'relay', publicUrl: 'https://example.herokuapp.com', relayToken: token });
+    writeFileSync(file, legacy);
+    const store = new MobileConnectionStore(file);
+    expect(store.read()).toEqual({ mode: 'unconfigured' });
+    expect(store.view()).toEqual({ mode: 'unconfigured', hasRelayToken: false });
+    expect(JSON.stringify(store.view())).not.toContain(token);
   });
   it.each(['tailscale', 'local'])('rejects removed %s configurations without rewriting them or revealing the old address', async mode => {
     const file = path();
@@ -26,25 +37,21 @@ describe('phone connection configuration', () => {
     expect(() => store.read()).toThrow('connections are no longer supported');
     expect(() => store.view()).toThrow('Open Remote access');
     expect(readFileSync(file, 'utf8')).toBe(legacy);
-    await store.write(validate({ mode: 'unconfigured' }, undefined, true));
+    await store.write(validate({ mode: 'unconfigured' }));
     expect(new MobileConnectionStore(file).view()).toEqual({ mode: 'unconfigured', hasRelayToken: false });
   });
-  it.each([null, {}, { mode: 'unknown' }, { mode: 'relay' }, { mode: 'relay', publicUrl: `https://${'a'.repeat(2048)}` }, { mode: 'relay', publicUrl: 'not a url' },
+  it.each([null, {}, { mode: 'unknown' }, { mode: 'relay' }, { mode: 'connect' }, { ...connect, publicUrl: `https://${'a'.repeat(2048)}` }, { ...connect, publicUrl: 'not a url' },
     { mode: 'tailscale', publicUrl: 'https://private-machine.example' },
-    ...['http://example.test', 'https://user:pass@example.test', 'https://example.test/path', 'https://example.test?q=x', 'https://example.test#x'].map(publicUrl => ({ mode: 'relay', publicUrl, relayToken: token })),
-    { mode: 'relay', publicUrl: 'https://example.test', relayToken: 'short' }])('rejects malformed or unsafe configuration %#', input => { expect(() => validate(input)).toThrow(); });
-  it('only reuses a saved secret for the same relay origin', () => {
-    const previous = validate({ mode: 'relay', publicUrl: 'https://one.test', relayToken: token });
-    expect(validate({ mode: 'relay', publicUrl: 'https://one.test', relayToken: '' }, previous).relayToken).toBe(token);
-    expect(() => validate({ mode: 'relay', publicUrl: 'https://two.test' }, previous)).toThrow(/secret/);
-  });
+    ...['http://example.test', 'https://user:pass@example.test', 'https://example.test/path', 'https://example.test?q=x', 'https://example.test#x'].map(publicUrl => ({ ...connect, publicUrl })),
+    { ...connect, accountUrl: 'http://account.example' }, { ...connect, accountUrl: 'https://account.example/path' },
+    { ...connect, serverId: 'bad id' }, { ...connect, relayToken: 'short' }])('rejects malformed or unsafe configuration %#', input => { expect(() => validate(input)).toThrow(); });
   it('persists privately and never returns the secret in its public view', async () => {
     const file = path(); const store = new MobileConnectionStore(file);
-    await store.write(validate({ mode: 'relay', publicUrl: 'https://one.test', relayToken: token }));
+    await store.write(validate(connect));
     expect(statSync(file).mode & 0o777).toBe(0o600);
     expect(JSON.parse(readFileSync(file, 'utf8')).relayToken).toBe(token);
     expect(JSON.stringify(store.view())).not.toContain(token);
-    expect(new MobileConnectionStore(file).view()).toEqual({ mode: 'relay', publicUrl: 'https://one.test', hasRelayToken: true });
+    expect(new MobileConnectionStore(file).view()).toEqual({ mode: 'connect', publicUrl: 'https://one.connect.example', hasRelayToken: true, accountUrl: 'https://account.example' });
     await store.write({ mode: 'unconfigured' }); expect(new MobileConnectionStore(file).view().hasRelayToken).toBe(false);
   });
   it('reports malformed and oversized private files without echoing their contents', () => {

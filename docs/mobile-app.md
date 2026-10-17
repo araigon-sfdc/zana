@@ -54,49 +54,7 @@ The native app sends credentials only to validated HTTPS Connect gateway hosts. 
 
 ### Previously saved connections
 
-Desktop settings saved with Local network or Tailscale stay offline with a migration message. Disconnecting an account leaves the computer unconfigured and stops its gateway. It cannot fall back to a LAN listener.
-
-Native saved profiles are retained so users can identify and forget them. Legacy local, direct and manually paired profiles cannot open a WebView or create a session. Sign in with GitHub to discover the account's computers and reconnect. No migration deletes app data or silently sends old credentials to another origin.
-
-### Legacy relay development utility
-
-`pnpm mobile:serve` remains a backend compatibility utility for the older one-computer HTTPS relay. It requires `--connection relay`, an HTTPS `--public-url` and `MOBILE_RELAY_TOKEN` supplied securely in the environment. It refuses LAN binding and Local network mode. Its pairing output is for older clients and backend tests; the current native app uses account sign-in instead. See [the relay service guide](../services/mobile-relay/README.md).
-
-Heroku terminates HTTPS and is a trusted operator, not an end-to-end encrypted transport. Agents and files stay on the computer. Local tests do not establish a live Heroku deployment or physical-phone internet access.
-
-## Retired connection methods (historical)
-
-The following records the retired connection setup for older builds. Current Settings → Mobile uses the browser flow above; Local network, Tailscale and native QR pairing are no longer offered. Older desktop builds offered three paths under **Settings → Phone → Connection method**. Saving a method restarted only the phone gateway if enabled and cleared the displayed pairing QR without restarting desktop agents. Phone access was off by default.
-
-| Method | Setup | Reachability |
-| --- | --- | --- |
-| Local network (default) | Enable phone access and scan the QR on the same trusted Wi-Fi | Current private LAN address |
-| Tailscale | Install/sign in on both devices; configure Serve; save its HTTPS `.ts.net` origin | Your private Tailscale network, including across Wi-Fi/mobile data |
-| Heroku relay | Deploy `services/mobile-relay`; save the app's HTTPS origin and relay secret | Internet access without a phone VPN; the computer maintains an outbound tunnel |
-
-All methods use the same one-use QR pairing and revocable phone credentials. Tailscale and relay keep the gateway bound to `127.0.0.1`; the underlying product server remains loopback-only. The connection secret is saved in a main-owned, atomically replaced `0600` file under the desktop data directory (`mobile/connection.json`), never in the renderer's AppConfig or status response. Changing to a different method/address requires connecting the phone to that address with a fresh QR. Existing profiles remain available; automatic selection between multiple origins is not implemented.
-
-### Tailscale
-
-After checking existing Serve mappings, configure a dedicated HTTPS endpoint:
-
-```sh
-tailscale serve --bg --https=443 http://127.0.0.1:8785
-```
-
-Paste its exact `https://computer.network.ts.net` URL into Phone settings, save, enable access, and scan the QR. HTTPS must be enabled in the tailnet. If port 443 is already used by another Serve service, choose another supported HTTPS port and include it in the URL. Zana does not run or reset Tailscale commands automatically.
-
-CLI equivalent: `pnpm mobile:serve --connection tailscale --public-url https://computer.network.ts.net` (use an alternate `--upstream` when necessary). The same profile works on changing networks while Tailscale is connected.
-
-### Heroku relay
-
-Use [the existing website Docker app](../website/README.md#mobile-relay-in-this-docker-app), or see [the standalone relay deployment guide](../services/mobile-relay/README.md) for a separate service. The initial deployment supports **one computer and one always-on web dyno per Heroku app**. The relay operator is trusted: HTTPS terminates there, so this is not end-to-end encryption. Pairing and session storage stay on the computer; Heroku's ephemeral filesystem needs no database.
-
-The tunnel sends heartbeats, uses bounded transfer buffers, and reconnects after relay/dyno restarts. A relay restart preserves the desktop gateway's sessions. Interrupted actions fail without automatic replay, preventing a transport retry from duplicating sends. A desktop restart preserves paired devices; the phone renews its session through Reload/foreground renewal.
-
-CLI equivalent: set `MOBILE_RELAY_TOKEN` securely in the environment, then run `pnpm mobile:serve --connection relay --public-url https://your-assigned-app.herokuapp.com`. Never put the secret in a URL or command-line argument. The relay server also needs that secret and `MOBILE_RELAY_PUBLIC_URL`; it listens on Heroku's `$PORT`.
-
-Both remote methods still require the computer to be awake and Zana to be running. This feature does not move agents or files to Heroku. Real Tailscale account setup and live Heroku deployment are separate from the local automated verification.
+Desktop connections saved with Local network or Tailscale stay offline with a migration message. A saved Heroku relay connection loads as unconfigured. In both cases, sign in to Zana Connect in **Settings → Remote access** to reconnect. Native profiles from older builds stay listed so they can be forgotten, but cannot open a session; sign in with GitHub to reconnect.
 
 ## Notifications and device features
 
@@ -119,7 +77,7 @@ pnpm typecheck
 pnpm test:e2e -- e2e/mobile-shell.spec.ts e2e/sidebar-shell.spec.ts
 ```
 
-`e2e/phone-connect-account.spec.ts` verifies account enrollment, authenticated HTTP/WebSocket traffic, live readiness and revocation against the built Electron app and an isolated HTTPS service. `e2e/phone-network-connections.spec.ts` rejects LAN configuration and verifies the retained relay transport binds only to loopback. `e2e/phone-settings-pairing.spec.ts` checks the coming-soon notice and the mobile browser guide’s link to Remote access.
+`e2e/phone-connect-account.spec.ts` verifies account enrollment, authenticated HTTP/WebSocket traffic, live readiness and revocation against the built Electron app and an isolated HTTPS service. `e2e/phone-network-connections.spec.ts` checks that Settings offers only Zana Connect and that a saved Heroku relay connection stays offline without exposing its secret. `e2e/phone-settings-pairing.spec.ts` checks the coming-soon notice and the mobile browser guide’s link to Remote access.
 
 `e2e/mobile-shell.spec.ts` uses a test-only loopback gateway to verify the shared renderer at phone sizes, sends a deterministic fake-provider message and checks navigation and revocation. This browser fixture does not provide a native direct-connection mode. `e2e/mobile-views.spec.ts` checks the main views at 320, 390 and 820 pixels. Gateway integration tests use real HTTP and WebSocket sockets.
 

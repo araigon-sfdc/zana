@@ -428,7 +428,6 @@ const api: CcApi = {
     disconnectAccount: () => ipcRenderer.invoke(IPC.mobile.disconnectAccount),
     browserAddress: () => ipcRenderer.invoke(IPC.mobile.browserAddress),
     redeemComputerCode: (address, code) => ipcRenderer.invoke(IPC.mobile.redeemComputerCode, address, code),
-    configure: (input) => ipcRenderer.invoke(IPC.mobile.configure, input),
     status: () => ipcRenderer.invoke(IPC.mobile.status),
     pair: () => ipcRenderer.invoke(IPC.mobile.pair),
     devices: () => ipcRenderer.invoke(IPC.mobile.devices),

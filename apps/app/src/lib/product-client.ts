@@ -1425,7 +1425,6 @@ export const product: CcApi = new Proxy({} as CcApi, {
       if (hasDesktopBridge()) return (window.cc as unknown as CcApi).mobile;
       return {
         status: async () => ({ running: false, publicUrl: null, host: null, port: null, boundLan: false, error: null }),
-        configure: async () => { throw new Error('Configure phone connections in the desktop app'); },
         enroll: async () => { throw new Error('Connect this computer from the desktop app'); },
         pollEnrollment: async () => { throw new Error('Connect this computer from the desktop app'); },
         cancelEnrollment: async () => {},

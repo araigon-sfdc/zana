@@ -17,7 +17,7 @@ export function mobileRecoveryPrompt(context: {
   step: number; enabled: boolean; running: boolean; connectionMode: string;
   hasInvitation: boolean; hasLivePhone: boolean;
 }): string {
-  const mode = ['unconfigured', 'connect', 'relay'].includes(context.connectionMode) ? context.connectionMode : 'unknown';
+  const mode = ['unconfigured', 'connect'].includes(context.connectionMode) ? context.connectionMode : 'unknown';
   return `Help me finish Zana's guided phone setup. Diagnose the failed step and continue from the current state.
 
 Setup step: ${Math.min(4, Math.max(1, Math.trunc(context.step) || 1))}/4.

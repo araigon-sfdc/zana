@@ -120,8 +120,8 @@ managing the connection on the host computer.
 
 Local network and direct connections are retired. Old desktop configurations fail
 closed and old native profiles remain readable but cannot connect. Sign in with
-GitHub to reconnect. The older one-computer HTTPS relay remains an internal
-compatibility transport; it is not offered in the current phone onboarding UI.
+GitHub to reconnect. Saved connections to the retired one-computer Heroku relay
+load as unconfigured until the computer signs in to Zana Connect.
 
 ## Routing and authorization
 

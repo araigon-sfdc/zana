@@ -61,7 +61,6 @@ export const IPC = {
     disconnectAccount: 'mobile:disconnectAccount',
     browserAddress: 'mobile:browserAddress',
     redeemComputerCode: 'mobile:redeemComputerCode',
-    configure: 'mobile:configure',
     status: 'mobile:status',
     pair: 'mobile:pair',
     devices: 'mobile:devices',

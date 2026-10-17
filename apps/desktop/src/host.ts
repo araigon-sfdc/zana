@@ -2975,8 +2975,7 @@ let extensionsChangeDebounce: NodeJS.Timeout | null = null;
 let mcpServer: McpServerHandle | null = null;
 let controlPlane: ControlPlaneHandle | null = null;
 // Zana Mobile gateway — one instance (Rule 3): started/stopped from the config
-// reactor, closed on quit. File-backed device store shares the `mobile:serve`
-// CLI's path convention so devices paired either way are visible to both.
+// reactor, closed on quit.
 const mobileGateway = new MobileGatewayManager({
   dataDir: electronZccDataDir(),
   // Private E2E launches must not compete with the installed app's phone port.
@@ -8703,7 +8702,7 @@ async function bootstrapNormal() {
     })
     .catch((err) => logMainError('startMcpServer', err));
   // Start the Zana Mobile gateway if the user has enabled phone access. A start
-  // failure (e.g. port already held by `mobile:serve`) is recorded on the manager
+  // failure (e.g. port already held by another process) is recorded on the manager
   // and surfaced through `mobile:status`; it must never abort boot.
   if (store.getConfig().mobileGatewayEnabled === true) {
     mobileGateway.start().catch((err) => logMainError('mobileGateway.start', err));
