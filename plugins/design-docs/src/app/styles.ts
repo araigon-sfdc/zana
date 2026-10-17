@@ -282,7 +282,8 @@ export const DESIGN_DOCS_STYLES = `
   text-align: left;
   cursor: pointer;
 }
-.dd-menu-item:hover { background: var(--bg-hover); }
+.dd-menu-item:hover:not(:disabled) { background: var(--bg-hover); }
+.dd-menu-item:disabled { opacity: 0.45; cursor: default; }
 .dd-menu-item > svg { color: var(--text-muted); flex: 0 0 auto; }
 .dd-menu-label { flex: 1 1 auto; min-width: 0; }
 .dd-menu-hint { color: var(--text-dim); font-size: 11.5px; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

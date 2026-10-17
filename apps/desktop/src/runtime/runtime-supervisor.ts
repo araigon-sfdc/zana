@@ -1,5 +1,6 @@
 import type { CliDiscoveryRequest, CliDiscoveryResult } from '@zana-ai/zcc-contracts/cli-discovery';
 import type { CliCallbackControl } from '@zana-ai/zcc-contracts/cli-callbacks';
+import { rpcErrorFrom } from '@zana-ai/zcc-contracts/rpc-error';
 import type { ProjectFeedRequest, ProjectFeedResult } from '@zana-ai/zcc-contracts/project-feed';
 import type { LibraryAgentRequest } from '@zana-ai/zcc-contracts/library-agent';
 import type { ToolCallResponse } from '@zana-ai/zcc-domain/thread-runtime';
@@ -760,7 +761,7 @@ export function createUtilityRuntime(runtime: { child: UtilityChild; url: string
     pending.delete(parsed.data.id);
     clearTimeout(request.timer);
     if (parsed.data.type === 'result') request.resolve(parsed.data.value);
-    else request.reject(new Error(parsed.data.message));
+    else request.reject(rpcErrorFrom(parsed.data.message, parsed.data.code));
   });
   runtime.child.once('exit', () => {
     stopped = true;

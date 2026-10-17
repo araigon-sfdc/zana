@@ -521,17 +521,27 @@ export class DesignDocStore {
     return toSummary(this.requireRow(row.id));
   }
 
-  remove(ref: unknown): void {
+  /**
+   * Delete a doc with its files, history, comments and thread links. While paired, the `delete-doc` mutation
+   * (same transaction, after the rows are gone) records a sync tombstone that deletes it on paired computers too.
+   */
+  remove(ref: unknown, actor: DocActor = { kind: 'user', label: 'You', threadId: null }): void {
     const row = this.requireRow(ref);
+    // Without a sync observer no tombstone is recorded, so a paired delete would silently resurrect on the next sync.
+    if (!this.onMutation && this.isPaired()) throw new DesignDocError('conflict', 'Paired design docs cannot be deleted while sync capture is unavailable.');
     this.db.transaction(() => {
-      const paired = this.db.prepare(`SELECT repo_id FROM sync_repositories WHERE group_id IS NOT NULL AND roster_epoch > 0 LIMIT 1`).get();
-      if (paired) throw new DesignDocError('conflict', 'Paired design docs cannot be deleted. Archive instead.');
       this.db.prepare('UPDATE docs SET alternative_to = NULL WHERE alternative_to = ?').run(row.id);
-      for (const table of ['doc_files', 'doc_revisions', 'doc_comments', 'doc_threads']) {
+      for (const table of ['doc_files', 'doc_revisions', 'doc_comments', 'doc_threads', 'sync_doc_references', 'sync_history_order']) {
         this.db.prepare(`DELETE FROM ${table} WHERE doc_id = ?`).run(row.id);
       }
       this.db.prepare('DELETE FROM docs WHERE id = ?').run(row.id);
+      this.notifyMutation({ docId: row.id, kind: 'delete-doc', payload: { actor } });
     });
+  }
+
+  /** True when this database is in a sync group, so a delete also reaches paired computers. */
+  isPaired(): boolean {
+    return !!this.db.prepare('SELECT 1 FROM sync_repositories WHERE group_id IS NOT NULL AND roster_epoch > 0 LIMIT 1').get();
   }
 
   // ── Files ─────────────────────────────────────────────────────────────

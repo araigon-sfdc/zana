@@ -219,6 +219,19 @@ test('two fresh apps pair over a private sshd, sync both ways, heal a killed ssh
     const afterHeal = await rpc<{ id: string }>(b, 'create', { title: 'After heal', template: 'blank', status: 'approved' });
     await syncUntil(b, a, afterHeal.id);
 
+    step('delete on B reaches A');
+    await rpc(b, 'remove', { doc: fromA.id });
+    expect((await rpc<Array<{ id: string }>>(b, 'list')).some(doc => doc.id === fromA.id)).toBe(false);
+    await expect.poll(async () => {
+      await rpc(b, 'syncNow').catch(() => {}); await rpc(a, 'syncNow').catch(() => {});
+      return (await rpc<Array<{ id: string }>>(a, 'list')).some(doc => doc.id === fromA.id);
+    }, { message: 'paired delete propagates', timeout: 90_000 }).toBe(false);
+    await expect(rpc(a, 'readFile', { doc: fromA.id, path: 'note.md' })).rejects.toThrow(/not found/);
+    // Another round of sync must not bring it back from either side.
+    await rpc(a, 'syncNow').catch(() => {}); await rpc(b, 'syncNow').catch(() => {});
+    for (const app of [a, b]) expect((await rpc<Array<{ id: string }>>(app, 'list')).some(doc => doc.id === fromA.id)).toBe(false);
+    expect((await rpc<Array<{ id: string }>>(a, 'list')).some(doc => doc.id === afterHeal.id)).toBe(true);
+
     step('remove peer');
     const bId = (await liveLinks(a))[0]!.peerInstanceId;
     const region = await openPeers(a);

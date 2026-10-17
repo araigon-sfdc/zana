@@ -566,6 +566,18 @@ describe('file tree', () => {
     await waitFor(() => expect(opened.at(-1)).toEqual([null, true]));
     expect(harness.store.get(doc.id).files.map((file) => file.path)).toEqual(['README.md']);
     expect(await findPane('README.md')).toBeTruthy();
+
+    // The only file left cannot be deleted: the item is disabled and says why, and no RPC is sent.
+    const deletes = harness.rpcCalls.filter((call) => call.method === 'deleteFile').length;
+    await waitFor(() => expect(within(tree()).queryByRole('button', { name: /spec/ })).toBeNull());
+    rowMenu('README.md');
+    const last = screen.getByRole('menuitem', { name: 'Delete' }) as HTMLButtonElement;
+    expect(last.disabled).toBe(true);
+    expect(last.title).toBe('A design doc needs at least one file. Delete the doc instead.');
+    fireEvent.click(last);
+    expect(screen.queryByRole('dialog', { name: 'Delete file' })).toBeNull();
+    expect(harness.rpcCalls.filter((call) => call.method === 'deleteFile')).toHaveLength(deletes);
+    expect(harness.store.get(doc.id).files.map((file) => file.path)).toEqual(['README.md']);
   });
 
   it('warns before renaming or deleting the file with unsaved edits', async () => {

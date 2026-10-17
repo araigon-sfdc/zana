@@ -614,15 +614,34 @@ describe('immutable sync store', () => {
     for (const cursor of bad) expect(() => sync.operationsPage('repo-a', { cursor: cursor as never })).toThrow('operation cursor is invalid');
   });
 
-  it('rejects whole-document deletion centrally; unpaired deletion stays legal', () => {
+  it('records paired deletion as a scrubbed tombstone head; archive and unpaired deletion stay legal', () => {
     const paired = fixture(), unpaired = fixture(false);
-    const doc = paired.store.create({ title: 'Keep', template: 'blank' }, actor);
-    expect(() => paired.store.remove(doc.id)).toThrow('Archive');
-    expect(paired.store.find(doc.id)).not.toBeNull();
-    paired.store.update(doc.id, { status: 'archived', expectedHead: paired.sync.head('repo-a', doc.id) }, actor);
+    const archived = paired.store.create({ title: 'Archive me', template: 'blank' }, actor);
+    paired.store.update(archived.id, { status: 'archived', expectedHead: paired.sync.head('repo-a', archived.id) }, actor);
+    expect(paired.store.find(archived.id)!.status).toBe('archived');
+    const doc = paired.store.create({ title: 'Secret title', status: 'approved', template: 'blank' }, actor);
+    paired.store.addComment(doc.id, { body: 'private note' }, actor);
+    const before = paired.sync.head('repo-a', doc.id)!;
+    paired.store.remove(doc.id, actor);
+    expect(paired.store.find(doc.id)).toBeNull();
+    const head = paired.sync.head('repo-a', doc.id)!;
+    const tombstone = paired.sync.version('repo-a', head)!;
+    expect(tombstone.operation).toMatchObject({ kind: 'delete', parents: [before], origin: 'local-authoring' });
+    expect(tombstone.closure).toMatchObject({ files: [], history: [], comments: [], threads: [], deleted: { by: JSON.stringify(actor) } });
+    expect(JSON.stringify(tombstone.closure)).not.toContain('Secret title');
+    expect(JSON.stringify(tombstone.closure)).not.toContain('private note');
+    expect(paired.sync.readyIntents('repo-a').filter((intent) => intent.docId === doc.id).map((intent) => intent.frozenHead)).toEqual([head]);
+    for (const table of ['doc_files', 'doc_revisions', 'doc_comments', 'doc_threads', 'sync_doc_references', 'sync_history_order']) {
+      expect(paired.db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE doc_id = ?`).get(doc.id)).toEqual({ n: 0 });
+    }
+    // Re-recording the delete is idempotent: the head is already a tombstone.
+    paired.sync.recordLocalMutation({ docId: doc.id, kind: 'delete-doc', payload: { actor } });
+    expect(paired.sync.head('repo-a', doc.id)).toBe(head);
+    expect(() => paired.sync.recordLocalMutation({ docId: archived.id, kind: 'delete-doc', payload: { actor } })).toThrow();
     const local = unpaired.store.create({ title: 'Local', template: 'blank' }, actor);
     unpaired.store.remove(local.id);
     expect(unpaired.store.find(local.id)).toBeNull();
+    expect(unpaired.sync.head('repo-a', local.id)).toBeNull();
   });
 
   it('rejects op and sequence substitution; transactional bulk insertion rolls back', () => {

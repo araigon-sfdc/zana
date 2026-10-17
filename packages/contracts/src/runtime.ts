@@ -421,6 +421,8 @@ export const RuntimeErrorSchema = z.object({
   type: z.literal('error'),
   protocolVersion: ServerRuntimeProtocolVersionSchema,
   message: z.string().min(1),
+  /** Present when the failure is an expected domain error (see rpc-error.ts). */
+  code: z.string().min(1).max(64).optional(),
   id: RequestIdSchema.optional()
 }).strict();
 export const RuntimeStoppedSchema = z.object({

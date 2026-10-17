@@ -45,7 +45,7 @@ const handshakeSchema = z.object({ protocolVersion: z.number().int().min(PEER_MI
   senderReplicaId: id, recipientReplicaId: id, grantEpoch: z.number().int().positive().safe(),
   groupId: id, rosterEpoch: z.number().int().positive().safe(), rosterDigest: hash.optional() });
 const operationSchema = z.object({ id, replicaId: id, sequence: z.number().int().positive().safe(), docId: id,
-  parents: z.array(id).max(8), kind: z.literal('document'), payloadHash: hash,
+  parents: z.array(id).max(8), kind: z.enum(['document', 'delete']), payloadHash: hash,
   origin: z.enum(['local-authoring', 'inbound', 'bootstrap', 'import', 'restore-undo', 'maintenance']) }).strict();
 const headsSchema = z.record(id, id).refine((value) => Object.keys(value).length <= MAX_PEER_SESSION_OPERATIONS);
 const stubsSchema = z.array(operationSchema).min(1).max(MAX_PEER_PAGE_OPERATIONS);

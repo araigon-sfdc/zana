@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { Archive, ArchiveRestore, Copy, Download, FolderInput, FolderOpen, GitFork, Hash, Pin, PinOff, Trash2 } from 'lucide-react';
 import { designDocDirective, type DesignDocSummary } from '../shared/contract.js';
 import { copyText } from './clipboard.js';
@@ -117,6 +117,27 @@ export function AlternativeDialog({
   );
 }
 
+/**
+ * The delete confirmation. Sync state is read when the dialog opens so the copy matches what the server will do:
+ * in a sync group the delete reaches every paired computer.
+ */
+export function DeleteDocBody({ doc }: { doc: Pick<DesignDocSummary, 'title' | 'fileCount'> }) {
+  const api = useApi();
+  const [paired, setPaired] = useState(false);
+  useEffect(() => {
+    let active = true;
+    void api.peerStatus().then((status) => { if (active) setPaired(status.configured); }, () => undefined);
+    return () => { active = false; };
+  }, [api]);
+  return (
+    <>
+      Delete <strong>{doc.title}</strong> with its {doc.fileCount} file{doc.fileCount === 1 ? '' : 's'}, comments and history?
+      {paired ? ' It will also be deleted on your paired computers.' : null} This cannot be
+      undone. Archive it instead to keep it out of agents' way.
+    </>
+  );
+}
+
 async function copy(text: string, what: string) {
   if (await copyText(text)) toast(`Copied ${what}`);
   else toast(`Could not copy ${what}`, 'error');
@@ -196,31 +217,28 @@ export function useDocActions(projects: ProjectInfo[]): {
           icon={Trash2}
           label="Delete…"
           danger
-          onSelect={run(() =>
-            setConfirm({
-              title: 'Delete design doc',
-              body: (
-                <>
-                  Delete <strong>{doc.title}</strong> with its {doc.fileCount} file{doc.fileCount === 1 ? '' : 's'}, comments and history? This cannot be
-                  undone. Archive it instead to keep it out of agents' way.
-                </>
-              ),
-              confirmLabel: 'Delete',
-              danger: true,
-              run: async () => {
-                try {
-                  await api.remove(doc.id);
-                  toast(`Deleted “${doc.title}”`);
-                  onDeleted();
-                } catch (error) {
-                  toast(`Could not delete: ${errorMessage(error)}`, 'error');
-                }
-              }
-            })
-          )}
+          onSelect={run(() => askDelete(doc, onDeleted))}
         />
       </>
     );
+  };
+
+  const askDelete = (doc: DesignDocSummary, onDeleted: () => void) => {
+    setConfirm({
+      title: 'Delete design doc',
+      body: <DeleteDocBody doc={doc} />,
+      confirmLabel: 'Delete',
+      danger: true,
+      run: async () => {
+        try {
+          await api.remove(doc.id);
+          toast(`Deleted “${doc.title}”`);
+          onDeleted();
+        } catch (error) {
+          toast(`Could not delete: ${errorMessage(error)}`, 'error');
+        }
+      }
+    });
   };
 
   const dialogs = (

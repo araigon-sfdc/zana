@@ -8,6 +8,9 @@ import { errorMessage, toast, useApi } from './api.js';
 import { buildTree, type TreeNode } from './content.js';
 import { ConfirmDialog, FileIcon, IconButton, MenuItem, Popover, type ConfirmRequest } from './ui.js';
 
+/** Why the only file of a doc cannot be deleted; the server enforces the same rule. */
+export const LAST_FILE_REASON = 'A design doc needs at least one file. Delete the doc instead.';
+
 /** A sensible first draft for a new file, by type. */
 export function starterContent(path: string): string {
   const name = path.split('/').at(-1)!.replace(/\.[^.]+$/, '');
@@ -178,6 +181,7 @@ function FileRow({
           icon={Trash2}
           label="Delete"
           danger
+          disabledReason={doc.files.length <= 1 ? LAST_FILE_REASON : undefined}
           onSelect={() => {
             setMenu(false);
             onDelete(menuSnapshot.current.file);
@@ -287,7 +291,12 @@ export function FileTree({
     if (uploadRef.current) uploadRef.current.value = '';
   };
 
-  const askDelete = (file: DesignDocFileMeta) =>
+  const askDelete = (file: DesignDocFileMeta) => {
+    // The server refuses this too; never offer a request that can only be rejected.
+    if (doc.files.length <= 1) {
+      toast(LAST_FILE_REASON, 'error');
+      return;
+    }
     setConfirm({
       title: 'Delete file',
       body: (
@@ -307,6 +316,7 @@ export function FileTree({
         }
       }
     });
+  };
 
   const toggle = (path: string) =>
     setCollapsed((previous) => {

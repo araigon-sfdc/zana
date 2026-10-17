@@ -2,7 +2,7 @@ import type { PluginPeerRequest, PluginSdkPeers, ZccPluginApi } from '@zana-ai/z
 import { negotiateProtocol, validateAppliedReceipt, validateHandshake, validateSessionOffer, validateAncestryPage,
   validateTransfer, validateChunk, validateReceiptQuery, transferQuery, validateMissing, validateManualConsent,
   type PeerHandshake, type PeerSessionOffer, type PeerSessionExpectation, type PeerTransfer } from './peer-protocol.js';
-import { DesignDocSyncStore, type FrozenSyncIntent } from './sync-store.js';
+import { DesignDocSyncStore, delivered, type FrozenSyncIntent } from './sync-store.js';
 import { MAX_PEER_CHUNK_BYTES, PEER_CALL_TIMEOUT_MS, PEER_COMPACTION_BATCH, PEER_MIN_PROTOCOL_VERSION, PEER_PENDING_TICK_MS, PEER_PROTOCOL_VERSION } from '../shared/peer-limits.js';
 import { PeerProtocolError, type PeerAppliedReceipt } from '../shared/peer-contract.js';
 import type { DocActor, PeerResolutionChoice } from '../shared/contract.js';
@@ -231,7 +231,7 @@ export class DesignDocPeerService {
           throw new PeerProtocolError('invalid', 'authorization changed before receipt');
         }
         this.sync.acceptTransferReceipt(intent, transfer, applied);
-        if (applied.stage === 'synced') synced++; else { blocked++; this.sync.deferIntent(intent, applied.stage); }
+        if (delivered(applied.stage)) synced++; else { blocked++; this.sync.deferIntent(intent, applied.stage); }
       } catch (error) { blocked++; this.sync.deferIntent(intent, error instanceof Error ? error.message : 'peer delivery failed'); }
     }
     if (synced > 0) this.compactAfterSync();

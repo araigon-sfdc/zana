@@ -58,17 +58,28 @@ const closureSchema = z.object({
     summary: z.string().max(MAX_SUMMARY_LENGTH), status: z.string().refine(isDocStatus),
     project_id: id.nullable(), tags: z.array(z.string().max(MAX_TAG_LENGTH)).max(MAX_TAGS), entry_path: path,
     created_at: timestamp, updated_at: timestamp, created_by: actor, updated_by: actor }).strict(),
-  files: z.array(file).min(1).max(MAX_FILES_PER_DOC),
+  // A live doc needs its entry file (checked below); a deletion tombstone carries none.
+  files: z.array(file).max(MAX_FILES_PER_DOC),
   history: z.array(history).max(MAX_PEER_HISTORY_ROWS),
   comments: z.array(z.object({ id, path: path.nullable(), quote: z.string().max(MAX_QUOTE_LENGTH).nullable(),
     body: z.string().min(1).max(MAX_COMMENT_LENGTH), author: actor, status: z.enum(['open', 'resolved']),
     created_at: timestamp, resolved_at: timestamp.nullable(), parent_id: id.nullable() }).strict()).max(MAX_COMMENTS_PER_DOC),
   // Foreign references remain provenance, never local execution identities.
   threads: z.array(z.object({ thread_id: id, title: z.string().max(MAX_TITLE_LENGTH),
-    role: z.enum(['author', 'editor', 'reviewer', 'assistant']), last_activity_at: timestamp }).strict()).max(MAX_THREAD_LINKS_PER_DOC)
+    role: z.enum(['author', 'editor', 'reviewer', 'assistant']), last_activity_at: timestamp }).strict()).max(MAX_THREAD_LINKS_PER_DOC),
+  // Whole-document deletion: a scrubbed doc row and no files, history, comments or threads.
+  deleted: z.object({ at: timestamp, by: actor }).strict().optional()
 }).strict();
 
 export type PeerDocumentClosure = z.infer<typeof closureSchema>;
+
+/** A tombstone travels as an ordinary immutable version; its operation kind says so without the payload. */
+export const PEER_DELETE_KIND = 'delete';
+export const PEER_DOCUMENT_KIND = 'document';
+
+export function isDeletionClosure(closure: PeerDocumentClosure): boolean {
+  return closure.deleted !== undefined;
+}
 export interface PeerVersion { operation: PeerOperation; closure: PeerDocumentClosure }
 export interface PeerAppliedReceipt {
   sessionId: string; scopeHash: string; checkpointHash: string;
@@ -82,6 +93,12 @@ export function validateDocumentClosure(input: unknown): PeerDocumentClosure {
   const parsed = closureSchema.safeParse(input);
   if (!parsed.success) throw new PeerProtocolError('invalid', 'invalid document closure');
   const value = parsed.data;
+  if (value.deleted) {
+    if (value.files.length || value.history.length || value.comments.length || value.threads.length) {
+      throw new PeerProtocolError('invalid', 'deletion tombstone must not carry document content');
+    }
+    return value;
+  }
   for (const rows of [value.files, value.history]) {
     const identities = new Set<string>();
     for (const row of rows) {

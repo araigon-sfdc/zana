@@ -197,8 +197,9 @@ export function createPluginWorkerBridge(port: Port, side: 'server' | 'plugin', 
     for (const [key, item] of entries) result[key] = decode(item, depth + 1);
     return result;
   }
-  function errorValue(error: any) { return { message: error?.message ?? String(error), code: error?.code, name: error?.name }; }
-  function errorFrom(error: any): Error { return Object.assign(new Error(error.message), { code: error.code, name: error.name ?? 'Error' }); }
+  // `status` rides along (4xx only) so a thrown `{ status: 404 }` still classifies as an expected error host-side.
+  function errorValue(error: any) { return { message: error?.message ?? String(error), code: error?.code, name: error?.name, ...(typeof error?.status === 'number' ? { status: error.status } : {}) }; }
+  function errorFrom(error: any): Error { return Object.assign(new Error(error.message), { code: error.code, name: error.name ?? 'Error' }, typeof error.status === 'number' ? { status: error.status } : {}); }
   function releaseFunction(id: number) {
     const callback = functions.get(id);
     if (callback) functionIds.delete(callback);

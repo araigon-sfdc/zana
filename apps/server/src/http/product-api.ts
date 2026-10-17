@@ -3,6 +3,7 @@ import { normalizePortableAttachments } from '../services/projects/portable-atta
 import { withoutSecretValues } from '../plugins/plugin-settings-redaction.js';
 import { handlePreviewsApi } from './previews-api.js';
 import { libraryDocumentOperation } from '../services/library/library-documents.js';
+import { classifyExpectedRpcError } from '@zana-ai/zcc-contracts/rpc-error';
 import { LibraryDocumentRequestSchema, LIBRARY_DOCUMENT_BODY_LIMIT } from '@zana-ai/zcc-contracts/library-documents';
 import { recoverFailedTerminalStart } from './terminal-start-recovery.js';
 import { registerProductTerminal } from './terminal-retention.js';
@@ -279,6 +280,12 @@ async function handlePluginAppRpc(
   try {
     sendJson(response, 200, { value: await ctx.plugins.callRpc(id, body.method, body.args) });
   } catch (error) {
+    // Expected domain errors map to their own 4xx and carry `code`; the rest keep the legacy mapping.
+    const expected = classifyExpectedRpcError(error);
+    if (expected) {
+      sendJson(response, expected.status, { error: expected.message, code: expected.code });
+      return;
+    }
     const message = error instanceof Error ? error.message : String(error);
     sendJson(response, pluginAppErrorStatus(message), { error: message });
   }

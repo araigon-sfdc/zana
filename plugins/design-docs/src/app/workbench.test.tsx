@@ -666,6 +666,41 @@ describe('doc header', () => {
     expect(harness.toasts.at(-1)).toEqual({ message: 'Deleted “Lifecycle”', kind: 'info' });
   });
 
+  it('says a delete also reaches paired computers only while in a sync group', async () => {
+    for (const configured of [true, false]) {
+      const harness = createHarness({ rpcOverrides: { peerStatus: async () => ({ configured, members: [] }) } });
+      const doc = seed(harness.store, { title: `Synced ${configured}`, projectId: 'p1' });
+      const view = openInProjectTab(harness, doc.id);
+      await screen.findByTitle('Edit title');
+      fireEvent.click(screen.getByRole('button', { name: 'More actions' }));
+      fireEvent.click(menuItem('Delete…'));
+      const confirm = screen.getByRole('dialog', { name: 'Delete design doc' });
+      if (configured) await waitFor(() => expect(confirm.textContent).toContain('It will also be deleted on your paired computers.'));
+      else {
+        await waitFor(() => expect(harness.rpcCalls.some((call) => call.method === 'peerStatus')).toBe(true));
+        expect(confirm.textContent).not.toContain('paired computers');
+      }
+      expect(confirm.textContent).toContain('This cannot be undone');
+      fireEvent.click(within(confirm).getByRole('button', { name: 'Delete' }));
+      await waitFor(() => expect(harness.store.find(doc.id)).toBeNull());
+      view.unmount();
+    }
+  });
+
+  it('keeps the delete confirm usable when sync status cannot be read', async () => {
+    const harness = createHarness({ rpcOverrides: { peerStatus: async () => { throw new Error('offline'); } } });
+    const doc = seed(harness.store, { title: 'No status', projectId: 'p1' });
+    openInProjectTab(harness, doc.id);
+    await screen.findByTitle('Edit title');
+    fireEvent.click(screen.getByRole('button', { name: 'More actions' }));
+    fireEvent.click(menuItem('Delete…'));
+    const confirm = screen.getByRole('dialog', { name: 'Delete design doc' });
+    await waitFor(() => expect(harness.rpcCalls.some((call) => call.method === 'peerStatus')).toBe(true));
+    expect(confirm.textContent).not.toContain('paired computers');
+    fireEvent.click(within(confirm).getByRole('button', { name: 'Delete' }));
+    await waitFor(() => expect(harness.store.find(doc.id)).toBeNull());
+  });
+
   it('reports a failed delete and keeps the doc', async () => {
     const harness = createHarness();
     const doc = seed(harness.store, { title: 'Sticky', projectId: 'p1' });

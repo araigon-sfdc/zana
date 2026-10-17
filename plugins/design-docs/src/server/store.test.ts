@@ -183,15 +183,23 @@ describe('DesignDocStore peer mutation boundary', () => {
     expect(store.writeFile(doc.id, { path: moved.path, content: 'fresh', baseRevision: recreated.revision, baseFileId: recreated.fileId }, user).fileId).toBe(recreated.fileId);
   });
 
-  it('blocks paired removal even without an observer and rolls back failed capture', () => {
+  it('blocks paired removal without a sync observer and rolls back failed capture', () => {
     const db = createTestDatabase();
     const store = new DesignDocStore(db);
     const sync = new DesignDocSyncStore(db);
     sync.initialize('repo', 'replica-a');
+    expect(store.isPaired()).toBe(false);
     sync.setGroup('repo', 'group', ['a', 'b'].map((name) => ({ replicaId: `replica-${name}`, machineId: `machine-${name}`, sponsorReplicaId: null, joinedAt: 1 })));
+    expect(store.isPaired()).toBe(true);
     const doc = store.create({ title: 'Keep', template: 'blank' }, user);
-    expect(() => store.remove(doc.id)).toThrow('Archive');
+    expectError(() => store.remove(doc.id), 'conflict', /sync capture is unavailable/);
     expect(store.find(doc.id)).not.toBeNull();
+    const failing = createTestDatabase();
+    const capture = new DesignDocStore(failing, { onMutation: (mutation) => { if (mutation.kind === 'delete-doc') throw new Error('tombstone failed'); } });
+    const kept = capture.create({ title: 'Kept on failure', template: 'blank' }, user);
+    expect(() => capture.remove(kept.id)).toThrow('tombstone failed');
+    expect(capture.find(kept.id)).not.toBeNull();
+    expect(failing.prepare('SELECT COUNT(*) AS n FROM doc_files WHERE doc_id = ?').get(kept.id)).toEqual({ n: 1 });
     const other = createTestDatabase();
     const observed = new DesignDocStore(other, { onMutation: () => { throw new Error('capture failed'); } });
     expect(() => observed.create({ title: 'Rollback', status: 'approved', template: 'blank' }, user)).toThrow('capture failed');

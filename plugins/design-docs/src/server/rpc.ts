@@ -303,7 +303,7 @@ export function createRpcHandlers(deps: RpcDeps): Record<string, (args: unknown)
 
     remove: (raw) => {
       const doc = store.summary(requiredString(asInput(raw), 'doc'));
-      store.remove(doc.id);
+      store.remove(doc.id, UI_USER);
       changed(doc.id);
       return { ok: true };
     },

@@ -11,7 +11,8 @@ import {
   MAX_PEER_STORED_HISTORY_IDENTITIES,
   MAX_PEER_SESSION_BYTES, MAX_PEER_CHUNK_BYTES, MAX_PEER_STAGED_SESSIONS, MAX_PEER_SESSION_BLOBS,
    MAX_PEER_CLOSURE_BYTES, MAX_PEER_TRANSFER_BYTES, PEER_RETRY_MAX_MS, PEER_STAGE_IDLE_MS,
-  MAX_PEER_STORED_OPERATIONS, PEER_COMPACTION_BATCH, PEER_DELTA_PROTOCOL_VERSION, PEER_MIN_PROTOCOL_VERSION, PEER_PROTOCOL_VERSION
+  MAX_PEER_STORED_OPERATIONS, PEER_COMPACTION_BATCH, PEER_DELTA_PROTOCOL_VERSION, PEER_MIN_PROTOCOL_VERSION, PEER_PROTOCOL_VERSION,
+  MAX_PEER_TOMBSTONES
 } from '../shared/peer-limits.js';
 import {
   type PeerGroupMember,
@@ -20,7 +21,7 @@ import {
   type PeerReceiptStage,
   PeerProtocolError,
   validatePeerGroupMembers,
-  canonicalJson, canonicalPeerHash, validateDocumentClosure,
+  canonicalJson, canonicalPeerHash, validateDocumentClosure, isDeletionClosure, PEER_DELETE_KIND, PEER_DOCUMENT_KIND,
   type PeerDocumentClosure, type PeerVersion, type PeerAppliedReceipt
 } from '../shared/peer-contract.js';
 import { createCheckpointHash, createScopeHash, validateAppliedReceipt, validateOperation, validateSessionOffer,
@@ -35,7 +36,12 @@ import { mergeDocument, mergeHistory, type DocumentMergeResult } from './peer-me
 export interface SyncStoreOptions {
   now?: () => number;
   randomId?: () => string;
+  /** Tombstone head retention cap; tests lower it. */
+  maxTombstones?: number;
 }
+
+/** Store mutation kind for a whole-document delete; the doc rows are already gone when it is recorded. */
+export const DELETE_DOC_MUTATION = 'delete-doc';
 
 /** Opaque resume point; `upper` is the frontier frozen by the first page. */
 export interface OperationCursor {
@@ -75,10 +81,12 @@ export interface CompactionResult {
 export class DesignDocSyncStore {
   private readonly now: () => number;
   private readonly randomId: () => string;
+  private readonly maxTombstones: number;
 
   constructor(private readonly db: PluginDatabase, options: SyncStoreOptions = {}) {
     this.now = options.now ?? Date.now;
     this.randomId = options.randomId ?? randomUUID;
+    this.maxTombstones = options.maxTombstones ?? MAX_PEER_TOMBSTONES;
   }
 
   initialize(repoId: string, replicaId: string): void {
@@ -201,6 +209,11 @@ export class DesignDocSyncStore {
   recordLocalMutation(input: { docId: string; kind: string; payload: unknown; statusBefore?: string; statusAfter?: string; origin?: PeerOperationOrigin }): void {
     const local = this.localRepository();
     if (!local?.groupId || local.rosterEpoch < 1) return;
+    if (input.kind === DELETE_DOC_MUTATION) {
+      const by = (input.payload as { actor?: DocActor } | null)?.actor ?? { kind: 'user', label: 'You', threadId: null };
+      this.recordLocalDeletion(input.docId, by);
+      return;
+    }
     this.db.transaction(() => {
       const origin = input.origin ?? 'local-authoring';
       const closure = this.capture(input.docId);
@@ -212,7 +225,7 @@ export class DesignDocSyncStore {
       ).get(local.repoId, local.replicaId) as { sequence: number };
       const operation: PeerOperation = {
         id: this.randomId(), replicaId: local.replicaId, sequence: next.sequence, docId: input.docId, parents: parent ? [parent] : [],
-        kind: 'document', payloadHash, origin
+        kind: PEER_DOCUMENT_KIND, payloadHash, origin
       };
       this.saveVersion(local.repoId, { operation, closure });
       this.setHead(local.repoId, input.docId, operation.id);
@@ -222,6 +235,132 @@ export class DesignDocSyncStore {
         this.createFrozenIntents(local.repoId, input.docId, operation.id, payloadHash);
       }
     });
+  }
+
+  /**
+   * Whole-document deletion while paired. The store has already removed the doc rows in the same transaction.
+   * A tombstone version (scrubbed doc row, no content) becomes the head, its parents the current head plus every
+   * unresolved fork, so it causally covers everything this replica has seen. It replicates as an ordinary frozen
+   * change, but only to members that could hold the doc; a never-shared draft stays local.
+   */
+  recordLocalDeletion(docId: string, by: DocActor): string | null {
+    const local = this.localRepository();
+    if (!local?.groupId || local.rosterEpoch < 1) return null;
+    return this.db.transaction(() => {
+      if (this.db.prepare('SELECT 1 FROM docs WHERE id = ?').get(docId)) throw new PeerProtocolError('invalid', 'document still exists');
+      const head = this.head(local.repoId, docId);
+      // Never journaled while paired, so no peer can hold it: deleting is purely local.
+      if (!head) return null;
+      if (this.isDeletionHead(local.repoId, head)) return head;
+      const forks = this.db.prepare('SELECT DISTINCT remote_head FROM sync_conflicts WHERE repo_id = ? AND doc_id = ? LIMIT 9')
+        .all(local.repoId, docId) as Array<{ remote_head: string }>;
+      const parents = [...new Set([head, ...forks.map((fork) => fork.remote_head).filter((remote) => remote && this.operation(local.repoId, remote))])].sort();
+      if (parents.length > 8) throw new PeerProtocolError('conflict', 'resolve this design doc\'s sync conflicts before deleting it');
+      const shared = this.wasShared(local.repoId, local.replicaId, docId);
+      const at = this.now(), actor = canonicalJson(by);
+      const closure = validateDocumentClosure({
+        doc: { id: docId, slug: 'deleted', title: 'Deleted design doc', summary: '', status: 'archived', project_id: null, tags: [],
+          entry_path: 'README.md', created_at: at, updated_at: at, created_by: actor, updated_by: actor },
+        files: [], history: [], comments: [], threads: [], deleted: { at, by: actor }
+      });
+      const payloadHash = canonicalPeerHash(closure);
+      const next = this.db.prepare('SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence FROM sync_operations WHERE repo_id = ? AND replica_id = ?')
+        .get(local.repoId, local.replicaId) as { sequence: number };
+      const operation: PeerOperation = { id: this.randomId(), replicaId: local.replicaId, sequence: next.sequence, docId, parents,
+        kind: PEER_DELETE_KIND, payloadHash, origin: 'local-authoring' };
+      this.saveVersion(local.repoId, { operation, closure });
+      this.setHead(local.repoId, docId, operation.id);
+      this.retireDeletedDoc(local.repoId, docId, operation.id);
+      if (shared) this.createFrozenIntents(local.repoId, docId, operation.id, payloadHash);
+      this.pruneTombstones(local.repoId);
+      return operation.id;
+    });
+  }
+
+  /** A doc another member could hold: it was ever frozen for delivery here, or arrived from another replica. */
+  private wasShared(repoId: string, replicaId: string, docId: string): boolean {
+    return !!this.db.prepare(`SELECT 1 FROM sync_intents WHERE repo_id = ? AND doc_id = ? UNION ALL
+      SELECT 1 FROM sync_operations WHERE repo_id = ? AND doc_id = ? AND replica_id <> ? LIMIT 1`)
+      .get(repoId, docId, repoId, docId, replicaId);
+  }
+
+  private isDeletionHead(repoId: string, head: string): boolean {
+    return this.operation(repoId, head)?.kind === PEER_DELETE_KIND;
+  }
+
+  /**
+   * A doc row-less, head-less doc whose deletion was pruned: any deletion operation that descends from the
+   * incoming head proves the incoming version is a stale replay, not a concurrent edit.
+   */
+  private deletedAfter(repoId: string, docId: string, incoming: string): string | null {
+    const deletions = this.db.prepare(`SELECT op_id FROM sync_operations WHERE repo_id = ? AND doc_id = ? AND kind = ?
+      ORDER BY op_id LIMIT 16`).all(repoId, docId, PEER_DELETE_KIND) as Array<{ op_id: string }>;
+    return deletions.find((row) => row.op_id !== incoming && this.isAncestor(repoId, incoming, row.op_id))?.op_id ?? null;
+  }
+
+  /** Remove every local projection of a doc: files, history, comments, thread links and sync-side references. */
+  private dropProjection(docId: string): void {
+    this.db.prepare('UPDATE docs SET alternative_to = NULL WHERE alternative_to = ?').run(docId);
+    for (const table of ['doc_files', 'doc_revisions', 'doc_comments', 'doc_threads', 'sync_doc_references', 'sync_history_order']) {
+      this.db.prepare(`DELETE FROM ${table} WHERE doc_id = ?`).run(docId);
+    }
+    this.db.prepare('DELETE FROM docs WHERE id = ?').run(docId);
+  }
+
+  /**
+   * After a delete becomes the head: older undelivered versions of the doc are superseded, forks are moot, and
+   * (when every member speaks delta protocol) unpinned payloads are dropped so content does not linger or travel.
+   */
+  private retireDeletedDoc(repoId: string, docId: string, tombstone: string): void {
+    const stale = this.db.prepare(`SELECT id FROM sync_intents WHERE repo_id = ? AND doc_id = ? AND frozen_head <> ? AND state = 'pending'
+      LIMIT ?`).all(repoId, docId, tombstone, MAX_PENDING_PEER_INTENTS) as Array<{ id: string }>;
+    for (const { id } of stale) {
+      this.db.prepare("UPDATE sync_intents SET state = 'blocked', updated_at = ? WHERE id = ?").run(this.now(), id);
+      this.db.prepare('DELETE FROM sync_outgoing_sessions WHERE intent_id = ?').run(id);
+      const transfer = this.db.prepare("SELECT repo_id, sender_replica_id, session_id FROM sync_transfers WHERE direction = 'out' AND intent_id = ?")
+        .get(id) as { repo_id: string; sender_replica_id: string; session_id: string } | undefined;
+      if (transfer) this.db.prepare("DELETE FROM sync_transfer_chunks WHERE direction = 'out' AND repo_id = ? AND sender_replica_id = ? AND session_id = ?")
+        .run(transfer.repo_id, transfer.sender_replica_id, transfer.session_id);
+      this.db.prepare("DELETE FROM sync_transfers WHERE direction = 'out' AND intent_id = ?").run(id);
+      this.db.prepare('DELETE FROM sync_retry WHERE intent_id = ?').run(id);
+    }
+    this.db.prepare('DELETE FROM sync_conflicts WHERE repo_id = ? AND doc_id = ?').run(repoId, docId);
+    if (this.compactionBlocker()) return;
+    const pins = this.retentionPins(repoId);
+    const versions = this.db.prepare('SELECT head_id FROM sync_versions WHERE repo_id = ? AND doc_id = ? AND compacted = 0 AND head_id <> ? LIMIT ?')
+      .all(repoId, docId, tombstone, MAX_PEER_STORED_VERSIONS) as Array<{ head_id: string }>;
+    let dropped = 0;
+    for (const { head_id: head } of versions) {
+      if (pins.has(head)) continue;
+      this.db.prepare("UPDATE sync_versions SET closure_json = '{}', bytes = 0, compacted = 1 WHERE repo_id = ? AND head_id = ?").run(repoId, head);
+      this.db.prepare('DELETE FROM sync_version_blobs WHERE repo_id = ? AND head_id = ?').run(repoId, head);
+      dropped++;
+    }
+    if (dropped) this.collectTransportBlobs();
+  }
+
+  /**
+   * Bounded tombstone retention: beyond the cap, the oldest deletions with nothing left to deliver lose their head
+   * row (operation rows stay and keep fencing replays). Deletions still owed to a member are never pruned.
+   */
+  private pruneTombstones(repoId: string): number {
+    const count = (this.db.prepare(`SELECT COUNT(*) AS n FROM sync_doc_heads h JOIN sync_operations o ON o.repo_id = h.repo_id
+      AND o.op_id = h.head_id WHERE h.repo_id = ? AND o.kind = ?`).get(repoId, PEER_DELETE_KIND) as { n: number }).n;
+    if (count <= this.maxTombstones) return 0;
+    const candidates = this.db.prepare(`SELECT h.doc_id, h.head_id FROM sync_doc_heads h JOIN sync_operations o ON o.repo_id = h.repo_id
+      AND o.op_id = h.head_id WHERE h.repo_id = ? AND o.kind = ? AND NOT EXISTS (SELECT 1 FROM sync_intents i
+        WHERE i.repo_id = h.repo_id AND i.doc_id = h.doc_id AND i.state = 'pending')
+      AND NOT EXISTS (SELECT 1 FROM sync_conflicts c WHERE c.repo_id = h.repo_id AND c.doc_id = h.doc_id)
+      ORDER BY o.created_at, o.replica_id, o.sequence LIMIT ?`).all(repoId, PEER_DELETE_KIND, count - this.maxTombstones) as Array<{ doc_id: string; head_id: string }>;
+    const compactable = !this.compactionBlocker();
+    for (const row of candidates) {
+      this.db.prepare('DELETE FROM sync_doc_heads WHERE repo_id = ? AND doc_id = ?').run(repoId, row.doc_id);
+      if (compactable) {
+        this.db.prepare("UPDATE sync_versions SET closure_json = '{}', bytes = 0, compacted = 1 WHERE repo_id = ? AND head_id = ?").run(repoId, row.head_id);
+        this.db.prepare('DELETE FROM sync_version_blobs WHERE repo_id = ? AND head_id = ?').run(repoId, row.head_id);
+      }
+    }
+    return candidates.length;
   }
 
   /** Manual consent only. Pairing and startup never bootstrap old documents. */
@@ -346,6 +485,9 @@ export class DesignDocSyncStore {
     const left = localHead && this.version(local.repoId, localHead), right = this.version(local.repoId, remoteHead);
     if (!fork || !left || !right || right.operation.docId !== docId || !this.isAncestor(local.repoId, fork.local_head, localHead!)) {
       throw new PeerProtocolError('conflict', 'retained peer fork is unavailable');
+    }
+    if (isDeletionClosure(left.closure) || isDeletionClosure(right.closure)) {
+      throw new PeerProtocolError('conflict', 'a deleted design doc cannot be merged');
     }
     const bases = this.mergeBases(local.repoId, docId, localHead!, remoteHead);
     const baseHead = bases.length === 1 ? bases[0]! : null;
@@ -891,7 +1033,7 @@ export class DesignDocSyncStore {
         this.saveVersion(offer.repoId, version);
       }
       const appliedHeads: Record<string, string> = {};
-      let merged = false;
+      let merged = false, deleted = false;
       for (const [docId, incoming] of Object.entries(offer.heads)) {
         const version = this.version(offer.repoId, incoming)!;
         const exists = this.db.prepare('SELECT id FROM docs WHERE id = ?').get(docId);
@@ -904,15 +1046,50 @@ export class DesignDocSyncStore {
         const conflicts = this.db.prepare('SELECT local_head, remote_head FROM sync_conflicts WHERE repo_id = ? AND doc_id = ? LIMIT ?')
           .all(offer.repoId, docId, MAX_PEER_STORED_VERSIONS + 1) as Array<{ local_head: string; remote_head: string }>;
         const unresolved = conflicts.some((fork) => !this.isAncestor(offer.repoId, fork.local_head, incoming) || !this.isAncestor(offer.repoId, fork.remote_head, incoming));
-        const safe = !unresolved && (!exists || current === incoming || (!!current && this.isAncestor(offer.repoId, current, incoming)));
-        const slugClash = this.db.prepare('SELECT id FROM docs WHERE slug = ? AND id <> ?').get(version.closure.doc.slug, docId);
-        const commentClash = version.closure.comments.some((comment) => this.db.prepare('SELECT id FROM doc_comments WHERE id = ? AND doc_id <> ?').get(comment.id, docId));
         if (current && current !== incoming && this.isAncestor(offer.repoId, incoming, current)) {
           // A replayed ancestor is already integrated, never a reason to reopen a resolved fork.
           appliedHeads[docId] = current;
           merged = true;
           continue;
         }
+        // A pruned deletion keeps no head, but its operation row still proves an older replica's version stale.
+        const pruned = !current && !exists ? this.deletedAfter(offer.repoId, docId, incoming) : null;
+        if (pruned) {
+          appliedHeads[docId] = pruned;
+          merged = true;
+          continue;
+        }
+        if (isDeletionClosure(version.closure)) {
+          if (current === incoming) { appliedHeads[docId] = incoming; continue; }
+          // Delete wins only when it causally covers everything held here; a concurrent edit always survives it.
+          if (!current || (!unresolved && this.isAncestor(offer.repoId, current, incoming))) {
+            this.dropProjection(docId);
+            this.setHead(offer.repoId, docId, incoming);
+            this.retireDeletedDoc(offer.repoId, docId, incoming);
+            appliedHeads[docId] = incoming;
+            deleted = true;
+            continue;
+          }
+          if (current && this.isDeletionHead(offer.repoId, current) && !unresolved) {
+            // Concurrent deletes: both stay deleted and every replica settles on the same (smallest) tombstone id.
+            const winner = [current, incoming].sort()[0]!;
+            this.setHead(offer.repoId, docId, winner);
+            appliedHeads[docId] = winner;
+            if (winner !== incoming) merged = true;
+            continue;
+          }
+          // The surviving edit goes back out so the deleting replica (and everyone else) resurrects it too.
+          appliedHeads[docId] = current!;
+          merged = true;
+          const survivor = this.version(offer.repoId, current!);
+          if (survivor && !this.isDeletionHead(offer.repoId, current!)) {
+            this.createFrozenIntents(offer.repoId, docId, current!, survivor.operation.payloadHash);
+          }
+          continue;
+        }
+        const safe = !unresolved && (!exists || current === incoming || (!!current && this.isAncestor(offer.repoId, current, incoming)));
+        const slugClash = this.db.prepare('SELECT id FROM docs WHERE slug = ? AND id <> ?').get(version.closure.doc.slug, docId);
+        const commentClash = version.closure.comments.some((comment) => this.db.prepare('SELECT id FROM doc_comments WHERE id = ? AND doc_id <> ?').get(comment.id, docId));
         if (!safe || slugClash || commentClash) {
           const count = this.db.prepare('SELECT COUNT(*) AS n FROM sync_conflicts').get() as { n: number };
           if (count.n >= MAX_PEER_STORED_VERSIONS) throw new PeerProtocolError('limit', 'conflict capacity reached');
@@ -934,6 +1111,7 @@ export class DesignDocSyncStore {
         this.markKnown(offer.repoId, offer.senderReplicaId, incoming);
         this.createFrozenIntents(offer.repoId, docId, incoming, version.operation.payloadHash, [offer.senderReplicaId, version.operation.replicaId]);
       }
+      if (deleted) this.pruneTombstones(offer.repoId);
       const body: Omit<PeerAppliedReceipt, 'checkpointHash'> = { sessionId: offer.sessionId, scopeHash: offer.scopeHash,
         stage: Object.keys(appliedHeads).length === Object.keys(offer.heads).length ? merged ? 'merged' : 'synced' : 'conflict',
         heads: offer.heads, appliedHeads };
@@ -999,6 +1177,7 @@ export class DesignDocSyncStore {
     const operation = validateOperation(version.operation);
     const closure = validateDocumentClosure(version.closure);
     if (operation.docId !== closure.doc.id || operation.payloadHash !== canonicalPeerHash(closure)) throw new PeerProtocolError('conflict', 'payload identity or hash mismatch');
+    if ((operation.kind === PEER_DELETE_KIND) !== isDeletionClosure(closure)) throw new PeerProtocolError('conflict', 'operation kind does not match payload');
     const prior = this.version(repoId, operation.id);
     if (prior) {
       if (canonicalPeerHash(prior) !== canonicalPeerHash(version)) throw new PeerProtocolError('conflict', 'operation id payload mismatch');
@@ -1231,8 +1410,8 @@ export class DesignDocSyncStore {
     }
     this.db.transaction(() => {
       this.recordReceipt(intent.repoId, intent.memberReplicaId, intent.frozenHead, intent.scopeHash, receipt.stage);
-      // A verified synced receipt proves the recipient holds the frozen ancestry, as for transfers.
-      if (receipt.stage === 'synced') this.markKnown(intent.repoId, intent.memberReplicaId, intent.frozenHead);
+      // A verified synced or merged receipt proves the recipient holds the frozen ancestry, as for transfers.
+      if (delivered(receipt.stage)) this.markKnown(intent.repoId, intent.memberReplicaId, intent.frozenHead);
     });
   }
 
@@ -1364,7 +1543,7 @@ export class DesignDocSyncStore {
       transfer.recipientReplicaId !== intent.memberReplicaId) throw new PeerProtocolError('conflict', 'receipt has no matching durable outgoing transfer');
     this.db.transaction(() => {
       this.recordReceipt(intent.repoId, intent.memberReplicaId, intent.frozenHead, intent.scopeHash, receipt.stage);
-      if (receipt.stage === 'synced') {
+      if (delivered(receipt.stage)) {
         this.markKnown(intent.repoId, intent.memberReplicaId, intent.frozenHead);
         // A newer applied head covers immutable ancestors, but never claims those old projections are current.
         this.db.prepare(`UPDATE sync_intents SET state = 'blocked', updated_at = ? WHERE repo_id = ? AND member_replica_id = ?
@@ -1376,6 +1555,7 @@ export class DesignDocSyncStore {
         this.db.prepare("DELETE FROM sync_transfers WHERE direction = 'out' AND intent_id = ?").run(intent.id);
         this.db.prepare('DELETE FROM sync_retry WHERE intent_id = ?').run(intent.id);
         this.collectTransportBlobs();
+        this.pruneTombstones(intent.repoId);
       }
     });
   }
@@ -1389,7 +1569,7 @@ export class DesignDocSyncStore {
          ON CONFLICT (repo_id, member_replica_id, frozen_head) DO UPDATE SET
            scope_hash = excluded.scope_hash, stage = excluded.stage, updated_at = excluded.updated_at`
       ).run(repoId, memberReplicaId, frozenHead, scopeHash, stage, at);
-      if (stage === 'synced') {
+      if (delivered(stage)) {
         this.db.prepare(
           `UPDATE sync_intents SET state = 'synced', updated_at = ?
            WHERE repo_id = ? AND member_replica_id = ? AND frozen_head = ? AND scope_hash = ?`
@@ -1463,6 +1643,15 @@ function toIntent(row: IntentRow): FrozenSyncIntent {
     scopeHash: row.scope_hash,
     state: row.state
   };
+}
+
+/**
+ * Terminal delivery. `merged` means the recipient durably holds the frozen head but kept a causally newer (or
+ * winning concurrent) head, e.g. a replayed ancestor or a delete that lost to a concurrent edit; retrying cannot
+ * change that outcome.
+ */
+export function delivered(stage: PeerReceiptStage): boolean {
+  return stage === 'synced' || stage === 'merged';
 }
 
 /** The newest stubs ride inline (one page at most); older ones go first as separate ancestry pages. */

@@ -23,6 +23,11 @@ export const MAX_PEER_STORED_BYTES = 256 * 1024 * 1024;
 export const MAX_PEER_STORED_VERSIONS = 10_000;
 /** Operation rows are never compacted, so they get their own, larger, still hard cap. */
 export const MAX_PEER_STORED_OPERATIONS = 50_000;
+/**
+ * Deletion tombstones kept as document heads. Past the cap the oldest fully delivered ones drop their head row;
+ * their operation rows (never compacted) still fence stale replays, so a pruned delete cannot resurrect.
+ */
+export const MAX_PEER_TOMBSTONES = 1_000;
 /** Closures compacted per capacity-relief round; rounds repeat until relief or no candidates remain. */
 export const PEER_COMPACTION_BATCH = 256;
 export const MAX_PEER_CLOSURE_BYTES = 96 * 1024 * 1024;
