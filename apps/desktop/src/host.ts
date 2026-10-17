@@ -96,7 +96,6 @@ import { EXTENSION_PROJECT_CATEGORY, store, scratchWorkspaceRoot, worktreeRoot, 
 import { electronZccDataDir } from '@zana-ai/zcc-server/electron-data-dir';
 import { PtyManager } from '@zana-ai/zcc-host-daemon/pty';
 import { AgentLivenessCache } from '@zana-ai/zcc-host-daemon/harness/agent-liveness';
-import { sshPairingSession } from '@zana-ai/zcc-host-daemon/ssh-pairing-pty';
 import { resolveMaxLiveSessions } from '@zana-ai/zcc-host-daemon/capacity';
 import { projectIdentityDigest, projectsForStoreRevision, revalidateLaunchCommit as revalidateCommonLaunchCommit } from '@zana-ai/zcc-server/services/launch/commit-revalidation';
 import { LaunchAuthorizationService } from '@zana-ai/zcc-server/services/launch/authorization';
@@ -9213,7 +9212,6 @@ app.on('before-quit', (event) => {
   // client naturally; explicitly killing it emits a false terminal exit that
   // marks Team lifecycle state dead before next launch can reattach.
   ptys.killAll({ preserveLocalTmux: true });
-  sshPairingSession.stop();
   desktopBrowserBrokerClient.stop();
   desktopBrowserBroker.dispose();
   desktopBrowserViewManager.destroyAll();

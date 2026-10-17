@@ -625,7 +625,6 @@ export async function handleProductHttp(
       const previousSafeMode = ctx.config.getConfig().pluginSafeMode === true;
       const config = presentAppConfig(await setProductConfig(ctx, patch));
       if (previousSafeMode !== (config.pluginSafeMode === true)) await ctx.plugins?.refreshSafeMode();
-      ctx.pairingRelay?.refresh();
       ctx.hub.emit('config:changed', config);
       try {
         await ctx.plugins?.syncInjectedSkillRoots?.();
@@ -633,21 +632,6 @@ export async function handleProductHttp(
         /* best-effort — next plugin sync will rewrite roots */
       }
       sendJson(response, 200, { config });
-      return true;
-    }
-
-    if (path === '/api/v1/relay' && method === 'GET') {
-      sendJson(response, 200, ctx.pairingRelay?.snapshot() ?? { state: 'unconfigured' });
-      return true;
-    }
-
-    if (path === '/api/v1/relay/renew-join' && method === 'POST') {
-      if (ctx.pairingRelay?.state() !== 'connected') {
-        sendJson(response, 409, { error: 'relay_offline' });
-        return true;
-      }
-      const snapshot = await ctx.pairingRelay.renewJoinWindow();
-      sendJson(response, 200, snapshot);
       return true;
     }
 

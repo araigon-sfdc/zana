@@ -1290,22 +1290,6 @@ export function normalizeConfig(input: Partial<AppConfig>): Partial<AppConfig> {
       }
     }
   }
-  if ('relayToken' in input) {
-    if (typeof input.relayToken !== 'string' || !input.relayToken.trim()) {
-      normalized.relayToken = undefined;
-    } else {
-      const trimmed = input.relayToken.trim();
-      if (trimmed.length <= 512) normalized.relayToken = trimmed;
-    }
-  }
-  if ('relaySessionId' in input) {
-    if (typeof input.relaySessionId !== 'string' || !input.relaySessionId.trim()) {
-      normalized.relaySessionId = undefined;
-    } else {
-      const trimmed = input.relaySessionId.trim();
-      if (/^zcrs_[A-Za-z0-9_-]{16,64}$/.test(trimmed)) normalized.relaySessionId = trimmed;
-    }
-  }
   if (Object.prototype.hasOwnProperty.call(input, 'windowBounds')) {
     normalized.windowBounds = normalizeBounds(input.windowBounds);
   }

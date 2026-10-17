@@ -1,6 +1,6 @@
 # Plan: remove the legacy shared-token relays
 
-Status: planned. Opened 2026-10-17 for 2.3.6.
+Status: step 1 desktop and build side done (2026-10-17); its Heroku front-door cleanup, step 2 and the remaining step 3 docs are pending. Opened 2026-10-17 for 2.3.6.
 
 Zana Connect now handles phone access, previews and machine enrollment, with a separate credential for each account and server. Two older relays are still in the tree. Both authenticate with **one shared token**:
 
@@ -9,7 +9,7 @@ Zana Connect now handles phone access, previews and machine enrollment, with a s
 | Machine pairing relay | `ZCC_RELAY_TOKEN` | A remote machine joins this laptop through `wss://<heroku>/_zcc/relay` and `/t/<sessionId>` |
 | Phone relay (`mode: 'relay'`) | `MOBILE_RELAY_TOKEN` | Older clients reach one computer through a Heroku relay, using `pnpm mobile:serve` |
 
-A shared token baked into a public download is not a secret. Anyone who unpacks the app can read it, and isolation rests only on the random session id. No release has shipped with `ZCC_RELAY_TOKEN`, so the machine pairing relay has never worked in a packaged app. Pairing uses Zana Connect or the SSH tunnel instead (`apps/server/src/services/hosts/pairing-target.ts`).
+A shared token baked into a public download is not a secret. Anyone who unpacks the app can read it, and isolation rests only on the random session id. No release has shipped with `ZCC_RELAY_TOKEN`, so the machine pairing relay has never worked in a packaged app. Pairing uses Zana Connect or the SSH tunnel instead (`apps/server/src/services/hosts/host-bootstrap.ts`).
 
 ## Interim state (2.3.6)
 
@@ -28,8 +28,10 @@ These pieces are shared with Zana Connect. Removing the relays must not break th
 
 ### 1. Machine pairing relay (`ZCC_RELAY_TOKEN`)
 
+Desktop and build side done. Without Zana Connect every remote now joins through an SSH reverse tunnel to the loopback pairing forwarder. The public app URL is the shared website door (`/install.sh` and the Host allowlist), never a join target. The `direct` install path went with it: `pairing-target.ts`, the `pairing-target` utility-runtime operation, the `PairingTarget` contract, `pairingMode` on preferred join codes, the desktop PTY pairing handoff (`hosts-pairing.ts`, `ssh-pairing-pty.ts`, `PairingTerminal`, `hosts.pairing` IPC) and the direct install, restart-first repair and curl `pairingCommand` in `host-bootstrap.ts`. `pairing-allowlist.ts` stays (renamed tests in `pairing-allowlist.test.ts`) because the SSH-tunnel pairing forwarder uses it. Saved `relayToken` / `relaySessionId` config fields are dropped by `normalizeConfig` on the next read and write. The Heroku front-door bullet below is still open.
+
 - **Desktop server.** Delete `pairing-relay-client.ts`, `pairing-relay-controller.ts`, `pairing-relay-protocol.ts`, `pairing-session-url.ts` and `pairing-allowlist.ts` from `apps/server/src/http/`, together with their tests, including `pairing-relay-live.test.ts` and `pairing-relay-allowlist.guard.test.ts`. Remove `attachPairingRelay` from `product-server.ts` and `static-host.ts`, and `pairingRelay` from `product-context.ts`.
-- **Pairing target.** In `pairing-target.ts`, remove the `relay` target kind and the `relay_*` / `no_session` reasons. What remains is `direct` (a non-relay public origin) or `tunnel`.
+- **Pairing target.** Delete `pairing-target.ts` and the `PairingTarget` contract. Pairing without Connect is tunnel-only, so no target needs resolving.
 - **Build.** Remove `bundledRelayToken`, `__ZCC_BUNDLED_RELAY_TOKEN__` and `relayBakeWarning` from `electron.vite.config.ts`, `apps/server/src/bundled-relay-globals.d.ts` and `apps/server/vitest.config.ts`. Delete `scripts/relay-bake.ts` and its test, the `ZCC_RELAY_TOKEN` seeding in `scripts/dev-local.mjs`, and the three `ZCC_RELAY_TOKEN` env lines in `.github/workflows/release.yml`.
 - **Config.** Drop the persisted `relayToken` and `relaySessionId` from `packages/domain/src/product.ts`, `services/projects/store.ts`, `services/config/config-store.ts`, `http/public-app-url.ts` and `packages/desktop-contract/src/cc-api.ts`. Keep a store migration that deletes the old fields. Remove the Settings → Machines "Relay pairing URL" field, its settings-search entry and `relay-token-renderer.guard.test.ts`. If `publicAppUrl` remains as a "Public app URL" setting, relabel it rather than delete it.
 - **Heroku front door.** Remove the `/_zcc/relay` and `/t/<id>` handling from `website/relay/front-door.mjs`. Delete `pairing-hub.mjs`, `pairing-session.mjs`, `session-path.mjs`, `token.mjs` and `echo-laptop.mjs`, with their tests, once nothing imports them. Remove the `ZCC_RELAY_TOKEN` notes from `website/heroku.yml`, `website/Dockerfile` and `website/README.md`, then unset the Heroku config var.
@@ -44,7 +46,7 @@ These pieces are shared with Zana Connect. Removing the relays must not break th
 
 ### 3. Docs
 
-- `docs/multiple-devices.md`: delete "Legacy machine relay reachability". Make sure "Other ways to connect a machine" describes only Zana Connect, the SSH tunnel and copy-paste join. Mirror these changes in `website/content/docs/multiple-devices.md`.
+- Done: `docs/multiple-devices.md`: delete "Legacy machine relay reachability". Make sure "Other ways to connect a machine" describes only Zana Connect, the SSH tunnel and copy-paste join. Mirror these changes in `website/content/docs/multiple-devices.md`.
 - `docs/mobile-app.md`: delete "Legacy relay development utility" and "Heroku relay". Shorten "Retired connection methods" and "Previously saved connections" to a one-line upgrade note.
 - `services/mobile-relay/README.md`: describe only what Connect uses.
 - Add release notes saying that saved phone relay connections need a Zana Connect sign-in.

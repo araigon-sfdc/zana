@@ -9,7 +9,6 @@ import { createProductHttpContext, type ProductHttpContext } from './product-con
 import { createProductWebSocketServer, handleProductUpgrade } from './product-ws.js';
 import { createHostDaemonWebSocketServer, handleHostInternalHttp, handleHostInternalUpgrade } from './host-internal.js';
 import { handleInstallHttp } from './install-http.js';
-import { attachPairingRelay } from './pairing-relay-controller.js';
 import { startPairingForwarder, type PairingForwarder } from './pairing-forwarder.js';
 import type { LocalAppOriginArgs } from './local-app-origins.js';
 import { tryServePluginAsset } from './plugin-assets.js';
@@ -83,7 +82,6 @@ export async function startProductServer(options: StartProductServerOptions): Pr
 
   const boundPort = address.port;
   ctx.origins.serverPort = boundPort;
-  const pairingRelay = attachPairingRelay(ctx, boundPort);
   // SSH reverse tunnels target this allowlist-only port. Without it, tunnel
   // installs and reopens fail closed; they never expose serverPort.
   let pairingForwarder: PairingForwarder | undefined;
@@ -101,7 +99,6 @@ export async function startProductServer(options: StartProductServerOptions): Pr
     port: boundPort,
     ctx,
     close: async () => {
-      pairingRelay.stop();
       if (ctx.origins.pairingPort === pairingForwarder?.port) delete ctx.origins.pairingPort;
       await pairingForwarder?.close();
       await new Promise<void>((resolveClose, rejectClose) => {

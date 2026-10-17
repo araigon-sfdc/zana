@@ -67,20 +67,19 @@ describe('docker remote machine', () => {
     expect(pkg.scripts['docker:remote-machine']).toContain('docker-remote-machine.sh');
     expect(pkg.scripts['docker:host-daemon']).toContain('--join');
     expect(pkg.scripts['docker:remote-machine:down']).toContain(' down');
-    expect(pkg.scripts['test:docker:pairing']).toContain('ZCC_DOCKER_E2E=1');
+    expect(pkg.scripts['test:docker:pairing']).toBeUndefined();
     expect(pkg.scripts['test:docker:live']).toContain('docker-machine-live-scenarios.sh');
 
     const helper = join(repoRoot, 'scripts/docker-remote-machine.sh');
     chmodSync(helper, 0o755);
     const help = spawnSync('bash', [helper, '--help'], { encoding: 'utf8' });
     expect(help.status).toBe(0);
-    expect(help.stdout).toContain('--relay');
+    expect(help.stdout).not.toContain('--relay');
     expect(help.stdout).toContain('--local');
     expect(help.stdout).toContain('--join-code');
     expect(help.stdout).toContain('OPENAI_API_KEY');
     expect(help.stdout).toContain('CURSOR_API_KEY');
-    expect(readFileSync(helper, 'utf8')).toContain('DOOR=auto');
-    expect(readFileSync(helper, 'utf8')).toContain('/t/${session_id}');
+    expect(readFileSync(helper, 'utf8')).not.toContain('/api/v1/relay');
     expect(help.stdout).toContain('ssh -p');
     const waitSource = readFileSync(helper, 'utf8');
     expect(waitSource).toContain("grep -Eq 'Host daemon connected\\.");

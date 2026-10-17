@@ -16,11 +16,4 @@ describe('xterm terminals wire OSC 8 away from the default confirm handler', () 
     expect(source).not.toMatch(/window\.open\((uri|['"`])/);
   });
 
-  it('PairingTerminal uses the same OSC 8 handler', () => {
-    const source = readFileSync(
-      new URL('../views/settings/PairingTerminal.tsx', import.meta.url),
-      'utf8'
-    );
-    expect(source).toContain('linkHandler: xtermHttpLinkHandler');
-  });
 });

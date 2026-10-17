@@ -29,7 +29,6 @@ export type ProductEventType =
   | 'library:changed'
   | 'hosts:changed'
   | 'provider-model-catalog:changed'
-  | 'relay:changed'
   | 'terminals:data'
   | 'terminals:exit'
   | 'terminals:updated'

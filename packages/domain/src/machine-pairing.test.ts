@@ -6,7 +6,6 @@ import {
   localListenPort,
   sanitizeSshHost,
   sshPairingArgv,
-  sshPublicPairingArgv,
   sshPairingCommand
 } from './machine-pairing.js';
 
@@ -64,20 +63,5 @@ describe('ssh pairing argv', () => {
   it('reads the local listen port from a product origin', () => {
     expect(localListenPort('http://127.0.0.1:8780')).toBe(8780);
     expect(localListenPort('http://127.0.0.1:8780/')).toBe(8780);
-  });
-
-  it('builds a public-origin SSH installer without a reverse tunnel', () => {
-    expect(sshPublicPairingArgv({
-      sshHost: 'limited-pony',
-      serverUrl: 'https://zcc-7808c5bc8f3d.herokuapp.com/',
-      joinCode: 'zcde_abc',
-      hostId: '028c8627-a6d8-4c62-964e-8f6b35cb2335'
-    })).toEqual({
-      command: 'ssh',
-      args: [
-        'limited-pony',
-        'curl -fL --progress-meter --connect-timeout 10 --max-time 60 --retry 2 https://zcc-7808c5bc8f3d.herokuapp.com/install.sh | sh -s -- --join-code zcde_abc --host-id 028c8627-a6d8-4c62-964e-8f6b35cb2335 --server https://zcc-7808c5bc8f3d.herokuapp.com'
-      ]
-    });
   });
 });

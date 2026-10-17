@@ -6,9 +6,7 @@ import {
   joinCountdownMs,
   localListenPort,
   mergePairingSshHosts,
-  pairingCommand,
   resolvePairingServerUrl,
-  resolveRelayPairingServerUrl,
   sanitizeSshHost,
   sshHostOptionsFromProjects,
   sshHostsFromProjects,
@@ -17,72 +15,10 @@ import {
 } from './machine-pairing.js';
 
 describe('machine pairing command', () => {
-  it('builds the curl|sh one-liner from a public origin', () => {
-    expect(pairingCommand({
-      publicAppUrl: 'https://machine.example.com/',
-      joinCode: 'zcde_abc',
-      hostId: 'host-1'
-    })).toBe(
-      'curl -fL --progress-meter --connect-timeout 10 --max-time 60 --retry 2 https://machine.example.com/install.sh | sh -s -- --join-code zcde_abc --host-id host-1 --server https://machine.example.com'
-    );
-  });
-
-  it('falls back to a loopback origin so the local installer still copies, like BB', () => {
+  it('falls back to a loopback origin and formats the countdown', () => {
     expect(resolvePairingServerUrl('http://127.0.0.1:8780')).toMatch(/^http:\/\/(127\.0\.0\.1|localhost)/);
-    expect(pairingCommand({
-      publicAppUrl: 'http://127.0.0.1:8780',
-      joinCode: 'zcde_abc',
-      hostId: 'host-1'
-    })).toContain('--join-code zcde_abc');
-    expect(pairingCommand({
-      publicAppUrl: 'http://127.0.0.1:8780',
-      joinCode: 'zcde_abc',
-      hostId: 'host-1'
-    })).toContain('/install.sh');
     expect(isLoopbackOrigin('http://localhost:8780')).toBe(true);
     expect(formatJoinCountdown(65_000)).toBe('1:05');
-  });
-
-  it('prefixes a relay session origin while the laptop is connected', () => {
-    expect(resolveRelayPairingServerUrl({
-      publicAppUrl: 'https://zcc.herokuapp.com/',
-      relay: {
-        state: 'connected',
-        sessionId: 'zcrs_abcdefghijklmnopqr1234',
-        joinUntil: 2_000
-      },
-      now: 1_000
-    })).toEqual({ url: 'https://zcc.herokuapp.com/t/zcrs_abcdefghijklmnopqr1234' });
-    expect(resolveRelayPairingServerUrl({
-      publicAppUrl: 'https://zcc.herokuapp.com',
-      relay: {
-        state: 'connected',
-        sessionId: 'zcrs_abcdefghijklmnopqr1234',
-        joinUntil: 500
-      },
-      now: 1_000
-    })).toEqual({ url: 'https://zcc.herokuapp.com/t/zcrs_abcdefghijklmnopqr1234' });
-    expect(resolveRelayPairingServerUrl({
-      publicAppUrl: 'https://machine.example.com',
-      relay: { state: 'unconfigured' }
-    }).url).toBe('https://machine.example.com');
-    expect(joinCountdownMs(10_000, 1_000)).toBe(9_000);
-    expect(resolveRelayPairingServerUrl({
-      publicAppUrl: 'https://zcc.herokuapp.com',
-      relay: { state: 'connected' }
-    })).toEqual({ url: null, error: 'join_expired' });
-  });
-
-  it('never returns the bare shared origin for unknown or offline relay', () => {
-    expect(resolveRelayPairingServerUrl({ publicAppUrl: 'https://zcc.herokuapp.com', relay: null })).toEqual({ url: null });
-    expect(resolveRelayPairingServerUrl({ publicAppUrl: 'https://zcc.herokuapp.com', relay: { state: 'offline' } }))
-      .toEqual({ url: null, error: 'relay_offline' });
-    expect(resolveRelayPairingServerUrl({
-      publicAppUrl: 'https://zcc.herokuapp.com',
-      relay: { state: 'connected', sessionId: 'bad' }
-    })).toEqual({ url: null, error: 'join_expired' });
-    expect(resolveRelayPairingServerUrl({ publicAppUrl: null, relay: { state: 'unconfigured' } }).url)
-      .toBe(resolvePairingServerUrl(null));
   });
 
   it('builds an SSH reverse-tunnel command for loopback pairing', () => {

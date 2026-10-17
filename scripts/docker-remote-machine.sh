@@ -5,9 +5,8 @@
 #   pnpm docker:host-daemon             mint a join code and enroll it
 #   pnpm docker:remote-machine down     stop and restore Public app URL
 #
-# Product HTTP stays on 127.0.0.1. Join uses the Heroku pairing origin when
-# the laptop relay is connected; otherwise it publishes a throwaway TCP proxy
-# so Docker can reach loopback through a temporary test forward. Override with `--relay` or `--local`.
+# Product HTTP stays on 127.0.0.1. Join publishes a throwaway TCP proxy so
+# Docker can reach loopback through a temporary test forward.
 #
 # Live agents: export OPENAI_API_KEY / CURSOR_API_KEY (or put them in the repo
 # `.env`). The helper forwards them into the container and installs matching
@@ -26,7 +25,6 @@ JOIN_CODE=${JOIN_CODE:-}
 HOST_ID=${HOST_ID:-}
 MODE=up
 JOIN=0
-DOOR=auto
 FOLLOW=0
 KEEP_PUBLIC_URL=${ZCC_KEEP_PUBLIC_URL:-0}
 STATE_FILE="$COMPOSE_DIR/.proxy-state"
@@ -48,10 +46,7 @@ Usage: $(basename "$0") [up|down|logs|join] [options]
 Join options:
   --join-code CODE   From Settings → Machines → Add a machine
   --host-id ID       Host id from that dialog (required with --join-code)
-  --local            Enroll via loopback proxy (hits this machine's pnpm dev)
-  --relay            Enroll via https://<origin>/t/<sessionId> (Heroku)
-                     Fails if the join window has closed (renew in Settings)
-                     Default: --relay when the laptop tunnel is connected, else --local
+  --local            Enroll via loopback proxy (the default; hits this machine's pnpm dev)
   --follow           Stay attached to logs after start
   --server-port N    Product server port (default ${SERVER_PORT})
   --proxy-port N     Loopback-proxy port (default ${PROXY_PORT})
@@ -74,8 +69,7 @@ while [[ $# -gt 0 ]]; do
     --join) JOIN=1; MODE=join; shift ;;
     --join-code) JOIN_CODE=${2:-}; JOIN=1; MODE=join; shift 2 ;;
     --host-id) HOST_ID=${2:-}; JOIN=1; MODE=join; shift 2 ;;
-    --local) DOOR=local; shift ;;
-    --relay) DOOR=relay; shift ;;
+    --local) shift ;;
     --follow) FOLLOW=1; shift ;;
     --server-port) SERVER_PORT=${2:-}; shift 2 ;;
     --proxy-port) PROXY_PORT=${2:-}; shift 2 ;;
@@ -376,61 +370,27 @@ cmd_join() {
   need_server
   load_provider_keys
   local public_url door_url
-  local config_json mint relay_json relay_state
+  local config_json mint
   config_json=$(curl_json GET "http://127.0.0.1:${SERVER_PORT}/api/v1/config")
   public_url=$(node -e '
     const config = JSON.parse(process.argv[1]).config ?? {};
     process.stdout.write(typeof config.publicAppUrl === "string" ? config.publicAppUrl : "");
   ' "$config_json")
-  relay_json=$(curl_json GET "http://127.0.0.1:${SERVER_PORT}/api/v1/relay")
-  relay_state=$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).state ?? "")' "$relay_json")
 
-  if [[ "$DOOR" = auto ]]; then
-    if [[ -n "$public_url" && "$relay_state" = connected ]]; then
-      DOOR=relay
-    else
-      DOOR=local
-    fi
-  fi
-
-  if [[ "$DOOR" = relay ]]; then
-    if [[ -z "$public_url" ]]; then
-      printf 'No public app URL configured. Set Settings → Machines → Public app URL, or pass --local.\n' >&2
-      exit 1
-    fi
-    if [[ "$relay_state" != connected ]]; then
-      printf 'Relay is %s. Connect the laptop tunnel (or use --local against pnpm dev).\n' "$relay_state" >&2
-      exit 1
-    fi
-    local session_id join_until now_ms
-    session_id=$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).sessionId ?? "")' "$relay_json")
-    join_until=$(node -e 'process.stdout.write(String(JSON.parse(process.argv[1]).joinUntil ?? 0))' "$relay_json")
-    if [[ -z "$session_id" ]]; then
-      printf 'Relay is connected but has no session id yet. Retry in a second.\n' >&2
-      exit 1
-    fi
-    now_ms=$(($(date +%s) * 1000))
-    if [[ "$join_until" =~ ^[0-9]+$ && "$join_until" -gt 0 && "$now_ms" -ge "$join_until" ]]; then
-      printf 'Join window closed. Renew it in Settings → Machines, then retry.\n' >&2
-      exit 1
-    fi
-    door_url="${public_url%/}/t/${session_id}"
-  else
-    door_url="http://host.docker.internal:${PROXY_PORT}"
-    start_proxy
-    if [[ "$public_url" != "$door_url" ]]; then
-      node --input-type=module -e '
-        import { writeFileSync } from "node:fs";
-        writeFileSync(process.argv[1], JSON.stringify({
-          prevPublicAppUrl: process.argv[2],
-          serverPort: Number(process.argv[3]),
-          proxyPort: Number(process.argv[4])
-        }));
-      ' "$STATE_FILE" "$public_url" "$SERVER_PORT" "$PROXY_PORT"
-      curl_json PATCH "http://127.0.0.1:${SERVER_PORT}/api/v1/config" \
-        "$(node -e 'process.stdout.write(JSON.stringify({ publicAppUrl: process.argv[1] }))' "$door_url")" \
-        >/dev/null
-    fi
+  door_url="http://host.docker.internal:${PROXY_PORT}"
+  start_proxy
+  if [[ "$public_url" != "$door_url" ]]; then
+    node --input-type=module -e '
+      import { writeFileSync } from "node:fs";
+      writeFileSync(process.argv[1], JSON.stringify({
+        prevPublicAppUrl: process.argv[2],
+        serverPort: Number(process.argv[3]),
+        proxyPort: Number(process.argv[4])
+      }));
+    ' "$STATE_FILE" "$public_url" "$SERVER_PORT" "$PROXY_PORT"
+    curl_json PATCH "http://127.0.0.1:${SERVER_PORT}/api/v1/config" \
+      "$(node -e 'process.stdout.write(JSON.stringify({ publicAppUrl: process.argv[1] }))' "$door_url")" \
+      >/dev/null
   fi
 
   if [[ -z "$JOIN_CODE" ]]; then

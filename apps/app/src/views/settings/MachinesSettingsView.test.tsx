@@ -23,11 +23,6 @@ vi.mock('../../lib/product-client.js', () => ({
       retryUpdate: async () => undefined,
       remove: async () => undefined,
       relaunchLocal: async () => ({ ok: true as const })
-    },
-    relay: {
-      status: async () => ({ state: 'unconfigured' }),
-      renewJoinWindow: async () => ({ state: 'unconfigured' }),
-      onChanged: () => () => {}
     }
   }
 }));
@@ -96,7 +91,7 @@ function cli(overrides: Partial<ProviderCliStatus> = {}): ProviderCliStatus {
 }
 
 describe('MachinesTab', () => {
-  it('renders add-machine and a public origin field, not a relay token field', () => {
+  it('renders add-machine and a public app URL field, not a relay token field', () => {
     hostsState.current = [];
     projectsState.current = [];
     const html = renderToStaticMarkup(
@@ -106,7 +101,8 @@ describe('MachinesTab', () => {
         onUpdate={vi.fn().mockResolvedValue(undefined)}
       />
     );
-    expect(html).toContain('Relay pairing URL');
+    expect(html).toContain('Public app URL');
+    expect(html).not.toContain('Relay pairing URL');
     expect(html).toContain('data-testid="public-app-url"');
     expect(html).toContain('https://machine.example.com');
     expect(html).not.toContain('Relay token');
@@ -549,13 +545,11 @@ describe('MachineCard', () => {
     expect(failed).toContain('role="alert"');
   });
 
-  it('renews pairing before repair', async () => {
+  it('repairs directly, without a relay join-window renewal', async () => {
     const { readFileSync } = await import('node:fs');
     const source = readFileSync(new URL('./MachinesSettingsView.tsx', import.meta.url), 'utf8');
-    expect(source).toContain('product.relay.renewJoinWindow');
-    expect(source.indexOf('product.hosts.repair')).toBeGreaterThan(
-      source.indexOf('product.relay.renewJoinWindow')
-    );
+    expect(source).toContain('product.hosts.repair');
+    expect(source).not.toContain('product.relay');
   });
 });
 

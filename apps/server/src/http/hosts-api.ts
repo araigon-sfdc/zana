@@ -24,7 +24,6 @@ import { listPublicHosts, parseHostUpdate, toPublicHost } from '../services/host
 import { relaunchLocalHostDaemon } from '../services/hosts/host-relaunch.js';
 import { HostUnavailableError } from './host-hub.js';
 import { bootstrapHostBySsh, bootstrapHostForProject, parseSshIdentity, reconcileRemoteProjectBindings, repairHost, type HostBootstrapEvent } from '../services/hosts/host-bootstrap.js';
-import { resolvePairingTargetForContext } from '../services/hosts/pairing-target.js';
 import { closeTunnelHost } from '../services/hosts/tunnel-hosts.js';
 import { issueConnectHostCode, revokeConnectHost, usesConnect, connectInstallCommand } from '../services/hosts/connect-enrollment.js';
 
@@ -111,28 +110,14 @@ export async function handleHostsApi(
       return true;
     }
     if (path.endsWith('/preferred')) {
-      // Code and URL are issued together, bound to one relay session.
-      const target = await resolvePairingTargetForContext(ctx);
-      if (target.kind === 'tunnel') {
-        // No relay: the code redeems through the allowlist-only loopback forwarder,
-        // reachable from the remote only via an SSH reverse tunnel the user opens.
-        const forwarderPort = ctx.origins?.pairingPort;
-        if (!forwarderPort) {
-          sendJson(response, 409, { error: 'relay_unavailable', reason: target.reason });
-          return true;
-        }
-        const minted = ctx.joinCodes.mint();
-        sendJson(response, 201, { ...minted, pairingServerUrl: `http://127.0.0.1:${forwarderPort}`, pairingMode: 'tunnel' });
+      // Without Zana Connect the code redeems through the allowlist-only loopback forwarder,
+      // reachable from the remote only via an SSH reverse tunnel the user opens.
+      const forwarderPort = ctx.origins?.pairingPort;
+      if (!forwarderPort) {
+        sendJson(response, 409, { error: 'pairing_unavailable' });
         return true;
       }
-      const minted = ctx.joinCodes.mint();
-      const after = await resolvePairingTargetForContext(ctx);
-      if (after.kind === 'tunnel' || after.kind !== target.kind || after.serverUrl !== target.serverUrl) {
-        ctx.joinCodes.invalidateHost(minted.hostId);
-        sendJson(response, 409, { error: 'relay_changed' });
-        return true;
-      }
-      sendJson(response, 201, { ...minted, pairingServerUrl: target.serverUrl });
+      sendJson(response, 201, { ...ctx.joinCodes.mint(), pairingServerUrl: `http://127.0.0.1:${forwarderPort}` });
       return true;
     }
     const issued = ctx.joinCodes.mint();

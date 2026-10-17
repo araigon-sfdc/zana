@@ -8,7 +8,7 @@ import type {
   ProviderCliStatusResponse
 } from '@zana-ai/zcc-contracts/host-rpc';
 import { product } from '../../lib/product-client.js';
-import { useData, useUi } from '@/store';
+import { useData } from '@/store';
 import { Field, Section } from '@/components/settings/FormFields';
 import { useHosts } from '../../hooks/useHosts.js';
 import { HostSshIdentityDialog } from '../../components/HostSshIdentityDialog.js';
@@ -113,16 +113,8 @@ export function MachinesSettingsView({
         repair: (id) => runHostInstallWithDrawer({
           kind: 'fix',
           target: host.name,
-          startLogs: ['Renewing pairing…'],
-          run: async (onEvent) => {
-            try {
-              await product.relay.renewJoinWindow();
-            } catch {
-              /* repair still auto-renews */
-            }
-            useUi.getState().appendHostInstallLogs(['Reconnecting…']);
-            return product.hosts.repair(id, onEvent);
-          },
+          startLogs: ['Reconnecting…'],
+          run: (onEvent) => product.hosts.repair(id, onEvent),
           // Replayed by the drawer's Retry, which bypasses this function's result handling.
           onSettled: (events) => {
             const outcome = bootstrapOutcome(events);
@@ -216,8 +208,8 @@ export function MachinesSettingsView({
       >
         <Field
           searchId="machines.public-app-url"
-          label="Relay pairing URL"
-          help={`Remotes enroll through this origin only while the pairing relay is connected. Otherwise Connect pairs over an SSH tunnel and ignores it. Official builds bake this. For local/dev, ${REMOTE_MACHINE_CONNECTION_HINT}`}
+          label="Public app URL"
+          help={`Origin remotes download the installer from, for example a Docker gateway during local testing. Official builds bake this. ${REMOTE_MACHINE_CONNECTION_HINT}`}
           mono
         >
           <input

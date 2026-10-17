@@ -2,66 +2,16 @@ import { isLoopbackOrigin, sanitizeSshHost } from '@zana-ai/zcc-domain/machine-p
 
 export {
   PAIRING_TUNNEL_PORT,
-  formatSshPairingCommand,
   isLoopbackOrigin,
   localListenPort,
   sanitizeSshHost,
   sshPairingArgv,
-  sshPairingCommand,
-  sshPublicPairingArgv
+  sshPairingCommand
 } from '@zana-ai/zcc-domain/machine-pairing';
-
-export function pairingCommand(input: {
-  publicAppUrl?: string | null;
-  joinCode: string;
-  hostId: string;
-}): string | null {
-  const server = resolvePairingServerUrl(input.publicAppUrl);
-  if (!server) return null;
-  return (
-    `curl -fL --progress-meter --connect-timeout 10 --max-time 60 --retry 2 ${server}/install.sh` +
-    ` | sh -s -- --join-code ${input.joinCode} --host-id ${input.hostId} --server ${server}`
-  );
-}
-
-export const RELAY_SESSION_ID_RE = /^zcrs_[A-Za-z0-9_-]{16,64}$/;
-
-export function pairingSessionServerUrl(origin: string, sessionId: string): string {
-  return `${origin.replace(/\/$/u, '')}/t/${sessionId}`;
-}
-
-export type RelayStatus = {
-  state: 'connected' | 'offline' | 'unconfigured';
-  sessionId?: string;
-  joinUntil?: number;
-};
-
-/**
- * Prefer `/t/<sessionId>` when the relay is connected. A shared relay origin is never
- * returned bare: unknown, offline, or session-less relay states yield no URL. Only an
- * unconfigured relay (direct HTTPS origin) stays bare.
- */
-export function resolveRelayPairingServerUrl(input: {
-  publicAppUrl?: string | null;
-  relay?: RelayStatus | null;
-  now?: number;
-}): { url: string | null; error?: 'join_expired' | 'relay_offline' } {
-  const base = resolvePairingServerUrl(input.publicAppUrl);
-  if (!base) return { url: null };
-  const relay = input.relay;
-  if (!relay) return { url: null };
-  if (relay.state === 'unconfigured') return { url: base };
-  if (relay.state === 'offline') return { url: null, error: 'relay_offline' };
-  if (!relay.sessionId || !RELAY_SESSION_ID_RE.test(relay.sessionId)) {
-    return { url: null, error: 'join_expired' };
-  }
-  return { url: pairingSessionServerUrl(base, relay.sessionId) };
-}
 
 export function joinCountdownMs(joinCodeExpiresAt: number, now: number): number {
   return joinCodeExpiresAt - now;
 }
-
 
 export type PairingSshHostGroup = 'project' | 'ssh-config';
 
@@ -184,4 +134,4 @@ export function formatJoinCountdown(remainingMs: number): string {
 }
 
 export const REMOTE_MACHINE_CONNECTION_HINT =
-  'Use the configured machine-pairing relay or an SSH reverse tunnel.';
+  'Use Zana Connect or an SSH reverse tunnel.';
