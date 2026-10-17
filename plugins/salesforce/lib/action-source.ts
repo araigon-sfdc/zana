@@ -16,6 +16,8 @@ export interface ActionSource {
   language?: 'apex' | 'xml' | 'json';
   flow?: Record<string, unknown>;
   version?: number;
+  /** An org Flow with no active version: the latest version is shown. */
+  inactive?: boolean;
   inputs?: ActionParameter[];
   outputs?: ActionParameter[];
   contractMessage?: string;
@@ -140,16 +142,27 @@ function params(value: unknown): ActionParameter[] {
   }));
 }
 
+/** A read-only GET against one pinned org. */
+export function orgGetter(org: ResolvedOrg, deps: SalesforceDeps) {
+  return async (path: string, query?: Record<string, string>): Promise<Record<string, any>> => {
+    const res = await deps.request(org, { method: 'GET', path, query, maxResponseBytes: 2_000_000 });
+    if (res.status < 200 || res.status >= 300) throw Error(`Salesforce returned ${res.status}. Check source access in ${org.alias || org.username}.`);
+    return record(res.json);
+  };
+}
+
+/** The registered invocable contract of an Apex action, or a note when it cannot be read. */
+export function apexContract(described: Record<string, any> | null): Pick<ActionSource, 'inputs' | 'outputs' | 'contractMessage'> {
+  const action = described ? record(described.actions?.[0] ?? described) : null;
+  return action && Array.isArray(action.inputs) ? { inputs: params(action.inputs), outputs: params(action.outputs) } : { contractMessage: 'Registered invocable parameters could not be verified for this target.' };
+}
+
 /** One target, one pinned org, read-only Tooling/Actions API calls. */
 export async function readOrgAction(org: ResolvedOrg, target: string, deps: SalesforceDeps): Promise<ActionSource> {
   const parsed = parseActionTarget(target);
   if (!parsed) throw Error('Only Apex and Flow implementation targets are supported.');
   const base: ActionSource = { origin: 'org', target, status: 'missing', label: `${org.alias || org.username} · ${parsed.kind === 'apex' ? 'Deployed Apex' : 'Active Flow'}` };
-  const get = async (path: string, query?: Record<string, string>) => {
-    const res = await deps.request(org, { method: 'GET', path, query, maxResponseBytes: 2_000_000 });
-    if (res.status < 200 || res.status >= 300) throw Error(`Salesforce returned ${res.status}. Check source access in ${org.alias || org.username}.`);
-    return record(res.json);
-  };
+  const get = orgGetter(org, deps);
   const namespace = parsed.namespace ? `'${parsed.namespace}'` : 'null';
   if (parsed.kind === 'flow') {
     const json = await get('/tooling/query', { q: `SELECT Id, VersionNumber, Metadata FROM Flow WHERE Definition.DeveloperName = '${parsed.developerName}' AND Definition.NamespacePrefix = ${namespace} AND Status = 'Active' LIMIT 1` });
@@ -169,10 +182,9 @@ export async function readOrgAction(org: ResolvedOrg, target: string, deps: Sale
   const row = source.status === 'fulfilled' ? record(source.value.records?.[0]) : {};
   const body = typeof row.Body === 'string' ? row.Body : undefined;
   if (body && body.length > ACTION_SOURCE_CAP) throw Error('This Apex class exceeds the 750 KB preview limit.');
-  const described = contract.status === 'fulfilled' ? record(contract.value.actions?.[0] ?? contract.value) : null;
   return {
     ...base, status: body ? 'ready' : 'unavailable', content: body, language: 'apex',
     message: body ? undefined : 'Apex source is unavailable. It may be managed, missing, or restricted by permissions.',
-    ...(described && Array.isArray(described.inputs) ? { inputs: params(described.inputs), outputs: params(described.outputs) } : { contractMessage: 'Registered invocable parameters could not be verified for this target.' })
+    ...apexContract(contract.status === 'fulfilled' ? contract.value : null)
   };
 }

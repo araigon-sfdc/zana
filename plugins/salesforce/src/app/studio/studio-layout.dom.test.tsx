@@ -1,7 +1,7 @@
 /** @vitest-environment happy-dom */
 import { act, cleanup, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, expect, it } from 'vitest';
-import { DEFAULT_LAYOUT, MAX_EDITOR_TABS, parseTab, readStudioLayout, useStudioLayout } from './studio-layout.js';
+import { DEFAULT_LAYOUT, MAX_EDITOR_TABS, parseTab, readStudioLayout, useStudioLayout, withoutTabs } from './studio-layout.js';
 
 beforeEach(() => localStorage.clear());
 afterEach(cleanup);
@@ -82,4 +82,29 @@ it('tolerates storage failures', () => {
     act(() => result.current.patch({ explorerOpen: false }));
     expect(result.current.state.explorerOpen).toBe(false);
   } finally { Storage.prototype.setItem = original; }
+});
+
+it('remembers the Project / Org source choice', () => {
+  localStorage.setItem('k', JSON.stringify({ actionOrigin: 'org' }));
+  expect(readStudioLayout('k').actionOrigin).toBe('org');
+  localStorage.setItem('k', JSON.stringify({ actionOrigin: 'sandbox' }));
+  expect(readStudioLayout('k').actionOrigin).toBe('project');
+  const { result } = renderHook(() => useStudioLayout('p-origin'));
+  act(() => result.current.patch({ actionOrigin: 'org' }));
+  expect(readStudioLayout('salesforce:studio:p-origin').actionOrigin).toBe('org');
+});
+
+it('closes several tabs and picks the next active tab', () => {
+  const tab = (id: string) => ({ id, kind: 'apex' as const, label: id, target: `apex://${id}` });
+  const state = { ...DEFAULT_LAYOUT, tabs: ['a', 'b', 'c', 'd'].map(tab), activeTab: 'c' };
+  expect(withoutTabs(state, ['x'])).toBe(state);
+  expect(withoutTabs(state, ['a', 'c', 'd'], 'b')).toMatchObject({ activeTab: 'b', tabs: [tab('b')] });
+  expect(withoutTabs(state, ['b', 'c']).activeTab).toBe('a');
+  expect(withoutTabs(state, ['a', 'b', 'c']).activeTab).toBe('d');
+  expect(withoutTabs(state, ['d']).activeTab).toBe('c');
+  expect(withoutTabs(state, ['a', 'b', 'c', 'd'], 'b')).toMatchObject({ tabs: [], activeTab: null });
+  const { result } = renderHook(() => useStudioLayout('p-many'));
+  act(() => { for (const id of ['a', 'b', 'c']) result.current.openTab(tab(id)); });
+  act(() => result.current.closeTabs(['a', 'c'], 'b'));
+  expect(result.current.state).toMatchObject({ tabs: [tab('b')], activeTab: 'b' });
 });

@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen, within } from '@testing-library/rea
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ExplorerNode, StudioDiagnostic } from '../../../lib/studio-contract.js';
 import { BottomPanel } from './BottomPanel.js';
-import { EditorTabs } from './EditorTabs.js';
+import { EditorTabs, tabsToClose } from './EditorTabs.js';
 import { Explorer, buildAgentOutline, filterOutline, groupExplorerNodes, type OutlineUse } from './Explorer.js';
 import { ProblemsPanel, sortDiagnostics } from './ProblemsPanel.js';
 import { ToolStrip } from './ToolStrip.js';
@@ -76,6 +76,65 @@ describe('EditorTabs', () => {
     expect(onSelect).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole('button', { name: 'Close Refund' }));
     expect(onClose).toHaveBeenCalledWith('flow:Refund');
+  });
+  it('lists the tabs each close command removes', () => {
+    expect(tabsToClose(tabs, 'apex:Lookup', 'close')).toEqual(['apex:Lookup']);
+    expect(tabsToClose(tabs, 'apex:Lookup', 'others')).toEqual(['agent:a', 'flow:Refund', 'type:c__Order']);
+    expect(tabsToClose(tabs, 'apex:Lookup', 'right')).toEqual(['flow:Refund', 'type:c__Order']);
+    expect(tabsToClose(tabs, 'type:c__Order', 'right')).toEqual([]);
+    expect(tabsToClose(tabs, 'apex:Lookup', 'all')).toEqual(tabs.map(tab => tab.id));
+    expect(tabsToClose(tabs, 'missing', 'all')).toEqual([]);
+  });
+  it('closes tabs from a right-click menu', () => {
+    const onCloseMany = vi.fn();
+    render(<EditorTabs tabs={tabs} active="agent:a" onSelect={vi.fn()} onClose={vi.fn()} onCloseMany={onCloseMany} />);
+    const lookup = screen.getByRole('tab', { name: /Lookup/ });
+    fireEvent.contextMenu(lookup, { clientX: 40, clientY: 20 });
+    const menu = screen.getByRole('menu', { name: 'Lookup tab actions' });
+    expect(within(menu).getAllByRole('menuitem').map(item => item.textContent)).toEqual(['Close', 'Close others', 'Close to the right', 'Close all']);
+    expect(document.activeElement).toBe(within(menu).getByRole('menuitem', { name: 'Close' }));
+    fireEvent.keyDown(menu, { key: 'ArrowDown' });
+    expect(document.activeElement).toBe(within(menu).getByRole('menuitem', { name: 'Close others' }));
+    fireEvent.keyDown(menu, { key: 'ArrowUp' });
+    fireEvent.keyDown(menu, { key: 'ArrowUp' });
+    expect(document.activeElement).toBe(within(menu).getByRole('menuitem', { name: 'Close all' }));
+    fireEvent.keyDown(menu, { key: 'Home' });
+    fireEvent.click(within(menu).getByRole('menuitem', { name: 'Close others' }));
+    expect(onCloseMany).toHaveBeenLastCalledWith(['agent:a', 'flow:Refund', 'type:c__Order'], 'apex:Lookup');
+    expect(screen.queryByRole('menu')).toBeNull();
+    // The last tab has nothing to its right.
+    fireEvent.contextMenu(screen.getByRole('tab', { name: /c__Order/ }));
+    expect((screen.getByRole('menuitem', { name: 'Close to the right' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Close all' }));
+    expect(onCloseMany).toHaveBeenLastCalledWith(tabs.map(tab => tab.id), 'type:c__Order');
+  });
+  it('opens the tab menu from the keyboard and dismisses it', () => {
+    const onCloseMany = vi.fn();
+    render(<EditorTabs tabs={tabs} active="agent:a" onSelect={vi.fn()} onClose={vi.fn()} onCloseMany={onCloseMany} />);
+    const agent = screen.getByRole('tab', { name: /A\.agent/ });
+    fireEvent.keyDown(agent, { key: 'F10', shiftKey: true });
+    expect(screen.getByRole('menu')).toBeTruthy();
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByRole('menu')).toBeNull();
+    fireEvent.keyDown(agent, { key: 'ContextMenu' });
+    fireEvent.mouseDown(screen.getByRole('menuitem', { name: 'Close' }));
+    expect(screen.getByRole('menu')).toBeTruthy();
+    fireEvent.mouseDown(document.body);
+    expect(screen.queryByRole('menu')).toBeNull();
+    fireEvent.contextMenu(agent);
+    fireEvent(window, new Event('blur'));
+    expect(screen.queryByRole('menu')).toBeNull();
+    fireEvent.contextMenu(agent);
+    fireEvent(window, new Event('resize'));
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(onCloseMany).not.toHaveBeenCalled();
+  });
+  it('keeps the native context menu without a bulk close handler', () => {
+    render(<EditorTabs tabs={tabs} active="agent:a" onSelect={vi.fn()} onClose={vi.fn()} />);
+    const agent = screen.getByRole('tab', { name: /A\.agent/ });
+    expect(fireEvent.contextMenu(agent)).toBe(true);
+    fireEvent.keyDown(agent, { key: 'ContextMenu' });
+    expect(screen.queryByRole('menu')).toBeNull();
   });
   it('badges only the agent tab that owns the problems and renders trailing workspace controls', () => {
     const { container, rerender } = render(<EditorTabs tabs={tabs} active="flow:Refund" problemsId="agent:a" problems={2} trailing={<button>Go to file</button>} onSelect={vi.fn()} onClose={vi.fn()} />);

@@ -182,6 +182,9 @@ describe('dependency header, drift and contract rail', () => {
     const view = render(<AgentActionPanel {...props} action={actions[1]} />);
     await waitFor(() => expect(screen.getByRole('button', { name: /^Project/ }).getAttribute('title')).toBe('Project copy matches the org'));
     expect(screen.queryByRole('img', { name: 'differs from org' })).toBeNull(); view.unmount();
+    rpc.mockImplementation((_plugin: string, _method: string, args: { origin: string }) => Promise.resolve({ ok: true, data: args.origin === 'org' ? { ...flowSource, origin: 'org', inactive: true, version: 5 } : flowSource }));
+    const draft = render(<AgentActionPanel {...props} action={actions[1]} initialOrigin="org" />);
+    await screen.findByText('Inactive · v5'); draft.unmount();
     rpc.mockImplementation((_plugin: string, _method: string, args: { origin: string }) => args.origin === 'org' ? Promise.reject(new Error('offline')) : Promise.resolve({ ok: true, data: flowSource }));
     render(<AgentActionPanel {...props} action={actions[1]} />);
     await screen.findByRole('button', { name: 'Show contract panel' });

@@ -1,8 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { lstat, mkdir, readdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { diffStats, lineDiff } from './line-diff.js';
+import { cliResult, removeTemp, retrieveInto, sourceApiVersion, tempProject, type RetrievedFile } from './org-retrieve.js';
 import {
   SCOPE_TYPES, SYNC_FETCH_MAX, SYNC_TYPES,
   type SyncCheck, type SyncComponent, type SyncDiff, type SyncJob, type SyncPlanFile, type SyncScope, type SyncState, type SyncType,
@@ -21,7 +21,10 @@ export interface OrgSyncDeps {
   now?(): number;
 }
 
-/** Where each type lives inside a package directory, and whether a component is a folder. */
+/**
+ * Where each listed type lives inside a package directory, and whether a component is a folder. Only `check` uses it,
+ * to tell which org components the project already has; a fetch places files from the CLI's own retrieve result.
+ */
 const LAYOUT: Record<SyncType, { folder: string; bundle: boolean; ext?: string }> = {
   AiAuthoringBundle: { folder: 'aiAuthoringBundles', bundle: true },
   ApexClass: { folder: 'classes', bundle: false, ext: '.cls' },
@@ -129,22 +132,7 @@ export function renameBundle(rest: string, from: string, to: string): string {
   return [to, ...more, file.startsWith(`${from}.`) ? to + file.slice(from.length) : file].join('/');
 }
 
-export function manifest(keys: string[], apiVersion: string): string {
-  const byType = new Map<string, string[]>();
-  for (const key of keys) {
-    const [type, name] = key.split(':') as [string, string];
-    byType.set(type, [...(byType.get(type) ?? []), name]);
-  }
-  const types = [...byType].map(([type, names]) => `  <types>\n${names.map(name => `    <members>${name}</members>`).join('\n')}\n    <name>${type}</name>\n  </types>`).join('\n');
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<Package xmlns="http://soap.sforce.com/2006/04/metadata">\n${types}\n  <version>${apiVersion}</version>\n</Package>\n`;
-}
-
-function cliResult(result: Awaited<ReturnType<SalesforceDeps['execSf']>>, fallback: string): unknown {
-  let payload: Record<string, unknown>;
-  try { payload = record(JSON.parse(result.stdout)); } catch { throw Error('Salesforce CLI returned incomplete output. Check the CLI connection and retry.'); }
-  if (result.code !== 0 || payload.status !== 0) throw Error(typeof payload.message === 'string' ? payload.message.slice(0, 400) : fallback);
-  return payload.result;
-}
+export { manifest } from './org-retrieve.js';
 
 /**
  * Fetch latest. A check compares org modification dates with the last fetch recorded here.
@@ -287,30 +275,20 @@ export class OrgSyncService {
 
   private async fetch(job: Job, keys: string[]): Promise<SyncJob> {
     const { signal } = job.controller;
-    const temporary = job.temporary = await mkdtemp(join(tmpdir(), 'zcc-sf-sync-'));
-    let version: unknown;
-    try { version = record(JSON.parse(await readFile(join(job.root, 'sfdx-project.json'), 'utf8'))).sourceApiVersion; } catch { /* the org's version */ }
-    const apiVersion = typeof version === 'string' && /^[0-9]{2,3}\.0$/.test(version) ? version : job.org.apiVersion;
-    await mkdir(join(temporary, 'force-app'));
-    await writeFile(join(temporary, 'sfdx-project.json'), JSON.stringify({ packageDirectories: [{ path: 'force-app', default: true }], sourceApiVersion: apiVersion }), { mode: 0o600 });
+    let text: string | undefined;
+    try { text = await readFile(join(job.root, 'sfdx-project.json'), 'utf8'); } catch { /* the org's version */ }
+    const apiVersion = sourceApiVersion(text) ?? job.org.apiVersion;
+    const temporary = job.temporary = await tempProject(apiVersion, 'zcc-sf-sync-');
+    const files: RetrievedFile[] = [];
     for (let index = 0; index < keys.length; index += BATCH) {
       const batch = keys.slice(index, index + BATCH);
-      await writeFile(join(temporary, 'package.xml'), manifest(batch, apiVersion), { mode: 0o600 });
       signal.throwIfAborted();
-      const result = record(cliResult(await this.deps.execSf(
-        ['project', 'retrieve', 'start', '--manifest', 'package.xml', '--target-org', job.org.alias, '--json', '--wait', '15'],
-        { cwd: temporary, timeoutMs: RETRIEVE_TIMEOUT, signal },
-      ), 'Salesforce could not retrieve the metadata. Check your org access and retry.'));
-      signal.throwIfAborted();
-      if (result.success === false || result.done === false) throw Error('Salesforce did not complete the retrieval. Retry after it finishes.');
-      for (const row of Array.isArray(result.fileProperties) ? result.fileProperties.map(record) : []) {
-        const key = `${row.type}:${String(row.fullName ?? '').split('/')[0]}`;
-        const at = iso(row.lastModifiedDate);
-        if (at && !job.dates.get(key)) job.dates.set(key, at);
-      }
+      const result = await retrieveInto(this.deps.execSf, temporary, batch, { alias: job.org.alias, apiVersion, timeoutMs: RETRIEVE_TIMEOUT, signal });
+      files.push(...result.files);
+      for (const [key, at] of result.modified) if (at && !job.dates.get(key)) job.dates.set(key, at);
       if (job.result.state === 'running') job.result = { ...job.result, done: Math.min(keys.length, index + batch.length) };
     }
-    const plan = await this.plan(job, new Set(keys), join(temporary, 'force-app', 'main', 'default'));
+    const plan = await this.plan(job, new Set(keys), files);
     signal.throwIfAborted();
     job.plan = plan;
     const found = new Set(plan.map(file => file.key));
@@ -323,25 +301,32 @@ export class OrgSyncService {
     };
   }
 
-  private async plan(job: Job, keys: Set<string>, retrieved: string): Promise<PlanEntry[]> {
-    const types = [...new Set([...keys].map(key => key.split(':')[0] as SyncType))];
-    const local = await this.localIndex(job.root, types);
+  /** Each retrieved file goes where the project already keeps that component, else under the default package directory. */
+  private async plan(job: Job, keys: Set<string>, files: RetrievedFile[]): Promise<PlanEntry[]> {
+    const aliases = bareVersions(files.filter(file => file.type === 'AiAuthoringBundle').map(file => file.fullName), keys);
+    const byKey = new Map<string, Array<{ source: string; rest: string }>>();
+    for (const file of files) {
+      let name = file.fullName.split('/')[0]!;
+      let rest = file.rest;
+      const alias = file.type === 'AiAuthoringBundle' ? aliases.get(name) : undefined;
+      if (alias) {
+        const [folder, ...more] = rest.split('/');
+        rest = `${folder}/${renameBundle(more.join('/'), name, alias)}`;
+        name = alias;
+      }
+      const key = `${file.type}:${name}`;
+      if (keys.has(key)) byKey.set(key, [...(byKey.get(key) ?? []), { source: file.path, rest }]);
+    }
+    const locate = await localLocator(job.root);
     const target = await defaultFolder(job.root);
     const plan: PlanEntry[] = [];
     let measured = 0;
-    for (const type of types) {
+    for (const [key, parts] of byKey) {
+      const [type, name] = key.split(':') as [SyncType, string];
       const marks = await this.marks(job.org.orgId, type);
-      const folder = join(retrieved, LAYOUT[type].folder);
-      const files = (await listFiles(folder)).map(source => ({ source, rest: posix(folder, source) }));
-      const aliases = type === 'AiAuthoringBundle' ? bareVersions(files.map(file => componentName(type, file.rest)), keys) : new Map<string, string>();
-      for (const { source, rest: retrieved } of files) {
-        let rest = retrieved;
-        let name = componentName(type, rest);
-        const alias = name ? aliases.get(name) : undefined;
-        if (name && alias) { rest = renameBundle(rest, name, alias); name = alias; }
-        const key = `${type}:${name}`;
-        if (!name || !keys.has(key)) continue;
-        const destination = resolve(local.get(type)!.get(name)?.folder ?? join(target, LAYOUT[type].folder), rest);
+      const base = locate(parts.map(part => part.rest)) ?? target;
+      for (const { source, rest } of parts) {
+        const destination = resolve(base, rest);
         if (!destination.startsWith(job.root + sep)) continue;
         const path = posix(job.root, destination);
         // An unreadable local file (a symlink) is a conflict; apply refuses to write through it.
@@ -472,7 +457,7 @@ export class OrgSyncService {
     const temporary = job.temporary;
     job.temporary = undefined;
     job.plan = undefined;
-    if (temporary) await rm(temporary, { recursive: true, force: true });
+    await removeTemp(temporary);
   }
 }
 
@@ -499,27 +484,47 @@ async function locallyChanged(root: string, mark: Mark): Promise<boolean> {
   return false;
 }
 
+/**
+ * Finds where the project keeps a component from its retrieved paths (`classes/Foo.cls`, `lwc/card/card.js`):
+ * the first package-directory file ending in one of them, default package first. Type-agnostic, so new metadata
+ * types need no folder table.
+ */
+export async function localLocator(root: string): Promise<(rests: string[]) => string | undefined> {
+  const byName = new Map<string, string[]>();
+  let entries = 0;
+  const walk = async (dir: string, depth: number): Promise<void> => {
+    if (depth > 16) return;
+    let children;
+    try { children = await readdir(dir, { withFileTypes: true }); } catch { return; }
+    for (const child of children) {
+      if (++entries > WALK_ENTRIES) throw Error('This project has too many files to compare. Narrow its package directories.');
+      if (child.name.startsWith('.') || child.name === 'node_modules') continue;
+      const path = join(dir, child.name);
+      if (child.isDirectory()) await walk(path, depth + 1);
+      else if (child.isFile()) byName.set(child.name, [...(byName.get(child.name) ?? []), path]);
+    }
+  };
+  for (const dir of packageDirectories(await readFile(join(root, 'sfdx-project.json'), 'utf8'))) {
+    let real: string;
+    try { real = await realpath(resolve(root, dir)); } catch { continue; }
+    if (!inside(root, real)) throw Error('A package directory is outside this project.');
+    await walk(real, 0);
+  }
+  return rests => {
+    for (const rest of rests) {
+      const tail = sep + rest.split('/').join(sep);
+      const match = byName.get(basename(rest))?.find(path => path.endsWith(tail));
+      if (match) return match.slice(0, -tail.length);
+    }
+    return undefined;
+  };
+}
+
 async function defaultFolder(root: string): Promise<string> {
   const [first] = packageDirectories(await readFile(join(root, 'sfdx-project.json'), 'utf8'));
   const path = resolve(root, first!);
   if (!path.startsWith(root + sep)) throw Error('The default package directory is outside this project.');
   return join(path, 'main', 'default');
-}
-
-async function listFiles(dir: string): Promise<string[]> {
-  const out: string[] = [];
-  const walk = async (path: string, depth: number) => {
-    if (depth > 8) return;
-    let children;
-    try { children = await readdir(path, { withFileTypes: true }); } catch { return; }
-    for (const child of children) {
-      const next = join(path, child.name);
-      if (child.isDirectory()) await walk(next, depth + 1);
-      else if (child.isFile()) out.push(next);
-    }
-  };
-  await walk(dir, 0);
-  return out;
 }
 
 /** Atomic replace inside the project: unique temp file, then rename over the destination. */

@@ -229,7 +229,7 @@ function AgentScriptWorkspace(props: AgentScriptPanelProps) {
   const compact = layout === 'compact';
   const wide = layout === 'wide';
   const studioLayout = useStudioLayout(draftScope);
-  const { state: studio, patch, openTab, selectTab, closeTab } = studioLayout;
+  const { state: studio, patch, openTab, selectTab, closeTab, closeTabs } = studioLayout;
   const [quickOpen, setQuickOpen] = useState(false);
   const suites = useSuites(pluginId, projectId);
   const [playgroundReady, setPlaygroundReady] = useState(false);
@@ -314,7 +314,11 @@ function AgentScriptWorkspace(props: AgentScriptPanelProps) {
   }, [openTool]);
   const agentsFocusHandled = useCallback((seq: number) => setAgentsFocus(current => current?.seq === seq ? null : current), []);
 
-  const openAction = useCallback((action: AgentAction, origin: 'project' | 'org' = 'project') => {
+  // The Project / Org choice carries over to every implementation view in this project.
+  const actionOrigin = useRef(studio.actionOrigin);
+  actionOrigin.current = studio.actionOrigin;
+  const chooseActionOrigin = useCallback((origin: 'project' | 'org') => patch({ actionOrigin: origin }), [patch]);
+  const openAction = useCallback((action: AgentAction, origin: 'project' | 'org' = actionOrigin.current) => {
     setActionTabs(tabs => tabs.some(tab => tab.action.id === action.id) ? tabs.map(tab => tab.action.id === action.id ? { ...tab, action, origin } : tab) : [...tabs.slice(-7), { action, origin }]);
     setSelectedActionId(action.id);
     openTool('actions');
@@ -875,6 +879,7 @@ function AgentScriptWorkspace(props: AgentScriptPanelProps) {
           return <AgentActionPanel key={`${projectId}:${activeEditorTab.id}`} pluginId={pluginId} projectId={projectId} org={org}
             action={targetAction(target, '')}
             {...(context ? { context: { ...context, onOpen: () => openAgentTab(context.path) } } : {})}
+            initialOrigin={studio.actionOrigin} onOriginChange={chooseActionOrigin}
             onReveal={() => undefined}
             onOpenTarget={target => { const match = TARGET_PATTERN.exec(target); if (match) openTarget(match[1] as 'apex' | 'flow', match[2]); }} />;
         })()}
@@ -884,7 +889,7 @@ function AgentScriptWorkspace(props: AgentScriptPanelProps) {
   const problemsCount = problems.length;
   const tabs = layout === 'legacy' ? false : (
     <EditorTabs tabs={studio.tabs} active={studio.activeTab} dirtyId={dirty && activePath ? `agent:${activePath}` : null} problems={problemsCount}
-      problemsId={activePath ? `agent:${activePath}` : null} trailing={workspaceActions} onSelect={selectTab} onClose={closeTab} />
+      problemsId={activePath ? `agent:${activePath}` : null} trailing={workspaceActions} onSelect={selectTab} onClose={closeTab} onCloseMany={closeTabs} />
   );
 
   const bottomActive: BottomTab = compact ? 'problems' : studio.bottomTab;
@@ -1020,7 +1025,7 @@ function AgentScriptWorkspace(props: AgentScriptPanelProps) {
           </div>}
 
               {!selectedAction && <div className="af-actions-list"><h2>Actions</h2><p>Explore implementations and references in the current script.</p><AgentActionExplorer actions={actions} selected={selectedActionId ?? undefined} onOpen={openAction} />{actions.length === 0 && <EmptyState compact art="code" title="No actions in this script yet.">Add an Apex or Flow action to explore its implementation here.</EmptyState>}</div>}
-          {selectedAction && <AgentActionPanel key={`${projectId}:${activePath}:${selectedAction.id}`} pluginId={pluginId} projectId={projectId} org={org} action={selectedAction} initialOrigin={selectedTab?.origin} onOriginChange={origin => setActionTabs(tabs => tabs.map(tab => tab.action.id === selectedActionId ? { ...tab, origin } : tab))} onReveal={revealLine} onOpenTarget={(target, origin) => openAction(targetAction(target, `Referenced by ${selectedAction.name}`), origin)} />}
+          {selectedAction && <AgentActionPanel key={`${projectId}:${activePath}:${selectedAction.id}`} pluginId={pluginId} projectId={projectId} org={org} action={selectedAction} initialOrigin={selectedTab?.origin} onOriginChange={origin => { chooseActionOrigin(origin); setActionTabs(tabs => tabs.map(tab => tab.action.id === selectedActionId ? { ...tab, origin } : tab)); }} onReveal={revealLine} onOpenTarget={(target, origin) => openAction(targetAction(target, `Referenced by ${selectedAction.name}`), origin)} />}
             </div>;
           }} />
         </AgentforceStudioSplit>

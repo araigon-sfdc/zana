@@ -334,6 +334,41 @@ describe('AgentScriptPanel studio layout', () => {
     expect(el.querySelector('[data-testid="studio-target-view"]')).toBeNull();
   });
 
+  it('opens every implementation view on the last Project / Org choice', async () => {
+    const first = await mount('force-app/bots/QC.agent');
+    await ready(first);
+    await openReferences(first);
+    const apex = [...first.querySelectorAll('.sf-as-explorer button')].find(n => n.textContent?.includes('Foo'))!;
+    await act(async () => { fireEvent.click(apex); });
+    await flush();
+    const orgButton = (root: ParentNode) => root.querySelector<HTMLButtonElement>('[aria-label="Implementation source"] button:last-child')!;
+    expect(orgButton(first).getAttribute('aria-pressed')).toBe('false');
+    await act(async () => { fireEvent.click(orgButton(first)); });
+    await flush();
+    expect(rpc).toHaveBeenCalledWith('salesforce', 'agentActions.source', expect.objectContaining({ target: 'apex://Foo', origin: 'org', orgAlias: 'dev' }));
+    nodes.splice(0).forEach(fn => fn());
+    rpc.mockClear();
+    const el = await mount();
+    await ready(el);
+    await flush();
+    expect(orgButton(el).getAttribute('aria-pressed')).toBe('true');
+    expect(rpc).toHaveBeenCalledWith('salesforce', 'agentActions.source', expect.objectContaining({ target: 'apex://Foo', origin: 'org' }));
+  });
+
+  it('closes editor tabs from the tab context menu', async () => {
+    const el = await mount('force-app/bots/QC.agent');
+    await ready(el);
+    await openReferences(el);
+    const apex = [...el.querySelectorAll('.sf-as-explorer button')].find(n => n.textContent?.includes('Foo'))!;
+    await act(async () => { fireEvent.click(apex); });
+    const tabs = () => [...el.querySelectorAll('[aria-label="Open files"] [role="tab"]')].map(n => n.textContent);
+    expect(tabs()).toHaveLength(2);
+    await act(async () => { fireEvent.contextMenu([...el.querySelectorAll('[aria-label="Open files"] [role="tab"]')].find(n => n.textContent?.includes('Foo'))!); });
+    await act(async () => { fireEvent.click([...el.querySelectorAll('[role="menuitem"]')].find(n => n.textContent === 'Close others')!); });
+    expect(tabs()).toEqual([expect.stringContaining('Foo')]);
+    expect(el.querySelector('[data-testid="studio-target-view"]')).toBeTruthy();
+  });
+
   it('reloads comments when the active file is opened again', async () => {
     const el = await mount('force-app/bots/QC.agent');
     await ready(el);

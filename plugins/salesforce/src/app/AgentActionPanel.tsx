@@ -155,8 +155,8 @@ export function AgentActionPanel({ pluginId, projectId, action, org, context, on
   // A dependency tab has no agent declaration, so every parameter would read as undeclared.
   const mismatches = dependency ? 0 : [...inputRows, ...outputRows].filter(isMismatch).length;
   const typeLabel = parsed?.kind === 'apex' ? 'Apex class' : flowTypeLabel(flow?.model?.meta);
-  const status = !ready ? undefined : origin === 'org' ? `${parsed?.kind === 'flow' ? 'Active' : 'Deployed'}${data?.version != null ? ` · v${data.version}` : ''}` : flow?.model?.meta?.status;
-  const sourceNote = origin === 'project' ? 'Local snapshot · may differ from deployed source' : 'Org snapshot · fetched on demand';
+  const status = !ready ? undefined : origin === 'org' ? `${parsed?.kind === 'flow' ? data?.inactive ? 'Inactive' : 'Active' : 'Deployed'}${data?.version != null ? ` · v${data.version}` : ''}` : flow?.model?.meta?.status;
+  const sourceNote = origin === 'project' ? 'Local snapshot · may differ from deployed source' : 'Org copy · retrieved in source format, refreshed when the org changes';
   const driftTitle = drift === 'differs' ? `Project copy differs from the org${orgVersion != null ? ` (v${orgVersion})` : ''}${parsed?.kind === 'flow' ? ': elements, connectors or variables changed' : ''}` : drift === 'same' ? `Project copy matches the org${orgVersion != null ? ` (v${orgVersion})` : ''}` : sourceNote;
   const owner = context ? <button type="button" className="af-backlink" title={context.title} onClick={context.onOpen}>← {context.label}</button> : action.owner ? <span>{action.owner}</span> : null;
   const loadState = (view: (data: ActionSource) => ReactNode) => !parsed ? <p className="af-action-note">This target type has no implementation viewer yet. Its action definition and usage remain available.</p> : origin === 'org' && !org ? <p className="af-action-note">Connect an org to inspect its deployed implementation.</p> : !current ? <LoadingState compact art="code" label="Loading implementation…" /> : current.error ? <p role="alert" className="af-action-note">{current.error}</p> : <>

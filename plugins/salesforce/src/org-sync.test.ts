@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { OrgSyncService, agentVersion, bareVersions, componentName, manifest, newestVersions, packageDirectories, renameBundle } from '../lib/org-sync.js';
+import { OrgSyncService, agentVersion, bareVersions, componentName, localLocator, manifest, newestVersions, packageDirectories, renameBundle } from '../lib/org-sync.js';
 import { registerOrgSync } from '../lib/org-sync-rpc.js';
 import type { ExecSfOptions, PublicOrgView } from '../lib/types.js';
 import type { SyncJob } from '../lib/org-sync-contract.js';
@@ -44,16 +44,20 @@ function fixture() {
     const xml = readFileSync(join(options!.cwd!, 'package.xml'), 'utf8');
     manifests.push(xml);
     const fileProperties: unknown[] = [];
+    const retrieved: unknown[] = [];
     for (const [, members, type] of xml.matchAll(/<types>([\s\S]*?)<name>(\w+)<\/name>/g)) {
       for (const [, name] of members!.matchAll(/<members>(\w+)<\/members>/g)) {
         fileProperties.push({ type, fullName: name, lastModifiedDate: dates[`${type}:${name}`] });
         for (const [path, content] of Object.entries(files)) {
           const prefix = `${folders[type!]}/`;
-          if (path.startsWith(prefix) && componentName(type as never, path.slice(prefix.length)) === name) put(options!.cwd!, `${D}/${path}`, content);
+          if (path.startsWith(prefix) && componentName(type as never, path.slice(prefix.length)) === name) {
+            put(options!.cwd!, `${D}/${path}`, content);
+            retrieved.push({ fullName: name, type, state: 'Created', filePath: join(options!.cwd!, D, path) });
+          }
         }
       }
     }
-    return ok({ success: true, done: true, fileProperties });
+    return ok({ success: true, done: true, fileProperties, files: retrieved });
   });
   const query = vi.fn(async (soql: string) => {
     const type = soql.match(/FROM (\w+)/)![1]!;
@@ -91,6 +95,22 @@ describe('fetch latest helpers', () => {
     expect(manifest(['ApexClass:A', 'ApexClass:B', 'ApexTrigger:T'], '67.0')).toMatch(/<members>A<\/members>\n {4}<members>B<\/members>\n {4}<name>ApexClass<\/name>[\s\S]*<name>ApexTrigger<\/name>[\s\S]*<version>67.0<\/version>/);
     const rows = [{ name: 'Support_2', at: null, by: null }, { name: 'Support_9', at: null, by: null }, { name: 'Other_4', at: null, by: null }, { name: 'Old_1', at: null, by: null }];
     expect([...newestVersions(rows, new Map([['Support', 1], ['Old_3', 1]]))]).toEqual(['Support_9']);
+  });
+
+  it('locates where the project keeps a component, in any package directory or folder layout', async () => {
+    const root = realpathSync(temp());
+    put(root, 'sfdx-project.json', JSON.stringify({ packageDirectories: [{ path: 'force-app', default: true }, { path: 'packages/billing' }, { path: 'gone' }] }));
+    put(root, 'force-app/main/default/classes/A.cls', '');
+    put(root, 'packages/billing/src/classes/B.cls', '');
+    put(root, 'packages/billing/src/lwc/card/card.js', '');
+    put(root, 'packages/billing/.cache/classes/C.cls', '');
+    put(root, 'packages/billing/node_modules/classes/C.cls', '');
+    const locate = await localLocator(root);
+    expect(locate(['classes/A.cls'])).toBe(join(root, 'force-app/main/default'));
+    expect(locate(['classes/Missing.cls', 'classes/B.cls'])).toBe(join(root, 'packages/billing/src'));
+    expect(locate(['lwc/card/card.html', 'lwc/card/card.js'])).toBe(join(root, 'packages/billing/src'));
+    expect(locate(['classes/C.cls'])).toBeUndefined();
+    expect(locate([])).toBeUndefined();
   });
 
   it('maps an agent version returned under its base name only when that is unambiguous', () => {
@@ -169,11 +189,13 @@ describe('fetch latest', () => {
     const base = execSf.getMockImplementation()!;
     execSf.mockImplementation(async (args, options) => {
       const result = await base(args, options);
-      if (args[0] === 'project') {
-        put(options!.cwd!, `${D}/aiAuthoringBundles/Support/Support.agent`, large);
-        put(options!.cwd!, `${D}/aiAuthoringBundles/Support/Support.bundle-meta.xml`, '<meta/>');
+      if (args[0] !== 'project') return result;
+      const payload = JSON.parse(result.stdout);
+      for (const [file, content] of [['Support.agent', large], ['Support.bundle-meta.xml', '<meta/>']] as const) {
+        put(options!.cwd!, `${D}/aiAuthoringBundles/Support/${file}`, content);
+        payload.result.files.push({ fullName: 'Support', type: 'AiAuthoringBundle', state: 'Created', filePath: join(options!.cwd!, D, 'aiAuthoringBundles/Support', file) });
       }
-      return result;
+      return { ...result, stdout: JSON.stringify(payload) };
     });
     await service.check(root, 'agentforce');
     const { jobId } = await service.start(root, { components: ['AiAuthoringBundle:Support_4'], orgId: org.orgId });
