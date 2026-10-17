@@ -45,3 +45,9 @@
 
 **When changing:**
 - Guard tests must pass before PR. No `'zana'` string literal in apps/app/src/** source (registration site guarded by `apps/server/src/services/extensions/__tests__/core-extension-separation.guard.test.ts`).
+
+## Sidebar destination visibility
+
+`SidebarRail` owns destination hiding for both global and project rails. Keep the full catalogue in `useSortableSidebarNav` and filter only while rendering; otherwise hiding drops saved positions. `sidebarNavHidden` / `projectSidebarNavHidden` persist independently on AppConfig and hydrate through `applySidebarChrome`, including config changes from other windows. Main normalizes and bounds the id lists in the project config store.
+
+Hidden destinations remain enabled and reachable through More, an icon button beside Settings in the utility bar whose menu opens upward. Customize navigation lists available rows (including hidden ones); collection sections and Settings stay accessible. Restore defaults writes visibility and order together; failed writes roll back. Tests: `components/sidebar/SidebarNavigation.test.tsx`, `e2e/sidebar-visibility.spec.ts`.

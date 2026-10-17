@@ -18,6 +18,7 @@ vi.mock('../plugins/plugin-slots.js', () => ({
 }));
 vi.mock('./sidebar/useThreadRowSplitDrag.js', () => ({ usePaneContentSplitDrag: h.split }));
 vi.mock('./sidebarSortable.js', () => ({
+  PROJECT_NAV_ORDER_KEY: 'zcc.projectSidebarNavOrder',
   SortableNavItem: () => { throw new Error('Mobile navigation must not mount sortable rows'); },
   SortableSidebarSection: () => { throw new Error('Mobile navigation must not mount sortable sections'); },
   useSortableSidebarNav: (_key: string, ids: string[]) => ({ pinnedNavIds: ids, sortableNavIds: [], trailingNavIds: [], consumeNavClick: h.consume })

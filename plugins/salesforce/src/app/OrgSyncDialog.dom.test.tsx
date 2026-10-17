@@ -1,7 +1,7 @@
 /** @vitest-environment happy-dom */
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { OrgSyncDialog, syncGroups } from './OrgSyncDialog.js';
+import { OrgSyncDialog, agentSelection, syncGroups } from './OrgSyncDialog.js';
 import type { SyncCheck, SyncComponent, SyncJob } from '../../lib/org-sync-contract.js';
 
 const call = vi.fn();
@@ -48,6 +48,8 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.useRealTimers(); });
 const show = (scope: 'apex' | 'agentforce' | 'all' = 'apex') => render(<OrgSyncDialog call={call} scope={scope} onClose={close} />);
 const calls = (method: string) => call.mock.calls.filter(([name]) => name === method).map(([, args]) => args);
+/** Leaves the summary for the full list, which keeps the recommended selection. */
+const showAll = async () => fireEvent.click(await screen.findByRole('button', { name: /^Show all/ }));
 
 it('groups a check and preselects only the safe defaults', () => {
   const groups = syncGroups(standard);
@@ -59,6 +61,7 @@ it('groups a check and preselects only the safe defaults', () => {
 
 it('checks, fetches the chosen components, resolves a conflict with its diff and writes', async () => {
   show();
+  await showAll();
   expect(await screen.findByText('Fetch 3 components')).toBeTruthy();
   expect(screen.getByText(/7 components up to date/)).toBeTruthy();
   expect(screen.getByText(/No longer in the org, kept locally: Gone/)).toBeTruthy();
@@ -110,6 +113,7 @@ it('checks, fetches the chosen components, resolves a conflict with its diff and
 it('polls a running fetch and cancels it when the dialog closes', async () => {
   status = [{ state: 'running', done: 1, total: 3 }, ready];
   show();
+  await showAll();
   fireEvent.click(await screen.findByText('Fetch 3 components'));
   await screen.findByText('1 of 3 retrieved', {}, { timeout: 2000 });
   await screen.findByText(/1 in conflict/, {}, { timeout: 2500 });
@@ -122,6 +126,7 @@ it('polls a running fetch and cancels it when the dialog closes', async () => {
 it('stops polling and releases the job when unmounted mid-fetch', async () => {
   status = [{ state: 'running', done: 0, total: 3 }];
   const mounted = show();
+  await showAll();
   fireEvent.click(await screen.findByText('Fetch 3 components'));
   await screen.findByText('0 of 3 retrieved');
   mounted.unmount();
@@ -132,13 +137,14 @@ it('switches scope, reports check and fetch failures and the empty states', asyn
   handlers['sync.check'] = ({ scope }) => scope === 'agentforce' ? { ok: false, error: 'Org expired' } : { ok: true, data: check([], { truncated: true }) };
   show('all');
   expect(await screen.findByText(/Nothing new in the org · Showing the first results only/)).toBeTruthy();
-  expect(screen.getByText('Fetch 0 components')).toHaveProperty('disabled', true);
+  expect(screen.queryByRole('button', { name: /^Show all/ })).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: 'Agents' }));
   expect((await screen.findByRole('alert')).textContent).toBe('Org expired');
   expect(screen.getByRole('button', { name: 'Agents' }).getAttribute('aria-pressed')).toBe('true');
 
   handlers['sync.check'] = () => ({ ok: true, data: standard });
   fireEvent.click(screen.getByRole('button', { name: 'Apex & LWC' }));
+  await showAll();
   status = [{ state: 'failed', error: 'Retrieve failed: INVALID_SESSION' }];
   fireEvent.click(await screen.findByText('Fetch 3 components'));
   expect((await screen.findByRole('alert')).textContent).toBe('Retrieve failed: INVALID_SESSION');
@@ -154,6 +160,7 @@ it('switches scope, reports check and fetch failures and the empty states', asyn
 it('ends a fetch that changes nothing and reports an expired apply', async () => {
   status = [{ ...ready, files: [{ path: 'a.cls', key: 'ApexClass:A', action: 'same' }], missing: [] } as SyncJob];
   const mounted = show();
+  await showAll();
   fireEvent.click(await screen.findByText('Fetch 3 components'));
   expect(await screen.findByText('Your project already matches the org for 3 components.')).toBeTruthy();
   expect(calls('sync.cancel')).toEqual([{ jobId: 'job1' }]);
@@ -164,6 +171,7 @@ it('ends a fetch that changes nothing and reports an expired apply', async () =>
   handlers['sync.apply'] = () => ({ ok: true, data: { state: 'failed', error: 'Fetch expired' } });
   handlers['sync.diff'] = () => ({ ok: false, error: 'Diff unavailable' });
   show();
+  await showAll();
   fireEvent.click(await screen.findByText('Fetch 3 components'));
   fireEvent.click(await screen.findByRole('button', { name: 'Diff' }));
   expect((await screen.findByRole('alert')).textContent).toBe('Diff unavailable');
@@ -184,6 +192,8 @@ it('caps long lists and shows the full diff fallback for very large files', asyn
   handlers['sync.diff'] = () => ({ ok: true, data: { path: 'big.cls', local: Array.from({ length: 2000 }, (_, i) => `l${i}`).join('\n'), org: Array.from({ length: 2000 }, (_, i) => `o${i}`).join('\n') } });
   handlers['sync.apply'] = () => ({ ok: true, data: { state: 'applied', written: 102, kept: 1, skipped: [] } });
   show();
+  expect(await screen.findByText(/No longer in the org, kept locally: D0, .* and 2 more$/)).toBeTruthy();
+  await showAll();
   expect(await screen.findByText('and 5 more')).toBeTruthy();
   expect(screen.getByText(/and 2 more$/)).toBeTruthy();
   fireEvent.click(screen.getByText('Fetch 105 components'));
@@ -198,6 +208,70 @@ it('caps long lists and shows the full diff fallback for very large files', asyn
 it('blocks fetching more than the per-fetch maximum', async () => {
   handlers['sync.check'] = () => ({ ok: true, data: check(Array.from({ length: 5001 }, (_, index) => row(`C${index}`, 'changed'))) });
   show();
+  expect(await screen.findByRole('button', { name: 'Update 5,000' })).toBeTruthy();
+  await showAll();
   expect(await screen.findByText('Fetch 5,001 components')).toHaveProperty('disabled', true);
   expect(screen.getByText('Fetch at most 5,000 components at a time.')).toBeTruthy();
+});
+
+it('opens on a summary with one action per group, and Choose narrows the list to that group', async () => {
+  show();
+  const changed = within(await screen.findByRole('region', { name: 'Changed in org' }));
+  expect(changed.getByText('1 · Changed in org')).toBeTruthy();
+  expect(changed.getByText(/Latest: Ada,/)).toBeTruthy();
+  expect(within(screen.getByRole('region', { name: 'Changed in both' })).getByRole('button', { name: 'Review' }).className).toContain('primary');
+  expect(within(screen.getByRole('region', { name: 'Not compared yet' })).getByRole('button', { name: 'Compare' })).toBeTruthy();
+  expect(screen.getByText(/No longer in the org, kept locally: Gone/)).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Show all 5 components' })).toBeTruthy();
+
+  fireEvent.click(within(screen.getByRole('region', { name: 'Only in org' })).getByRole('button', { name: 'Choose…' }));
+  expect(screen.getByText('Fetch 1 component')).toBeTruthy();
+  fireEvent.change(screen.getByRole('searchbox', { name: 'Filter components' }), { target: { value: 'zzz' } });
+  expect(screen.getByText(/No names match/)).toBeTruthy();
+  fireEvent.change(screen.getByRole('searchbox', { name: 'Filter components' }), { target: { value: 'ORG' } });
+  expect(screen.getAllByRole('region').map(node => node.getAttribute('aria-label'))).toEqual(['Changed in org']);
+  fireEvent.click(screen.getByRole('button', { name: '← Summary' }));
+
+  fireEvent.click(within(screen.getByRole('region', { name: 'Changed in org' })).getByRole('button', { name: 'Update' }));
+  await screen.findByText(/1 in conflict/);
+  expect(calls('sync.fetch.start')).toEqual([{ components: ['ApexClass:Org'], orgId: '00D1' }]);
+});
+
+it('checks one agent, lists what it uses by kind with up-to-date rows, and fetches all of it by default', async () => {
+  const agentCheck = check([
+    row('Support_3', 'new', { key: 'AiAuthoringBundle:Support_3', type: 'AiAuthoringBundle', latest: true }),
+    row('Route', 'unknown', { key: 'Flow:Route', type: 'Flow' }),
+    row('Edited', 'conflict'), row('Old', 'deleted'),
+  ], { agent: {
+    name: 'Support',
+    current: [{ key: 'GenAiPromptTemplate:Summarize', type: 'GenAiPromptTemplate', fullName: 'Summarize', modifiedAt: null, modifiedBy: null }],
+    missing: ['ApexClass:Ghost'],
+  } });
+  handlers['sync.check'] = () => ({ ok: true, data: agentCheck });
+  expect([...agentSelection(agentCheck)]).toEqual(['AiAuthoringBundle:Support_3', 'Flow:Route', 'ApexClass:Edited']);
+  render(<OrgSyncDialog call={call} scope="agentforce" agent="Support" onClose={close} />);
+  expect(screen.getByText(/Comparing Support and what it uses/)).toBeTruthy();
+  expect(await screen.findByText('Fetch 3 components')).toBeTruthy();
+  expect(calls('sync.check')).toEqual([{ agent: 'Support' }]);
+  expect(screen.getByRole('heading').textContent).toBe('Fetch Support from org');
+  expect(screen.queryByRole('group', { name: 'What to fetch' })).toBeNull();
+  expect(screen.getAllByRole('region').map(node => node.getAttribute('aria-label'))).toEqual(['Agent', 'Apex', 'Flows', 'Prompt templates']);
+  expect(within(screen.getByRole('region', { name: 'Agent' })).getByText('Newer version')).toBeTruthy();
+  expect(within(screen.getByRole('region', { name: 'Apex' })).getByText('Gone from org')).toBeTruthy();
+  expect(screen.getByRole('checkbox', { name: 'Summarize is up to date' })).toHaveProperty('disabled', true);
+  expect(screen.getByText(/4 components to compare · 1 up to date/)).toBeTruthy();
+  expect(screen.getByText('Used by the agent but not in the org: Ghost')).toBeTruthy();
+  fireEvent.click(within(screen.getByRole('region', { name: 'Flows' })).getByRole('checkbox'));
+  expect(screen.getByText('Fetch 2 components')).toBeTruthy();
+  fireEvent.click(within(screen.getByRole('region', { name: 'Flows' })).getByRole('checkbox'));
+  fireEvent.click(screen.getByText('Fetch 3 components'));
+  await screen.findByText(/1 in conflict/);
+  expect(calls('sync.fetch.start')).toEqual([{ components: ['AiAuthoringBundle:Support_3', 'ApexClass:Edited', 'Flow:Route'], orgId: '00D1' }]);
+});
+
+it('says an agent is up to date when nothing related changed', async () => {
+  handlers['sync.check'] = () => ({ ok: true, data: check([], { agent: { name: 'Support', current: [], missing: [] } }) });
+  render(<OrgSyncDialog call={call} scope="agentforce" agent="Support" onClose={close} />);
+  expect(await screen.findByText('Support and what it uses are up to date.')).toBeTruthy();
+  expect(screen.getByText('Fetch 0 components')).toHaveProperty('disabled', true);
 });

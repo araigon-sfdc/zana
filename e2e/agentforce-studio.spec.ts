@@ -28,7 +28,10 @@ const test = base.extend({
       const query = new URL(path, 'http://localhost').searchParams.get('q') ?? '';
       if (path.includes('/tooling/query')) {
         if (query.includes('FROM BotVersion')) { res.writeHead(400, { 'content-type': 'application/json' }); res.end(JSON.stringify([{ errorCode: 'INVALID_TYPE', message: "sObject type 'BotVersion' is not supported." }])); return; }
-        result = query.includes('FROM ApexClass') ? { records: [{ Body: '// Deployed org implementation\n' + ACTION_APEX + '// Deployed detail\n'.repeat(1200) + '// ORG_SOURCE_COMPLETE' }] } : { records: [{ Id: '3010001', VersionNumber: 7, Metadata: ACTION_FLOW }] };
+        // Freshness stamps: the org copy is then retrieved in source format by the fake CLI below.
+        if (query.includes('Id, LastModifiedDate FROM ApexClass')) result = { records: [{ Id: '01p000000000001', LastModifiedDate: '2026-10-01T10:00:00.000+0000' }] };
+        else if (query.includes('FROM FlowDefinition')) result = { records: [{ Id: '300000000000001', LastModifiedDate: '2026-10-01T10:00:00.000+0000', ActiveVersion: { VersionNumber: 7 }, LatestVersion: { VersionNumber: 7, LastModifiedDate: '2026-10-01T10:00:00.000+0000' } }] };
+        else result = query.includes('FROM ApexClass') ? { records: [{ Body: '// Deployed org implementation\n' + ACTION_APEX + '// Deployed detail\n'.repeat(1200) + '// ORG_SOURCE_COMPLETE' }] } : { records: [{ Id: '3010001', VersionNumber: 7, Metadata: ACTION_FLOW }] };
       } else if (path.includes('/query?') && query.includes('FROM BotVersion')) {
         if (existsSync(join(home, 'sf-versions-unavailable'))) { res.writeHead(503, { 'content-type': 'application/json' }); res.end(JSON.stringify([{ errorCode: 'SERVER_UNAVAILABLE', message: 'Try again shortly.' }])); return; }
         result = { totalSize: 1, done: true, records: [{ Id: '0X9000000000001', Status: 'Inactive', VersionNumber: 7, LastModifiedDate: '2026-10-01T10:00:00.000Z' }] };
@@ -96,6 +99,26 @@ if (args[0] === 'org' && args[1] === 'list' && args[2] === 'metadata') {
   while (state() === 'hold' && Date.now() < deadline) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
   if (state() === 'empty') result = [];
   if (state() === 'denied') { console.log(JSON.stringify({ status: 1, message: 'Metadata API access denied for this org.' })); process.exit(1); }
+}
+// Implementation source, retrieved by manifest like the real CLI: files land in the temp project and are reported in files[].
+if (args[0] === 'project' && args[1] === 'retrieve' && args.includes('--manifest')) {
+  const xml = fs.readFileSync(path.join(process.cwd(), 'package.xml'), 'utf8');
+  const base = path.join(process.cwd(), 'force-app/main/default');
+  const files = [];
+  const write = (type, fullName, rest, content) => {
+    const file = path.join(base, rest);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, content);
+    files.push({ fullName, type, state: 'Created', filePath: file });
+  };
+  if (xml.includes('<members>OrderLookup</members>')) {
+    write('ApexClass', 'OrderLookup', 'classes/OrderLookup.cls', ${JSON.stringify('// Deployed org implementation\n' + ACTION_APEX + '// Deployed detail\n'.repeat(1200) + '// ORG_SOURCE_COMPLETE')});
+    write('ApexClass', 'OrderLookup', 'classes/OrderLookup.cls-meta.xml', '<ApexClass/>');
+  }
+  if (xml.includes('<members>CheckReturn</members>')) write('Flow', 'CheckReturn', 'flows/CheckReturn.flow-meta.xml', ${JSON.stringify(ACTION_FLOW_XML)});
+  fs.appendFileSync(path.join(process.env.HOME, 'source-retrievals.jsonl'), JSON.stringify({ args, cwd: process.cwd() }) + '\\n');
+  console.log(JSON.stringify({ status: 0, result: { success: true, done: true, files, fileProperties: [] } }));
+  process.exit(0);
 }
 // Opt-in org versions for the Release viewer: { fullName: { target, content } }.
 const versionsPath = path.join(process.env.HOME, 'sf-version-bundles');
@@ -572,11 +595,11 @@ test('Agentforce action explorer: real source RPC, Apex colors, Flow map and pre
   await openTool(studio, 'Actions');
   await captureElectronScreenshot(app.electron, page, testInfo.outputPath('actions-apex-dark.png'));
   await detail.getByRole('button', { name: 'Org · studio' }).click();
-  await expect(detail.getByText('studio · Deployed Apex')).toBeVisible();
+  await expect(detail.getByText('Deployed', { exact: true })).toBeVisible();
   await source.locator('.monaco-editor').click({ position: { x: 120, y: 45 } });
   await page.keyboard.press(process.platform === 'darwin' ? 'Meta+ArrowDown' : 'Control+End');
   await expect(source.locator('.view-lines')).toContainText('ORG_SOURCE_COMPLETE');
-  await detail.getByRole('button', { name: 'Inputs & outputs' }).click();
+  await detail.getByRole('button', { name: 'Contract', exact: true }).click();
   await expect(detail.getByText(/Name matched/)).toHaveCount(2);
   await detail.getByRole('button', { name: 'Used by' }).click();
   await expect(detail.getByText(/set @variables.status/)).toBeVisible();
@@ -600,11 +623,11 @@ test('Agentforce action explorer: real source RPC, Apex colors, Flow map and pre
   await expect(flow.getByRole('button', { name: 'Select components to edit with AI' })).toHaveCount(0);
   await captureElectronScreenshot(app.electron, page, testInfo.outputPath('actions-flow-dark.png'));
   await detail.getByRole('button', { name: 'Org · studio' }).click();
-  await expect(detail.getByText('studio · Active Flow · v7')).toBeVisible();
+  await expect(detail.getByText('Active · v7', { exact: true })).toBeVisible();
   await expect(flow.locator('svg text').filter({ hasText: /^Within 30 days$/ })).toBeVisible();
   await detail.locator('.af-flow-dependencies summary').click();
   await detail.getByRole('button', { name: 'Open apex://OrderLookup ↗' }).click();
-  await expect(detail.getByText('studio · Deployed Apex')).toBeVisible();
+  await expect(detail.getByText('Deployed', { exact: true })).toBeVisible();
   await page.evaluate(() => { document.documentElement.dataset.theme = 'light'; });
   await expect.poll(keywordColor).toBe('rgb(166, 38, 164)');
   await captureElectronScreenshot(app.electron, page, testInfo.outputPath('actions-apex-light.png'));
@@ -613,11 +636,31 @@ test('Agentforce action explorer: real source RPC, Apex colors, Flow map and pre
   await page.frameLocator('iframe[title="AgentScript graph"]').getByRole('button', { name: 'Inspect refund', exact: true }).click();
   await expect(agent.locator('.view-lines')).toBeVisible();
   await expect(detail.getByRole('heading', { name: 'CheckReturn' })).toBeVisible();
+  // The last Project / Org choice carries over to the next implementation opened.
+  await expect(detail.getByRole('button', { name: 'Org · studio' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(detail.getByText('Active · v7', { exact: true })).toBeVisible();
+  const retrievals = readFileSync(join(home, 'source-retrievals.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+  expect(retrievals.every(row => row.args.includes('--manifest') && !row.cwd.startsWith(join(home, 'dx')))).toBe(true);
   await app.electron.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].setSize(900, 850));
   expect(await studio.evaluate(el => el.scrollWidth - el.clientWidth)).toBeLessThanOrEqual(1);
   await captureElectronScreenshot(app.electron, page, testInfo.outputPath('actions-flow-narrow-light.png'));
   await expect(detail.getByRole('button', { name: 'Last preview' })).toHaveCount(0);
   expect(await studio.innerText()).not.toContain('PRIVATE_TOKEN');
+  // Editor tabs: right-click offers bulk close; Close others keeps only the clicked tab.
+  await showAllAgents(studio);
+  await studio.getByTestId('salesforce-agent-script-file:force-app/Support.agent').click();
+  const openFiles = studio.getByRole('tablist', { name: 'Open files' });
+  await expect(openFiles.getByRole('tab', { name: /Support\.agent/ })).toBeVisible();
+  await openFiles.getByRole('tab', { name: /Orders\.agent/ }).click({ button: 'right' });
+  const tabMenu = studio.getByRole('menu', { name: /Orders\.agent tab actions/ });
+  await expect(tabMenu.getByRole('menuitem')).toHaveText(['Close', 'Close others', 'Close to the right', 'Close all']);
+  await captureElectronScreenshot(app.electron, page, testInfo.outputPath('editor-tab-menu.png'));
+  await page.keyboard.press('Escape');
+  await expect(tabMenu).toHaveCount(0);
+  await openFiles.getByRole('tab', { name: /Orders\.agent/ }).click({ button: 'right' });
+  await tabMenu.getByRole('menuitem', { name: 'Close others' }).click();
+  await expect(openFiles.getByRole('tab', { name: /Support\.agent/ })).toHaveCount(0);
+  await expect(openFiles.getByRole('tab', { name: /Orders\.agent/ })).toHaveAttribute('aria-selected', 'true');
   expect(readFileSync(join(home, 'dx', 'force-app', 'Orders.agent'), 'utf8')).toBe(ACTION_AGENT);
   expect(readFileSync(join(home, 'dx', 'force-app', 'main', 'default', 'classes', 'OrderLookup.cls'), 'utf8')).toBe(ACTION_APEX);
   expect(errors).toEqual([]);

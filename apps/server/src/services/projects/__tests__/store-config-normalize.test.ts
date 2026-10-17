@@ -109,6 +109,20 @@ describe('normalizeConfig — sidebar chrome', () => {
       projectSidebarNavOrder: ['agents']
     }));
   });
+
+  it('normalizes and bounds hidden destinations independently for each rail', () => {
+    expect(normalizeConfig({
+      sidebarNavHidden: [' plugin/main ', '', 'plugin/main', 42, 'x'.repeat(257)] as string[],
+      projectSidebarNavHidden: ['feed']
+    })).toMatchObject({ sidebarNavHidden: ['plugin/main'], projectSidebarNavHidden: ['feed'] });
+    expect(normalizeConfig({ sidebarNavHidden: [], projectSidebarNavHidden: [] })).toMatchObject({
+      sidebarNavHidden: [], projectSidebarNavHidden: []
+    });
+    expect(normalizeConfig({ sidebarNavHidden: 'invalid' as never })).not.toHaveProperty('sidebarNavHidden');
+    expect(normalizeConfig({})).not.toHaveProperty('projectSidebarNavHidden');
+    const ids = Array.from({ length: 250 }, (_, index) => `item-${index}`);
+    expect(normalizeConfig({ projectSidebarNavHidden: ids }).projectSidebarNavHidden).toHaveLength(200);
+  });
 });
 
 describe('normalizeConfig — Team organization', () => {

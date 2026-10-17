@@ -1,6 +1,6 @@
 import { useSalesforceControl } from './useSalesforceControl.js';
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
-import { Bot, Cloud, Code, FlaskConical, Files, MessageSquare, Network, Play, Rocket, Search, Sparkles, Zap } from 'lucide-react';
+import { Bot, Cloud, Code, FlaskConical, Files, MessageSquare, Network, PanelRight, Play, Rocket, Search, Sparkles, Zap } from 'lucide-react';
 import { callPluginRpc, useRealtime, useSettings, useZccContext, useZccNavigate } from '@zana-ai/zcc-plugin-sdk/app';
 import { type AgentScriptDialect, type PublicOrgView } from '../../lib/types.js';
 import {
@@ -18,6 +18,7 @@ import { takeQueuedAgentScriptOpen } from './agent-script-open.js';
 import { focusKey, parseAgentforcePanelFocus, type StudioFocus } from './agentforce-panel-params.js';
 import { OrgPicker } from './OrgPicker.js';
 import { AgentScriptDocumentBar } from './AgentScriptDocumentBar.js';
+import { OrgSyncDialog } from './OrgSyncDialog.js';
 import {
   PLAYGROUND_ASSET_SRC,
   readDocumentTheme,
@@ -144,6 +145,17 @@ const STUDIO_TOOL_FOR: Record<string, StudioTool | null> = { test: 'tests', rele
 const TARGET_PATTERN = /^(apex|flow):\/\/([A-Za-z][A-Za-z0-9_.]*)$/;
 const basename = (path: string) => path.split('/').pop() ?? path;
 const targetAction = (target: string, owner: string): AgentAction => ({ id: `dependency:${target}`, name: target.split('://')[1] ?? target, owner, target, line: 1, description: '', inputs: [], outputs: [], uses: [] });
+
+/** The agent a dependency tab belongs to: the loaded agent when it references the target, else the first agent that does. */
+export function dependencyContext(target: string, kind: string, apiName: string, nodes: ExplorerNode[], activePath: string | null, actions: AgentAction[]): { path: string; label: string; title: string } | null {
+  const usedBy = nodes.find(node => node.kind === kind && node.apiName === apiName)?.usedBy ?? [];
+  const calls = activePath ? actions.filter(action => action.target === target).length : 0;
+  const path = activePath && (calls > 0 || usedBy.includes(activePath)) ? activePath : usedBy[0];
+  if (!path) return null;
+  const others = usedBy.filter(row => row !== path).length;
+  const detail = path === activePath && calls ? ` · ${calls} ${calls === 1 ? 'action' : 'actions'}` : '';
+  return { path, label: `${basename(path)}${detail}${others ? ` · +${others}` : ''}`, title: [path, ...usedBy.filter(row => row !== path)].join('\n') };
+}
 const SAVE_DEBOUNCE_MS = 150;
 /** Edits reported this soon after an agent reveal come from the reveal, not the person. */
 const OWN_MOVE_MS = 1000;
@@ -160,6 +172,9 @@ type AgentScriptPanelProps = {
   /** The open agent file, then null once the panel goes away. Pass a stable function. */
   onActivePath?: (path: string | null) => void;
 };
+/** `…/aiAuthoringBundles/Name/Name.agent` → `Name`; other files have no bundle to fetch. */
+export const bundleName = (path: string | null) => path?.match(/(?:^|\/)([A-Za-z][A-Za-z0-9_]*)\/\1\.agent$/)?.[1] ?? null;
+
 export function AgentScriptPanel(props: AgentScriptPanelProps) {
   useContextChangeRelay();
   const context = useZccContext();
@@ -218,7 +233,7 @@ function AgentScriptWorkspace(props: AgentScriptPanelProps) {
   const compact = layout === 'compact';
   const wide = layout === 'wide';
   const studioLayout = useStudioLayout(draftScope);
-  const { state: studio, patch, openTab, selectTab, closeTab } = studioLayout;
+  const { state: studio, patch, openTab, selectTab, closeTab, closeTabs } = studioLayout;
   const [quickOpen, setQuickOpen] = useState(false);
   const suites = useSuites(pluginId, projectId);
   const [playgroundReady, setPlaygroundReady] = useState(false);
@@ -303,7 +318,11 @@ function AgentScriptWorkspace(props: AgentScriptPanelProps) {
   }, [openTool]);
   const agentsFocusHandled = useCallback((seq: number) => setAgentsFocus(current => current?.seq === seq ? null : current), []);
 
-  const openAction = useCallback((action: AgentAction, origin: 'project' | 'org' = 'project') => {
+  // The Project / Org choice carries over to every implementation view in this project.
+  const actionOrigin = useRef(studio.actionOrigin);
+  actionOrigin.current = studio.actionOrigin;
+  const chooseActionOrigin = useCallback((origin: 'project' | 'org') => patch({ actionOrigin: origin }), [patch]);
+  const openAction = useCallback((action: AgentAction, origin: 'project' | 'org' = actionOrigin.current) => {
     setActionTabs(tabs => tabs.some(tab => tab.action.id === action.id) ? tabs.map(tab => tab.action.id === action.id ? { ...tab, action, origin } : tab) : [...tabs.slice(-7), { action, origin }]);
     setSelectedActionId(action.id);
     openTool('actions');
@@ -550,6 +569,9 @@ function AgentScriptWorkspace(props: AgentScriptPanelProps) {
     if (!alive.current) return;
     setCompileState(current => current?.status === 'running' && current.path === path ? parseCompileReply(path, sha, reply) : current);
   }, [patch, pluginId, rpcArgs, threadId]);
+
+  const [fetchAgent, setFetchAgent] = useState<string | null>(null);
+  const syncCall = useCallback((method: string, args?: Record<string, unknown>) => callPluginRpc(pluginId, method, rpcArgs(args)), [pluginId, rpcArgs]);
 
   const [openingBuilder, setOpeningBuilder] = useState(false);
   const openInBuilder = useCallback(async () => {
@@ -823,49 +845,60 @@ function AgentScriptWorkspace(props: AgentScriptPanelProps) {
     else if (item.id.startsWith('node:')) { const node = explorerNodes[Number(item.id.slice(5))]; if (node) openNode(node); }
   };
 
+  // Studio tabs own the project-wide controls, so the document bar only carries what acts on the open agent.
+  const stripOwnsWorkspace = layout !== 'legacy' && studio.tabs.length > 0;
+  const followChip = layout !== 'legacy' && (driver || threadId || followPaused) ? <FollowChip driver={driver ?? (threadId ? 'this thread' : undefined)} paused={followPaused} onToggle={() => setFollowPaused(paused => !paused)} /> : undefined;
+  const orgPicker = props.orgPicker !== false && <OrgPicker pluginId={pluginId} projectId={projectId} compact appearance="toolbar" />;
+  const activeBundle = bundleName(activePath);
   const documentBar = (
-      <>
-        <AgentScriptDocumentBar path={activePath} dirty={dirty} busy={busy} issues={issues}
-          saveDisabled={saveDisabled} saveAsDisabled={!saveEnabled || busy || !playgroundReady || !activePath} panelOpen={tools.state.open}
-          headerActions={props.headerActions}
-          follow={layout !== 'legacy' && (driver || threadId || followPaused) ? <FollowChip driver={driver ?? (threadId ? 'this thread' : undefined)} paused={followPaused} onToggle={() => setFollowPaused(paused => !paused)} /> : undefined}
-          orgPicker={props.orgPicker !== false && <OrgPicker pluginId={pluginId} projectId={projectId} compact appearance="toolbar" />}
-          onBrowse={() => browseAgents()} onSave={() => void save()}
-          onPreview={() => openTool('preview')}
-          onSaveAs={() => { setError(null); setSaveAsOpen(true); }} onShowPanel={tools.toggle}
-          {...(layout === 'legacy' ? {} : {
-            shortcutHint: wide, hidePanelToggle: compact,
-            onQuickOpen: () => setQuickOpen(true),
-            onCompile: () => void compile(), compiling: compiled?.status === 'running',
-            onPublish: () => openTool('release'),
-            onOpenInBuilder: () => void openInBuilder(), openingBuilder
-          })} />
-        {orgSessionLabel(org) ? (
-          <span hidden className="sf-as-crumb-seg" data-testid="salesforce-playground-org">
-            {orgSessionLabel(org)}
-          </span>
-        ) : null}
-      </>
+      <AgentScriptDocumentBar path={activePath} dirty={dirty} busy={busy} issues={issues}
+        saveDisabled={saveDisabled} saveAsDisabled={!saveEnabled || busy || !playgroundReady || !activePath} panelOpen={tools.state.open}
+        {...(stripOwnsWorkspace ? {} : { headerActions: props.headerActions, follow: followChip, orgPicker })}
+        onBrowse={() => browseAgents()} onSave={() => void save()}
+        onPreview={() => openTool('preview')}
+        onSaveAs={() => { setError(null); setSaveAsOpen(true); }} onShowPanel={tools.toggle}
+        {...(layout === 'legacy' ? {} : {
+          shortcutHint: wide, hidePanelToggle: compact || stripOwnsWorkspace,
+          ...(stripOwnsWorkspace ? {} : { onQuickOpen: () => setQuickOpen(true) }),
+          onCompile: () => void compile(), compiling: compiled?.status === 'running',
+          onPublish: () => openTool('release'),
+          onOpenInBuilder: () => void openInBuilder(), openingBuilder,
+          ...(activeBundle ? { onFetch: () => setFetchAgent(activeBundle) } : {})
+        })} />
   );
+  const workspaceActions = stripOwnsWorkspace ? <>
+    {followChip}
+    {props.headerActions}
+    <button type="button" className="icon-btn" title="Go to file (⌘P)" aria-label="Go to file" onClick={() => setQuickOpen(true)}><Search size={15} aria-hidden="true" /></button>
+    {orgPicker && <div className="af-document-org">{orgPicker}</div>}
+    {!tools.state.open && !compact && <button type="button" className="icon-btn" title="Show side panel" aria-label="Show side panel" aria-expanded={false} onClick={tools.toggle}><PanelRight size={15} aria-hidden="true" /></button>}
+  </> : undefined;
 
   const showTargetTab = layout !== 'legacy' && activeEditorTab !== null && activeEditorTab.kind !== 'agent';
+  const openAgentTab = (path: string) => { if (path === activePath) selectTab(`agent:${path}`); else void openFile(path); };
   const targetTabView = showTargetTab && activeEditorTab ? (
     <div className="sf-etab-view" data-testid="studio-target-view">
       {activeEditorTab.kind === 'type'
         ? <LightningTypeView key={`${projectId}:${activeEditorTab.id}`} pluginId={pluginId} projectId={projectId} typeRef={activeEditorTab.target ?? activeEditorTab.label}
           usedBy={explorerNodes.find(node => node.kind === 'lightning-type' && node.apiName === (activeEditorTab.target ?? activeEditorTab.label))?.usedBy}
           onOpenAgent={path => void openFile(path)} />
-        : <AgentActionPanel key={`${projectId}:${activeEditorTab.id}`} pluginId={pluginId} projectId={projectId} org={org}
-        action={targetAction(activeEditorTab.target ?? `${activeEditorTab.kind}://${activeEditorTab.label}`, activeEditorTab.kind === 'apex' ? 'Apex (read-only)' : 'Flow')}
-        onReveal={() => undefined}
-        onOpenTarget={target => { const match = TARGET_PATTERN.exec(target); if (match) openTarget(match[1] as 'apex' | 'flow', match[2]); }} />}
+        : (() => {
+          const target = activeEditorTab.target ?? `${activeEditorTab.kind}://${activeEditorTab.label}`;
+          const context = dependencyContext(target, activeEditorTab.kind, activeEditorTab.label, explorerNodes, activePath, actions);
+          return <AgentActionPanel key={`${projectId}:${activeEditorTab.id}`} pluginId={pluginId} projectId={projectId} org={org}
+            action={targetAction(target, '')}
+            {...(context ? { context: { ...context, onOpen: () => openAgentTab(context.path) } } : {})}
+            initialOrigin={studio.actionOrigin} onOriginChange={chooseActionOrigin}
+            onReveal={() => undefined}
+            onOpenTarget={target => { const match = TARGET_PATTERN.exec(target); if (match) openTarget(match[1] as 'apex' | 'flow', match[2]); }} />;
+        })()}
     </div>
   ) : false;
 
   const problemsCount = problems.length;
   const tabs = layout === 'legacy' ? false : (
     <EditorTabs tabs={studio.tabs} active={studio.activeTab} dirtyId={dirty && activePath ? `agent:${activePath}` : null} problems={problemsCount}
-      onSelect={selectTab} onClose={closeTab} />
+      problemsId={activePath ? `agent:${activePath}` : null} trailing={workspaceActions} onSelect={selectTab} onClose={closeTab} onCloseMany={closeTabs} />
   );
 
   const bottomActive: BottomTab = compact ? 'problems' : studio.bottomTab;
@@ -916,6 +949,7 @@ function AgentScriptWorkspace(props: AgentScriptPanelProps) {
       <style>{AGENTFORCE_STUDIO_STYLES}</style>
       <style>{AGENT_ACTION_STYLES}</style>
       {newAgentOpen && <NewAgentDialog pluginId={pluginId} projectId={projectId} onClose={() => setNewAgentOpen(false)} onCreated={async file => { await refreshFiles(); await openFile(file.path); openTool('files'); }} />}
+      {fetchAgent && <OrgSyncDialog call={syncCall} scope="agentforce" agent={fetchAgent} onClose={() => setFetchAgent(null)} />}
       {saveAsOpen && <SaveAgentDialog busy={busy} error={error} onClose={() => setSaveAsOpen(false)} onSave={path => {
         setBusy(true); setError(null);
         send.flushSave({ path, create: true });
@@ -947,7 +981,8 @@ function AgentScriptWorkspace(props: AgentScriptPanelProps) {
         <div className="sf-main-col">
         <AgentforceStudioSplit open={splitOpen} mode={splitMode} storageKey={`salesforce:studio:split:${draftScope}`} editor={<div className="af-action-workspace">
           {tabs}
-          {documentBar}
+          {!showTargetTab && documentBar}
+          {orgSessionLabel(org) ? <span hidden className="sf-as-crumb-seg" data-testid="salesforce-playground-org">{orgSessionLabel(org)}</span> : null}
           {heldReveal && <FollowToast held={heldReveal} onShow={showHeldReveal} onDismiss={() => setHeldReveal(null)} />}
           {targetTabView}
           {playgroundFailed ? (
@@ -1000,7 +1035,7 @@ function AgentScriptWorkspace(props: AgentScriptPanelProps) {
           </div>}
 
               {!selectedAction && <div className="af-actions-list"><h2>Actions</h2><p>Explore implementations and references in the current script.</p><AgentActionExplorer actions={actions} selected={selectedActionId ?? undefined} onOpen={openAction} />{actions.length === 0 && <EmptyState compact art="code" title="No actions in this script yet.">Add an Apex or Flow action to explore its implementation here.</EmptyState>}</div>}
-          {selectedAction && <AgentActionPanel key={`${projectId}:${activePath}:${selectedAction.id}`} pluginId={pluginId} projectId={projectId} org={org} action={selectedAction} initialOrigin={selectedTab?.origin} onOriginChange={origin => setActionTabs(tabs => tabs.map(tab => tab.action.id === selectedActionId ? { ...tab, origin } : tab))} onReveal={revealLine} onOpenTarget={(target, origin) => openAction(targetAction(target, `Referenced by ${selectedAction.name}`), origin)} />}
+          {selectedAction && <AgentActionPanel key={`${projectId}:${activePath}:${selectedAction.id}`} pluginId={pluginId} projectId={projectId} org={org} action={selectedAction} initialOrigin={selectedTab?.origin} onOriginChange={origin => { chooseActionOrigin(origin); setActionTabs(tabs => tabs.map(tab => tab.action.id === selectedActionId ? { ...tab, origin } : tab)); }} onReveal={revealLine} onOpenTarget={(target, origin) => openAction(targetAction(target, `Referenced by ${selectedAction.name}`), origin)} />}
             </div>;
           }} />
         </AgentforceStudioSplit>

@@ -1,5 +1,5 @@
 /** Fetch latest: compare org metadata with local source, then pull chosen components. */
-export const SYNC_TYPES = ['AiAuthoringBundle', 'ApexClass', 'ApexTrigger', 'LightningComponentBundle'] as const;
+export const SYNC_TYPES = ['AiAuthoringBundle', 'ApexClass', 'ApexTrigger', 'LightningComponentBundle', 'Flow', 'GenAiPromptTemplate'] as const;
 export type SyncType = (typeof SYNC_TYPES)[number];
 
 export const SYNC_SCOPES = ['agentforce', 'apex', 'all'] as const;
@@ -15,7 +15,12 @@ export const TYPE_LABELS: Record<SyncType, string> = {
   ApexClass: 'Apex class',
   ApexTrigger: 'Apex trigger',
   LightningComponentBundle: 'LWC',
+  Flow: 'Flow',
+  GenAiPromptTemplate: 'Prompt template',
 };
+
+/** Agent Script action target schemes (`apex://Name`) that name a component this fetch can retrieve. */
+export const TARGET_TYPES: Readonly<Record<string, SyncType>> = { apex: 'ApexClass', flow: 'Flow', generatePromptResponse: 'GenAiPromptTemplate' };
 
 /** Most components one fetch retrieves; the job retrieves them in batches. */
 export const SYNC_FETCH_MAX = 5000;
@@ -49,6 +54,16 @@ export interface SyncCheck {
   components: SyncComponent[];
   counts: Record<SyncState | 'current', number>;
   truncated: boolean;
+  /** Set when the check covers one agent: its bundle, its newest org version and what its actions call. */
+  agent?: SyncAgent;
+}
+
+export interface SyncAgent {
+  name: string;
+  /** Related components already up to date, listed so the operator sees the whole agent. */
+  current: Array<Omit<SyncComponent, 'state' | 'latest'>>;
+  /** Referenced by the agent but neither in the org nor in this project. */
+  missing: string[];
 }
 
 /** same: identical. update: safe to replace (unchanged since the last fetch). create: not on disk. conflict: local edits would be lost. */

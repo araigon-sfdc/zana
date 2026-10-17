@@ -137,7 +137,7 @@ import {
   getProjectSettingsRoutePath,
   getThreadRoutePath
 } from './lib/route-paths.js';
-import { inspectAgentSession, inspectRouteProjectId } from './lib/inspect-session.js';
+import { inspectAgentSession, inspectRouteProjectId, threadOpenListener } from './lib/inspect-session.js';
 import { resolveFocusedProject } from './lib/focusedProject.js';
 
 function stayOnAgentsBoard(
@@ -558,14 +558,7 @@ function AppShell() {
       // page when Classic session view is on.
       inspectAgentSession(sessionId, projectId, navigateRef.current);
     });
-    const offOpenThread = product.threads.onOpen((payload) => {
-      if (!payload || typeof payload !== 'object') return;
-      const event = payload as { type?: unknown; threadId?: unknown; projectId?: unknown; file?: unknown; terminal?: unknown };
-      if (event.type !== 'thread-open' || event.file || event.terminal) return;
-      if (typeof event.threadId !== 'string' || typeof event.projectId !== 'string') return;
-      useUi.getState().enterProjectFocus(event.projectId);
-      navigateRef.current(`/projects/${event.projectId}/threads/${event.threadId}`);
-    });
+    const offOpenThread = product.threads.onOpen(threadOpenListener(navigateRef));
     const offModelCatalogChanged = product.threads.onModelCatalogChanged(({ hostId, providerId }) => {
       refreshThreadProviderModelsFromPush(hostId, providerId);
     });

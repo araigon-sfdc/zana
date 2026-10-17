@@ -439,7 +439,8 @@ test('Mobile pairs to built Electron, uses phone navigation, reads and sends a l
       await expect(drawer.getByTestId('nav-scheduler')).toBeVisible();
       await expect(drawer.getByTestId('nav-home')).toHaveCount(0);
       await expect(drawer.getByTestId('nav-inbox')).toHaveCount(0);
-      await expect(drawer.getByRole('button', { name: 'More', exact: true })).toHaveCount(0);
+      // More lives in the utility bar beside Settings, so it stays in the drawer's tools view.
+      await expect(drawer.getByRole('button', { name: 'More', exact: true })).toBeVisible();
       const toolsSearch = drawer.getByRole('searchbox', { name: 'Search plugins and tools' });
       const toolsSearchBox = (await toolsSearch.boundingBox())!;
       const tiles = drawer.locator('.mobile-tools-grid > :is(a, button)');

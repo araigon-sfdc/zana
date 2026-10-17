@@ -19,11 +19,13 @@ export interface StudioLayoutState {
   share: boolean;
   /** The right rail gets Assistant once, the first time the wide layout is shown. */
   railSeeded: boolean;
+  /** Last Project / Org source chosen on a Flow or Apex view; every implementation view opens on it. */
+  actionOrigin: 'project' | 'org';
 }
 export const MAX_EDITOR_TABS = 12;
 export const EXPLORER_WIDTH = { min: 200, max: 480, default: 260 } as const;
 export const clampExplorerWidth = (value: number) => Math.round(Math.min(EXPLORER_WIDTH.max, Math.max(EXPLORER_WIDTH.min, value)));
-export const DEFAULT_LAYOUT: StudioLayoutState = { tool: 'code', tabs: [], activeTab: null, bottomOpen: false, bottomTab: 'problems', explorerOpen: true, explorerWidth: null, collapsedSections: [], share: false, railSeeded: false };
+export const DEFAULT_LAYOUT: StudioLayoutState = { tool: 'code', tabs: [], activeTab: null, bottomOpen: false, bottomTab: 'problems', explorerOpen: true, explorerWidth: null, collapsedSections: [], share: false, railSeeded: false, actionOrigin: 'project' };
 
 const text = (value: unknown, max = 300) => typeof value === 'string' && value.length > 0 && value.length <= max ? value : undefined;
 export function parseTab(value: unknown): EditorTab | null {
@@ -57,9 +59,27 @@ export function readStudioLayout(key: string): StudioLayoutState {
       explorerWidth: typeof raw.explorerWidth === 'number' && Number.isFinite(raw.explorerWidth) ? clampExplorerWidth(raw.explorerWidth) : null,
       collapsedSections: Array.isArray(raw.collapsedSections) ? [...new Set<string>((raw.collapsedSections as unknown[]).filter((id): id is string => typeof id === 'string' && id.length > 0 && id.length <= 40))].slice(0, 20) : [],
       share: raw.share === true,
-      railSeeded: raw.railSeeded === true
+      railSeeded: raw.railSeeded === true,
+      actionOrigin: raw.actionOrigin === 'org' ? 'org' : 'project'
     };
   } catch { return DEFAULT_LAYOUT; }
+}
+
+/**
+ * Closes `ids`. `focus` becomes active when it stays open; otherwise a closed active tab hands over to
+ * the nearest open tab on its left (then its right).
+ */
+export function withoutTabs(state: StudioLayoutState, ids: string[], focus?: string): StudioLayoutState {
+  const closing = new Set(ids);
+  if (!state.tabs.some(tab => closing.has(tab.id))) return state;
+  const tabs = state.tabs.filter(tab => !closing.has(tab.id));
+  let activeTab = state.activeTab;
+  if (focus && tabs.some(tab => tab.id === focus)) activeTab = focus;
+  else if (activeTab && closing.has(activeTab)) {
+    const index = state.tabs.findIndex(tab => tab.id === activeTab);
+    activeTab = state.tabs.slice(0, index).reverse().find(tab => !closing.has(tab.id))?.id ?? tabs[0]?.id ?? null;
+  }
+  return { ...state, tabs, activeTab };
 }
 
 /** Per-project Studio layout. Only layout is persisted; editor drafts have their own store. */
@@ -75,11 +95,7 @@ export function useStudioLayout(scope: string) {
     return { ...current, tabs, activeTab: tab.id };
   }), []);
   const selectTab = useCallback((id: string) => setState(current => current.tabs.some(tab => tab.id === id) ? { ...current, activeTab: id } : current), []);
-  const closeTab = useCallback((id: string) => setState(current => {
-    const index = current.tabs.findIndex(tab => tab.id === id);
-    if (index < 0) return current;
-    const tabs = current.tabs.filter(tab => tab.id !== id);
-    return { ...current, tabs, activeTab: current.activeTab === id ? tabs[Math.max(0, index - 1)]?.id ?? null : current.activeTab };
-  }), []);
-  return { state, patch, openTab, selectTab, closeTab };
+  const closeTabs = useCallback((ids: string[], focus?: string) => setState(current => withoutTabs(current, ids, focus)), []);
+  const closeTab = useCallback((id: string) => closeTabs([id]), [closeTabs]);
+  return { state, patch, openTab, selectTab, closeTab, closeTabs };
 }

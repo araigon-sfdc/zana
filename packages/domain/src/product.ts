@@ -2003,6 +2003,10 @@ export interface AppConfig {
   sidebarNavOrder?: string[];
   /** Project-window sidebar destination order. */
   projectSidebarNavOrder?: string[];
+  /** Hidden global sidebar destinations; hiding does not disable a plugin. */
+  sidebarNavHidden?: string[];
+  /** Hidden project sidebar destinations, independent of the global rail. */
+  projectSidebarNavHidden?: string[];
   /** Nav sidebar width in px. Absent ⇒ CSS default (256). Clamped [256, 480]. */
   sidebarWidth?: number;
   windowBounds?: { x?: number; y?: number; width: number; height: number };

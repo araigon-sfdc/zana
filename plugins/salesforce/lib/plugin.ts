@@ -78,7 +78,9 @@ import {
 import { createReleaseService, ReadGrants } from './release.js';
 import { RELEASE_RPC } from './release-contract.js';
 import { parseAgentScriptSource } from './agent-script-parse.js';
-import { readOrgAction, readProjectAction } from './action-source.js';
+import { readProjectAction } from './action-source.js';
+import { OrgSourceReader } from './org-source.js';
+import { projectSourceApiVersion } from './org-retrieve.js';
 import { visualizeFlowSnapshot } from './flow-visualizer.js';
 import { isAgentScriptLspQuery, queryAgentScriptLsp } from './agent-script-lsp.js';
 import { AGENT_SCRIPT_EXAMPLES } from './agent-script-model.js';
@@ -467,6 +469,7 @@ export async function createSalesforcePlugin(zcc: ZccPluginApi, deps: Salesforce
     };
   });
   let actionReads = 0;
+  const orgSources = new OrgSourceReader(deps);
   registerRpc('agentActions.source', async (args) => {
     if (actionReads >= 4) return { ok: false, error: 'Source previews are busy. Try again in a moment.' };
     actionReads++;
@@ -476,7 +479,7 @@ export async function createSalesforcePlugin(zcc: ZccPluginApi, deps: Salesforce
       if (origin !== 'project' && origin !== 'org') throw Error('Choose project or org source.');
       const snapshot = await readSettings();
       let sourceRoot = snapshot.projectRoot;
-      if (origin === 'project' && sourceRoot && !contexts.current()?.projectId) {
+      if (sourceRoot && !contexts.current()?.projectId) {
         // A settings string alone cannot grant filesystem access. Global views
         // may use that folder only when it canonically matches a registered project.
         const projects = await zcc.sdk.projects.list();
@@ -486,8 +489,9 @@ export async function createSalesforcePlugin(zcc: ZccPluginApi, deps: Salesforce
         });
         if (!registered) sourceRoot = '';
       }
+      // The org copy is retrieved at the project's source API version, so both sides serialize alike.
       const data = origin === 'org'
-        ? await readOrgAction(await connections.connect(), target, deps)
+        ? await orgSources.read(await connections.connect(), target, projectSourceApiVersion(sourceRoot, deps))
         : readProjectAction(sourceRoot, target, deps, rpcString(args, 'candidate') || undefined);
       if (args && typeof args === 'object' && 'visualize' in args && args.visualize === true && target.startsWith('flow://') && data.status === 'ready') {
         try { data.visualization = await visualizeFlowSnapshot(data); }

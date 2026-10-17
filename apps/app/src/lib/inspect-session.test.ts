@@ -6,7 +6,8 @@ const h = vi.hoisted(() => ({
   focusedProjectId: null as string | null,
   scopedProjectId: null as string | null,
   openAgentModal: vi.fn(),
-  openThreadModal: vi.fn()
+  openThreadModal: vi.fn(),
+  enterProjectFocus: vi.fn()
 }));
 
 vi.mock('../store.js', () => ({
@@ -18,7 +19,8 @@ vi.mock('../store.js', () => ({
       nav: h.nav,
       focusedProjectId: h.focusedProjectId,
       openAgentModal: h.openAgentModal,
-      openThreadModal: h.openThreadModal
+      openThreadModal: h.openThreadModal,
+      enterProjectFocus: h.enterProjectFocus
     })
   }
 }));
@@ -27,7 +29,7 @@ vi.mock('./windowScope.js', () => ({
   getScopedProjectId: () => h.scopedProjectId
 }));
 
-import { inspectAgentSession, inspectRouteProjectId, inspectThread } from './inspect-session.js';
+import { inspectAgentSession, inspectRouteProjectId, inspectThread, threadOpenListener } from './inspect-session.js';
 
 describe('inspectRouteProjectId', () => {
   beforeEach(() => {
@@ -146,6 +148,40 @@ describe('inspectThread', () => {
     const navigate = vi.fn();
     inspectThread('thr-1', null, navigate);
     expect(navigate).toHaveBeenCalledWith('/threads/thr-1');
+    expect(h.openThreadModal).not.toHaveBeenCalled();
+  });
+});
+
+describe('threadOpenListener', () => {
+  beforeEach(() => {
+    h.classicSessionViewEnabled = false;
+    h.openThreadModal.mockClear();
+    h.enterProjectFocus.mockClear();
+  });
+
+  it('focuses the project and opens the thread inspector', () => {
+    const navigate = vi.fn();
+    threadOpenListener({ current: navigate })({ type: 'thread-open', threadId: 't-1', projectId: 'p-1' });
+    expect(h.enterProjectFocus).toHaveBeenCalledWith('p-1');
+    expect(h.openThreadModal).toHaveBeenCalledWith('t-1');
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it('navigates with the latest navigate function when Classic session view is on', () => {
+    h.classicSessionViewEnabled = true;
+    const ref = { current: vi.fn() };
+    const listener = threadOpenListener(ref);
+    const latest = vi.fn();
+    ref.current = latest;
+    listener({ type: 'thread-open', threadId: 't-1', projectId: 'p-1' });
+    expect(latest).toHaveBeenCalledWith(expect.stringContaining('t-1'));
+  });
+
+  it('ignores file, terminal, malformed and foreign payloads', () => {
+    const listener = threadOpenListener({ current: vi.fn() });
+    for (const payload of [null, 'x', { type: 'other', threadId: 't', projectId: 'p' }, { type: 'thread-open', threadId: 't', projectId: 'p', file: 'a.ts' },
+      { type: 'thread-open', threadId: 't', projectId: 'p', terminal: true }, { type: 'thread-open', threadId: 1, projectId: 'p' }, { type: 'thread-open', threadId: 't' }]) listener(payload);
+    expect(h.enterProjectFocus).not.toHaveBeenCalled();
     expect(h.openThreadModal).not.toHaveBeenCalled();
   });
 });
