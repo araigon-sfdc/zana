@@ -133,3 +133,29 @@ describe('usePeersSettingsVisibility', () => {
     expect(result.current.visible).toBe(false);
   });
 });
+
+describe('usePeersSettingsVisibility after unmount', () => {
+  it('ignores late resolutions, rejections and change events once cancelled', async () => {
+    const deferred = <T,>() => {
+      let resolve!: (v: T) => void; let reject!: (e: unknown) => void;
+      const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+      return { promise, resolve, reject };
+    };
+    const cfg = deferred<Record<string, unknown>>();
+    const pl = deferred<unknown[]>();
+    const { product } = await import('./product-client.js');
+    const cfgSpy = vi.spyOn(product.config, 'get').mockReturnValue(cfg.promise as never);
+    const plSpy = vi.spyOn(product.pluginApps, 'list').mockReturnValue(pl.promise as never);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { result, unmount } = renderHook(() => usePeersSettingsVisibility());
+    const emitConfig = h.emitConfig; const emitPlugins = h.emitPlugins;
+    unmount();
+    cfg.resolve({ peersSettingsEnabled: true });
+    pl.reject(new Error('late'));
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    emitConfig?.({ peersSettingsEnabled: true });
+    emitPlugins?.([{ id: 'a', enabled: true, peers: true }]);
+    expect(result.current).toEqual({ visible: false, ready: false });
+    cfgSpy.mockRestore(); plSpy.mockRestore(); warn.mockRestore();
+  });
+});

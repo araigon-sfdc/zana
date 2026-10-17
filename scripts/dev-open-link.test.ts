@@ -1,7 +1,8 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { fileURLToPath } from 'node:url';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildOpenLinkLaunch, validateLinkArg } from './dev-open-link.mjs';
 
 const dirs: string[] = [];
@@ -31,5 +32,49 @@ describe('dev-open-link', () => {
     expect(launch.args[1]).toBe('zana-dev://plugin/a/b');
     expect(launch.env.ZCC_DATA_DIR).toBe(join(home, '.zcc-dev'));
     expect(launch.env.ZCC_E2E_HOME).toBeUndefined();
+  });
+});
+
+describe('dev-open-link CLI entry', () => {
+  const scriptPath = fileURLToPath(new URL('./dev-open-link.mjs', import.meta.url));
+  const originalArgv = process.argv;
+
+  afterEach(() => {
+    process.argv = originalArgv;
+    vi.restoreAllMocks();
+    vi.doUnmock('node:child_process');
+    vi.resetModules();
+  });
+
+  async function runEntry(link: string | undefined) {
+    const spawn = vi.fn(() => ({ on: vi.fn() }));
+    vi.resetModules();
+    vi.doMock('node:child_process', () => ({ spawn }));
+    process.argv = [originalArgv[0], scriptPath, ...(link === undefined ? [] : [link])];
+    const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    await import('./dev-open-link.mjs');
+    return { spawn, exit, stderr };
+  }
+
+  it('rejects a bad link with exit code 2 and a stderr message', async () => {
+    const { exit, stderr } = await runEntry('https://nope');
+    expect(stderr).toHaveBeenCalledWith(expect.stringContaining('link must look like'));
+    expect(exit).toHaveBeenCalledWith(2);
+  });
+
+  it('spawns electron with the link and propagates the child exit code', async () => {
+    const { spawn, exit } = await runEntry('zana-dev://plugin/a/b');
+    expect(exit).not.toHaveBeenCalled();
+    const [command, args, options] = spawn.mock.calls[0] as unknown as [string, string[], { stdio: string; env: Record<string, string> }];
+    expect(typeof command).toBe('string');
+    expect(args[1]).toBe('zana-dev://plugin/a/b');
+    expect(options.stdio).toBe('inherit');
+    const child = spawn.mock.results[0].value as { on: ReturnType<typeof vi.fn> };
+    const onExit = child.on.mock.calls.find((call) => call[0] === 'exit')![1] as (code: number | null) => void;
+    onExit(3);
+    expect(exit).toHaveBeenLastCalledWith(3);
+    onExit(null);
+    expect(exit).toHaveBeenLastCalledWith(0);
   });
 });

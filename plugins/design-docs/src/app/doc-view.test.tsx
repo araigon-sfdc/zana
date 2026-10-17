@@ -86,6 +86,23 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe('DocHeader overlays', () => {
+  it('opens and dismisses the peer conflicts dialog and the more-actions menu', async () => {
+    const harness = createHarness();
+    const doc = simpleDoc(harness);
+    harness.render(<DocHeader doc={doc} projects={[]} compact={false} onDeleted={() => undefined} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Peer conflicts' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Peer conflicts' });
+    fireEvent.keyDown(dialog, { key: 'Escape' });
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Peer conflicts' })).toBeNull());
+    fireEvent.click(screen.getByRole('button', { name: 'More actions' }));
+    expect(screen.getAllByRole('menuitem').length).toBeGreaterThan(0);
+    fireEvent.keyDown(document, { key: 'Escape' });
+    await waitFor(() => expect(screen.queryAllByRole('menuitem')).toHaveLength(0));
+  });
+});
+
 describe('metadata consent', () => {
   it.each(['title', 'summary', 'tags', 'status'])('pins %s consent across realtime head refresh', async (field) => {
     const harness = createHarness();

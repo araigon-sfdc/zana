@@ -250,4 +250,18 @@ describe('renderer observed CAS', () => {
     expect(harness.rpcCalls.find((call) => call.method === (action === 'Delete' ? 'deleteFile' : 'update'))!.input)
       .toMatchObject(action === 'Delete' ? { baseRevision: observed.revision, baseFileId: observed.fileId } : { expectedHead: doc.head });
   });
+
+  it('disables deleting the only file of a doc and never sends the request', async () => {
+    const local = replica('a');
+    const doc = local.store.create({ title: 'Single file', files: [{ path: 'README.md', content: 'entry' }] }, UI_USER);
+    const harness = createHarness({ store: local.store });
+    show(harness, doc.id, 'README.md');
+    fireEvent.click(await screen.findByRole('button', { name: 'Actions for README.md' }));
+    const item = screen.getByRole('menuitem', { name: 'Delete' }) as HTMLButtonElement;
+    expect(item.disabled).toBe(true);
+    expect(item.title).toBe('A design doc needs at least one file. Delete the doc instead.');
+    fireEvent.click(item);
+    expect(screen.queryByRole('dialog', { name: 'Delete file' })).toBeNull();
+    expect(harness.rpcCalls.some((call) => call.method === 'deleteFile')).toBe(false);
+  });
 });

@@ -90,6 +90,15 @@ describe('host command dispatch', () => {
     expect(fetchFn).toHaveBeenCalledOnce();
   });
 
+  it('fails closed for peer.forward without a forwarder and rejects peer.control on the dispatch path', async () => {
+    const runtime = createCommandRuntime({});
+    delete (runtime as { peerForwarder?: unknown }).peerForwarder;
+    await expect(dispatchHostCommand(runtime, { type: 'peer.forward' } as never))
+      .rejects.toMatchObject({ code: 'peer_app_unavailable' });
+    await expect(dispatchHostCommand(runtime, { type: 'peer.control' } as never))
+      .rejects.toMatchObject({ code: 'capability_denied' });
+  });
+
   it('starts a thread after unmanaged provision when the provider CLI is present', async () => {
     const project = mkdtempSync(join(tmpdir(), 'zcc-thread-proj-'));
     const startedWork: Array<{ cwd: string; input: PromptInput[]; providerId: string }> = [];
