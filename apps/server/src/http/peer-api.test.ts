@@ -235,15 +235,15 @@ describe('peer API canonical authorization', () => {
     const peer = await fixture();
     const packet = await peer.packet();
     const authenticate = vi.spyOn(peer.pairs, 'authenticateRequest');
+    vi.useFakeTimers({ toFake: ['setTimeout'] });
     const timers = vi.spyOn(globalThis, 'setTimeout');
-    const started = performance.now();
     const slow = await incompleteRequest(peer.url, packet.envelope);
     const trickle = setInterval(() => slow.socket.write(' '), 1000);
     try {
       expect(PEER_BODY_READ_TIMEOUT_MS).toBe(15_000);
       await vi.waitFor(() => expect(timers.mock.calls.filter(([, delay]) => delay === 15_000)).toHaveLength(1));
+      vi.advanceTimersByTime(PEER_BODY_READ_TIMEOUT_MS);
       await slow.closed;
-      expect(performance.now() - started).toBeGreaterThanOrEqual(14_900);
       await vi.waitFor(() => expect(peer.handled).toHaveBeenCalledOnce());
       expect(authenticate).not.toHaveBeenCalled();
       expect(peer.dispatchPeer).not.toHaveBeenCalled();
@@ -255,12 +255,13 @@ describe('peer API canonical authorization', () => {
       expect(authenticate).toHaveBeenCalledOnce();
       expect(peer.dispatchPeer).toHaveBeenCalledOnce();
     } finally {
+      vi.useRealTimers();
       clearInterval(trickle);
       slow.socket.destroy();
       await slow.closed;
       await vi.waitFor(() => expect(peer.handled).toHaveBeenCalledTimes(2));
     }
-  }, 20_000);
+  });
 
   it('accepts exactly 8 MiB but rejects chunked overflow before authentication', async () => {
     const peer = await fixture();

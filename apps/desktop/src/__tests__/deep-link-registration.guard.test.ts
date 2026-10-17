@@ -37,8 +37,16 @@ describe('deep link OS registration is unreachable under E2E', () => {
   });
 
   it('subscribes to open-url and second-instance at module init, not in createWindow', () => {
-    const createWindow = mainSource.slice(mainSource.indexOf('function createWindow('), mainSource.indexOf('function createWindow(') + 12000);
+    // Bound the body at the function's closing top-level brace, not a magic character count.
+    const start = mainSource.indexOf('function createWindow(');
+    expect(start).toBeGreaterThanOrEqual(0);
+    const end = mainSource.indexOf('\n}\n', start);
+    expect(end).toBeGreaterThan(start);
+    const createWindow = mainSource.slice(start, end);
     expect(createWindow).not.toContain("'open-url'");
+    expect(createWindow).not.toContain("'second-instance'");
+    // Only the lock-holding branch listens: Electron never emits it without the single-instance lock.
+    expect(mainSource.match(/app\.on\('second-instance'/g)).toHaveLength(1);
     expect(mainSource.match(/app\.on\('open-url'/g)).toHaveLength(1);
   });
 });

@@ -486,13 +486,13 @@ export function createPluginApi(
     return (await ctx.peerLinks.links(peerId)).filter(link => link.pluginId === pluginId);
   };
   const peerSignal = (signal?: AbortSignal) => AbortSignal.any([peerLifecycle.signal, AbortSignal.timeout(30_000), ...(signal ? [signal] : [])]);
-  const resolvePeerHost = async (peerId: string, signal: AbortSignal) => {
+  const resolvePeerHost = async (peerId: string, signal: AbortSignal, hosts?: HostRow[]) => {
     const ctx = peerContext();
     signal.throwIfAborted();
     const channel = await ctx.peerChannels.remote(peerId);
     signal.throwIfAborted();
     if (!channel || !linkCapable(channel.capability)) throw new Error('mutual enrollment unavailable');
-    const hostIds = listHosts(ctx.db).filter(host => host.enrollmentCapability === channel.capability && ctx.hostHub.getSession(host.id)).map(host => host.id);
+    const hostIds = (hosts ?? listHosts(ctx.db)).filter(host => host.enrollmentCapability === channel.capability && ctx.hostHub.getSession(host.id)).map(host => host.id);
     const hostId = await ctx.peerAuthority.resolveHost(peerId, hostIds, signal);
     assertLive();
     signal.throwIfAborted();
@@ -807,16 +807,25 @@ export function createPluginApi(
           signal.throwIfAborted();
           const channels = await ctx.peerChannels.list();
           const peers = [];
+          // One host snapshot for the whole listing instead of two full host scans per channel.
+          const hosts = listHosts(ctx.db);
           for (const channel of channels) {
             if (!linkCapable(channel.capability)) continue;
             try {
-              const hostId = await resolvePeerHost(channel.remoteInstanceId, signal);
-              const host = listHosts(ctx.db).find(host => host.id === hostId);
+              const hostId = await resolvePeerHost(channel.remoteInstanceId, signal, hosts);
+              const host = hosts.find(host => host.id === hostId);
               if (host && visibleToPlugin(host)) peers.push({ id: channel.remoteInstanceId, hostId, name: peerHostName(ctx, host), connected: true });
-            } catch {
+            } catch (error) {
               assertLive();
               signal.throwIfAborted();
-              // Enrollment is not reachability; offline or mismatched apps stay hidden.
+              // Enrollment is not reachability; offline or mismatched apps stay hidden. Anything else is unexpected:
+              // log name/code only (messages may embed key material) and keep listing the remaining peers.
+              const message = error instanceof Error ? error.message : '';
+              if (message !== 'mutual enrollment unavailable' && message !== 'verified peer app unavailable') {
+                const err = error as { name?: unknown; code?: unknown } | null;
+                console.warn(`[plugin:${pluginId}] peer listing skipped a peer: name=${typeof err?.name === 'string' ? err.name : typeof error}` +
+                  `${typeof err?.code === 'string' || typeof err?.code === 'number' ? ` code=${err.code}` : ''}`);
+              }
             }
           }
           assertLive();
@@ -860,12 +869,20 @@ export function createPluginApi(
           const a = inviteArgs(args, ['scope', 'signal']);
           if (typeof a.scope !== 'string' || !validScope(a.scope)) throw new InvitationError('invalid_invitation');
           const signal = peerSignal(a.signal as AbortSignal | undefined), invitations = invitationsOf();
-          const created = await inviteGuard(signal, () => invitations.create({ pluginId, scope: a.scope as string }).then(async value => {
-            // A stale or aborted caller must not leave a live invitation whose token it never received.
-            if (stale || signal.aborted) { await invitations.cancel({ pluginId, invitationId: value.invitationId }).catch(() => undefined); }
-            return value;
-          }));
-          return { invitationId: created.invitationId, token: created.token, expiresAt: created.expiresAt };
+          let minted: { invitationId: string } | undefined;
+          try {
+            const created = await inviteGuard(signal, async () => {
+              const value = await invitations.create({ pluginId, scope: a.scope as string });
+              minted = value;
+              return value;
+            });
+            return { invitationId: created.invitationId, token: created.token, expiresAt: created.expiresAt };
+          } catch (error) {
+            // A stale or aborted caller must not leave a live invitation whose token it never received; this covers
+            // every post-create rejection inside inviteGuard, not only aborts observed before create resolved.
+            if (minted) await invitations.cancel({ pluginId, invitationId: minted.invitationId }).catch(logInviteFailure);
+            throw error;
+          }
         },
         redeemInvitation: async (args) => {
           const a = inviteArgs(args, ['token', 'signal']);
@@ -1009,8 +1026,10 @@ export function createPluginApi(
             await lease.assertActive();
             if (Buffer.byteLength(result.body) > 8 * 1024 * 1024) throw new Error('peer response exceeds 8 MiB');
             if (result.status < 200 || result.status >= 300) throw new Error(`peer request failed: ${result.status}`);
-            const response = JSON.parse(result.body) as { ok?: unknown; result?: unknown };
-            if (response.ok !== true) throw new Error('peer request was rejected');
+            let response: { ok?: unknown; result?: unknown } | null;
+            // Never surface the parser message: it can quote fragments of the peer's body.
+            try { response = JSON.parse(result.body) as typeof response; } catch { throw new Error('invalid peer response'); }
+            if (!response || typeof response !== 'object' || response.ok !== true) throw new Error('peer request was rejected');
             return response.result;
           } finally {
             if (cancel) signal.removeEventListener('abort', cancel);

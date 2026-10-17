@@ -309,7 +309,13 @@ function InvitePanel({ invites, onChanged, requestApproval, joinRequest, onJoinR
   }, [joinRequest]);
   const pasted = paste.trim() ? parseInviteInput(paste) : null;
   const addPeer = () => act(async () => {
-    if (created) await api.cancelInvitation(created.invitationId).catch(() => undefined);
+    if (created) {
+      // A live bearer token must be revoked before a second one is issued; an expired one is already dead, so a failed cancel is moot.
+      try { await api.cancelInvitation(created.invitationId); }
+      catch (failure) {
+        if (!expired) throw new Error(`Could not cancel the current invitation, so no new one was created: ${errorMessage(failure)}`);
+      }
+    }
     setCreated(null);
     setShown(null);
     const invitation = await api.createInvitation();

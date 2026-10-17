@@ -3,7 +3,7 @@ import { negotiateProtocol, validateAppliedReceipt, validateHandshake, validateS
   validateTransfer, validateChunk, validateReceiptQuery, transferQuery, validateMissing, validateManualConsent,
   type PeerHandshake, type PeerSessionOffer, type PeerSessionExpectation, type PeerTransfer } from './peer-protocol.js';
 import { DesignDocSyncStore, delivered, type FrozenSyncIntent } from './sync-store.js';
-import { MAX_PEER_CHUNK_BYTES, PEER_CALL_TIMEOUT_MS, PEER_COMPACTION_BATCH, PEER_MIN_PROTOCOL_VERSION, PEER_PENDING_TICK_MS, PEER_PROTOCOL_VERSION } from '../shared/peer-limits.js';
+import { MAX_PEER_CHUNK_BYTES, MAX_PEER_WINDOW_CHUNKS, PEER_CALL_TIMEOUT_MS, PEER_COMPACTION_BATCH, PEER_MIN_PROTOCOL_VERSION, PEER_PENDING_TICK_MS, PEER_PROTOCOL_VERSION } from '../shared/peer-limits.js';
 import { PeerProtocolError, type PeerAppliedReceipt } from '../shared/peer-contract.js';
 import type { DocActor, PeerResolutionChoice } from '../shared/contract.js';
 
@@ -16,6 +16,7 @@ export class DesignDocPeerService {
   private timer: ReturnType<typeof setInterval> | null = null;
   private scheduleDelivery: (() => void) | null = null;
   private peers: PluginSdkPeers | null = null;
+  private lastWarning = '';
 
   constructor(private readonly sync: DesignDocSyncStore, private readonly changed: (docId: string) => void = () => {}) {}
 
@@ -24,32 +25,12 @@ export class DesignDocPeerService {
   register(zcc: ZccPluginApi): void {
     this.peers = zcc.sdk.peers;
     zcc.sdk.peers.handle('manual', async (request) => {
-      this.requireFence(request);
-      const packet = request.body as Partial<PeerHandshake>;
-      this.requireRosterPeer(this.requireGroup().repoId, String(packet.senderReplicaId), request.peerId);
-      const consent = validateManualConsent(request.body, this.expectation(String(packet.senderReplicaId), request.grantEpoch));
-      const accepted = await request.commitSync(() => {
-        this.requireFence(request);
-        this.requireRosterPeer(consent.repoId, consent.senderReplicaId, request.peerId);
-        validateManualConsent(consent, this.expectation(consent.senderReplicaId, request.grantEpoch));
-        return this.sync.acceptManual(consent.senderReplicaId, consent.manualId, consent.heads);
-      });
-      this.requireCurrentRequest(consent, request.peerId, request);
+      const { consent, accepted } = await this.acceptManualConsent(request);
       if (accepted) this.mutationCommitted();
       return { manualId: consent.manualId, accepted };
     });
     zcc.sdk.peers.handle('manual-deliver', async (request) => {
-      this.requireFence(request);
-      const packet = request.body as Partial<PeerHandshake>;
-      this.requireRosterPeer(this.requireGroup().repoId, String(packet.senderReplicaId), request.peerId);
-      const consent = validateManualConsent(request.body, this.expectation(String(packet.senderReplicaId), request.grantEpoch));
-      const accepted = await request.commitSync(() => {
-        this.requireFence(request);
-        this.requireRosterPeer(consent.repoId, consent.senderReplicaId, request.peerId);
-        validateManualConsent(consent, this.expectation(consent.senderReplicaId, request.grantEpoch));
-        return this.sync.acceptManual(consent.senderReplicaId, consent.manualId, consent.heads);
-      });
-      this.requireCurrentRequest(consent, request.peerId, request);
+      const { accepted } = await this.acceptManualConsent(request);
       if (!accepted || !this.peers) throw new PeerProtocolError('invalid', 'bilateral manual consent missing');
       return this.deliverPending(this.peers);
     });
@@ -86,11 +67,36 @@ export class DesignDocPeerService {
     });
   }
 
+  /** Validates and durably records a peer's manual consent under the commit fence. */
+  private async acceptManualConsent(request: PluginPeerRequest): Promise<{ consent: ReturnType<typeof validateManualConsent>; accepted: boolean }> {
+    this.requireFence(request);
+    const packet = request.body as Partial<PeerHandshake>;
+    this.requireRosterPeer(this.requireGroup().repoId, String(packet.senderReplicaId), request.peerId);
+    const consent = validateManualConsent(request.body, this.expectation(String(packet.senderReplicaId), request.grantEpoch));
+    const accepted = await request.commitSync(() => {
+      this.requireFence(request);
+      this.requireRosterPeer(consent.repoId, consent.senderReplicaId, request.peerId);
+      validateManualConsent(consent, this.expectation(consent.senderReplicaId, request.grantEpoch));
+      return this.sync.acceptManual(consent.senderReplicaId, consent.manualId, consent.heads);
+    });
+    this.requireCurrentRequest(consent, request.peerId, request);
+    return { consent, accepted };
+  }
+
+  /** Background failures stay non-fatal but leave a bounded, deduplicated trace. */
+  private warnOnce(operation: string, error: unknown): void {
+    if (this.abort.signal.aborted) return;
+    const text = `${operation}: ${error instanceof Error ? error.message : String(error)}`.slice(0, 300);
+    if (text === this.lastWarning) return;
+    this.lastWarning = text;
+    console.warn(`[design-docs] ${text}`);
+  }
+
   start(peers: PluginSdkPeers): void {
     this.peers = peers;
     if (this.timer || this.abort.signal.aborted) return;
     const deliver = () => {
-      if (!this.abort.signal.aborted && this.status().configured) void this.deliverPending(peers).catch(() => {});
+      if (!this.abort.signal.aborted && this.status().configured) void this.deliverPending(peers).catch((error) => this.warnOnce('scheduled peer delivery failed', error));
     };
     this.scheduleDelivery = () => queueMicrotask(deliver);
     this.timer = setInterval(deliver, PEER_PENDING_TICK_MS);
@@ -138,7 +144,7 @@ export class DesignDocPeerService {
         await this.completeManualAck(peers, body, member.machineId);
         this.requireCurrentHandshake(body, member.machineId);
         await peers.call(member.machineId, 'manual-deliver', body, options);
-      } catch { awaiting++; }
+      } catch (error) { awaiting++; this.warnOnce(`manual sync with ${member.machineId} awaiting`, error); }
     }
     const result = await this.deliverPending(peers);
     return { ...result, blocked: result.blocked + awaiting };
@@ -168,7 +174,7 @@ export class DesignDocPeerService {
         if (reply?.accepted === true && reply.manualId === consent.manualId) {
           await this.completeManualAck(peers, body, member.machineId);
         }
-      } catch { /* Durable manual consent remains waiting for authorized reconnect. */ }
+      } catch (error) { this.warnOnce(`manual consent retry for ${member.machineId} deferred`, error); /* Durable consent stays waiting for authorized reconnect. */ }
     }
     for (const intent of this.sync.readyIntents(local.repoId)) {
       if (this.abort.signal.aborted || this.sync.isRetiringReplica(local.repoId, local.replicaId)) break;
@@ -202,7 +208,7 @@ export class DesignDocPeerService {
             }
             this.requireCurrentHandshake(transfer, member.machineId);
             await peers.call(member.machineId, 'transfer', transfer, options);
-            const maximumWindows = Math.ceil(transfer.blobs.reduce((sum, blob) => sum + Math.ceil(blob.bytes / MAX_PEER_CHUNK_BYTES), 0) / 128) + 1;
+            const maximumWindows = Math.ceil(transfer.blobs.reduce((sum, blob) => sum + Math.ceil(blob.bytes / MAX_PEER_CHUNK_BYTES), 0) / MAX_PEER_WINDOW_CHUNKS) + 1;
             for (let window = 0; window < maximumWindows; window++) {
               this.requireCurrentHandshake(transfer, member.machineId);
               const missing = validateMissing(await peers.call(member.machineId, 'missing', query, options), transfer);
@@ -243,7 +249,7 @@ export class DesignDocPeerService {
    * The store's own gate (all data members on delta protocol) and pins decide; failures wait for the next sync.
    */
   private compactAfterSync(): void {
-    try { this.sync.compact(PEER_COMPACTION_BATCH); } catch { /* capacity relief still runs before writes */ }
+    try { this.sync.compact(PEER_COMPACTION_BATCH); } catch (error) { this.warnOnce('peer compaction skipped', error); /* capacity relief still runs before writes */ }
   }
 
   handshake(peerId: string, input: unknown, grantEpoch = 1): PeerHandshake {
@@ -408,13 +414,13 @@ export class DesignDocPeerService {
 
   private requireGroup(): { repoId: string; replicaId: string; groupId: string; rosterEpoch: number; rosterDigest: string | null } {
     const local = this.sync.localRepository();
-    if (!local?.groupId || local.rosterEpoch < 1) throw new Error('design docs peer sync is not configured');
+    if (!local?.groupId || local.rosterEpoch < 1) throw new PeerProtocolError('invalid', 'design docs peer sync is not configured');
     if (this.sync.isRetiringReplica(local.repoId, local.replicaId)) throw new PeerProtocolError('invalid', 'retiring replica cannot exchange document data');
     return { ...local, groupId: local.groupId };
   }
 
   private requireRosterPeer(repoId: string, replicaId: string, peerId: string): void {
     const member = this.sync.members(repoId).find((candidate) => candidate.replicaId === replicaId);
-    if (!member || member.machineId !== peerId) throw new Error('peer identity is not a roster member');
+    if (!member || member.machineId !== peerId) throw new PeerProtocolError('invalid', 'peer identity is not a roster member');
   }
 }

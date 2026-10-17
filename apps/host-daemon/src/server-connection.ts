@@ -292,7 +292,13 @@ export function startEnrolledHostConnection(options: {
       if (!parsed || typeof parsed !== 'object' || (parsed as { type?: string }).type !== 'host-rpc.request') return;
       if ((parsed as { command?: { type?: string } }).command?.type === 'peer.control') {
         const request = HostRpcRequestMessageSchema.safeParse(parsed);
-        if (!request.success || request.data.command.type !== 'peer.control') return;
+        if (!request.success || request.data.command.type !== 'peer.control') {
+          const requestId = (parsed as { requestId?: unknown }).requestId;
+          reply(JSON.stringify({ type: 'host-rpc.response', protocolVersion: HOST_RPC_PROTOCOL_VERSION,
+            requestId: typeof requestId === 'string' && requestId.length > 0 && requestId.length <= 128 ? requestId : 'unknown',
+            ok: false, error: { code: 'invalid_request', message: 'unknown or invalid host-rpc request' } }));
+          return;
+        }
         void peerControl.forward(request.data.command).then(result => reply(JSON.stringify({
           type: 'host-rpc.response', protocolVersion: HOST_RPC_PROTOCOL_VERSION, requestId: request.data.requestId,
           commandType: 'peer.control', ok: true, result

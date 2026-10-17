@@ -680,13 +680,14 @@ export function createHostHub(
     socket.on('message', onReady);
     socket.on('close', cleanup);
     if (socket.readyState === socket.OPEN) {
+      const capability = getHost(db, hostId)?.enrollmentCapability;
       socket.send(JSON.stringify(HostHelloOkMessageSchema.parse({
         type: 'host.hello-ok',
         protocolVersion: HOST_RPC_PROTOCOL_VERSION,
         hostId,
         ...(options?.productInstanceId ? { productInstanceId: options.productInstanceId,
-          enrollmentCapability: getHost(db, hostId)?.enrollmentCapability ?? 'peer.forward' } : {}),
-        pluginHostGenerations: getHost(db, hostId)?.enrollmentCapability === 'execution' ? options?.pluginHostGenerations?.() ?? [] : []
+          enrollmentCapability: capability ?? 'peer.forward' } : {}),
+        pluginHostGenerations: capability === 'execution' ? options?.pluginHostGenerations?.() ?? [] : []
       })));
     }
     return true;

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PluginInvitationStatus, PluginPeerLink, PluginPeerRequest, PluginSdkPeers } from '@zana-ai/zcc-plugin-sdk/server';
 import { z } from 'zod';
+import { PeerProtocolError } from '../shared/peer-contract.js';
 import { bootstrapScope, DesignDocPairing, INVITE_UNSUPPORTED_REASON, inviteCapability, lifecycleReasonOf, readableError } from './pairing.js';
 import { capacityRequestId, DesignDocPeerGroup, MAX_PERMANENT_JOB_ATTEMPTS } from './peer-group.js';
 import { DesignDocStore } from './store.js';
@@ -671,6 +672,17 @@ describe('DD invitation pairing', () => {
     expect((await a.pairing.inviteState()).stale).toBeUndefined();
   });
 
+  it('peer handlers answer a missing local repository with a typed protocol error, not a TypeError', async () => {
+    const net = network(), a = net.app('a');
+    vi.spyOn(a.group.sync, 'localRepository').mockReturnValue(null);
+    const req = { peerId: 'b', scope: 'x', grantEpoch: 1, body: {}, signal: new AbortController().signal, commitSync: async (commit: () => unknown) => commit() } as PluginPeerRequest;
+    for (const method of ['group-hello', 'state-digest', 'state-changed']) {
+      const error = await Promise.resolve().then(() => a.handlers.get(method)!(req)).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(PeerProtocolError);
+      expect((error as Error).message).toBe('no local repository');
+    }
+  });
+
   it('projects invitations without secrets, refreshes redeemer attempts and flags the owner who must approve', async () => {
     const net = network(), a = net.app('a');
     const reserved = invitation({ invitationId: 'r1', role: 'redeemer', state: 'reserved', pairingId: 'pair-secret', consentExpiresAt: 5,
@@ -692,7 +704,11 @@ describe('DD invitation pairing', () => {
     // A redeemer never owes an approval, even before its implicit decision is recorded.
     expect((await a.pairing.inviteState()).invitations[0]).toMatchObject({ state: 'reserved', awaitingMyApproval: false, peer: { name: 'Laptop', fingerprint: 'FFFF' }, consentExpiresAt: 5 });
     calls.peerLinks.mockRejectedValue(new Error('links down'));
-    expect((await a.pairing.inviteState()).links).toEqual([]);
+    const lost = await a.pairing.inviteState();
+    expect(lost.links).toEqual([link()]);
+    expect(lost.stale).toBe('links down');
+    calls.peerLinks.mockResolvedValue([link()]);
+    expect((await a.pairing.inviteState()).stale).toBeUndefined();
     const inviter = invitation({ state: 'reserved', redeemerDecision: 'approved' });
     calls.listInvitations.mockResolvedValue([inviter]);
     expect((await a.pairing.inviteState()).invitations[0]).toMatchObject({ awaitingMyApproval: true, theirDecision: 'approved' });

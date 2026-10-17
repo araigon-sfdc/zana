@@ -91,6 +91,37 @@ describe('GET /api/v1/peer-links', () => {
     }
   });
 
+  it('refuses the mobile proxy on every other peer pairing gesture', async () => {
+    const s = await start();
+    const decide = vi.spyOn(s.ctx.peerAuthority, 'decideIntroduction');
+    for (const path of ['/peers/introductions/intro-1/decision', '/hosts/forward-join-codes']) {
+      const response = await fetch(url(path), { method: 'POST', headers: { ...JSON_HEADERS, 'x-zcc-app-surface': 'mobile' }, body: JSON.stringify({ decision: 'approved' }) });
+      expect(response.status).toBe(403);
+    }
+    expect(decide).not.toHaveBeenCalled();
+  });
+
+  it('exposes only allowlisted introduction decision errors', async () => {
+    const s = await start();
+    const decide = vi.spyOn(s.ctx.peerAuthority, 'decideIntroduction');
+    const post = () => fetch(url('/peers/introductions/intro-1/decision'), { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ decision: 'approved' }) });
+    decide.mockRejectedValueOnce(new Error('introduction already decided'));
+    expect(await post().then(async r => [r.status, await r.json()])).toEqual([409, { error: 'introduction already decided' }]);
+    decide.mockRejectedValueOnce(new Error('ENOENT: /secret/path/peer-pairs.json'));
+    expect(await post().then(async r => [r.status, await r.json()])).toEqual([409, { error: 'introduction unavailable' }]);
+  });
+
+  it('logs a failed post-approval enrollment without failing the decision', async () => {
+    const s = await start();
+    vi.spyOn(s.ctx.peerAuthority, 'decideIntroduction').mockResolvedValue({ status: 'approved', introductionId: 'intro-1' } as never);
+    s.ctx.peerInstaller = { enroll: vi.fn(async () => { throw new Error('enroll boom'); }), dispose: vi.fn(), whenIdle: vi.fn(async () => undefined) } as never;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const response = await fetch(url('/peers/introductions/intro-1/decision'), { method: 'POST', headers: JSON_HEADERS, body: JSON.stringify({ decision: 'approved' }) });
+    expect(response.status).toBe(200);
+    await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(expect.stringContaining('intro-1: enroll boom')));
+    warn.mockRestore();
+  });
+
   it('404s unknown peer-link paths and unsupported methods', async () => {
     await start();
     expect((await fetch(url('/peer-links/a/b/c/d'))).status).toBe(404);
@@ -268,14 +299,15 @@ describe('DELETE peer-link', () => {
     expect(getHost(s.ctx.db, exec.id)?.destroyedAt).toBeNull();
   });
 
-  it('answers 503 and keeps the link when Connect revocation fails', async () => {
+  it('answers 503, logs, and keeps the link when the owner store removal fails', async () => {
     const s = await start();
     const { link } = seed(s);
-    const connectModule = await import('../services/hosts/connect-enrollment.js');
-    expect(connectModule.usesConnect).toBeTypeOf('function');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     s.ctx.peerLinkDirectory = { describe: () => undefined, remove: async () => { throw new Error('revoke failed'); } };
     const response = await fetch(url(`/peer-links/${link.id}`), { method: 'DELETE', headers: JSON_HEADERS });
     expect(response.status).toBe(503);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(`remove failed for host ${link.id}: revoke failed`));
+    warn.mockRestore();
     expect(getHost(s.ctx.db, link.id)?.destroyedAt).toBeNull();
   });
 });

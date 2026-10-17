@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { GroupMember, GroupRoster } from '../shared/peer-group.js';
+import { PeerProtocolError } from '../shared/peer-contract.js';
 import { admissionReference, appendSeat, createRoster, eventHash, finalizeRoster, mergeRosters, ownedSeats,
   parseRoster, removeMember, requestRetirement, closeRetirement, isRetiring, rosterCovers, transferSeat } from './peer-slots.js';
 
@@ -164,6 +165,9 @@ describe('bounded reserved seat governance', () => {
     expect(() => finalizeRoster(wrong)).toThrow(/seat numbering/);
     const founders = genesis(); founders.genesis.founders.reverse();
     expect(() => finalizeRoster(founders)).toThrow(/genesis/);
+    const twin = genesis(); twin.genesis.founders[1]!.replicaId = twin.genesis.founders[0]!.replicaId;
+    expect(() => finalizeRoster(twin)).toThrow(PeerProtocolError);
+    expect(() => finalizeRoster(twin)).toThrow(/duplicate founder/);
   });
 
   it('disjoint saturated seat histories merge in either order; removal retries are canonical and separate', () => {

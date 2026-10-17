@@ -9,6 +9,10 @@ import { sshBaseArgs } from './remote-fs.js';
 import { HostCommandError } from './host-command-error.js';
 import { privateKeyFile } from './ssh-keys.js';
 
+const DEFAULT_RECONNECT_MS = 1000;
+const MAX_RECONNECT_BACKOFF_MS = 30_000;
+const MAX_LOCAL_TUNNELS = 16;
+const MAX_PEER_LINKS = 32;
 const READY = 'ZCC-PEER-TUNNEL-READY';
 /** OpenSSH's own report, under ExitOnForwardFailure, that the remote listen port is taken. */
 const FORWARD_FAILED_RE = /remote port forwarding failed/i;
@@ -36,6 +40,9 @@ export class PeerTunnels {
   private readonly locals = new Set<LocalTunnel>();
   private readonly links = new Set<PeerLink>();
   private opening = 0;
+  /** In-flight opens count toward the live caps so concurrent opens cannot all pass the check. */
+  private openingLocals = 0;
+  private openingLinks = 0;
   constructor(private readonly spawnProcess: typeof spawn = spawn, private readonly sshBinary = 'ssh') {}
 
   async open(remote: ProjectRemote, localPort: number, remotePort: number): Promise<void> {
@@ -132,13 +139,14 @@ export class PeerTunnels {
     options.signal?.throwIfAborted();
     const pinned = validatePinnedEndpoint(endpoint);
     if (!validPort(remotePort) || (options.localPort !== undefined && !validPort(options.localPort))) throw new Error('Invalid peer tunnel port');
-    if (this.locals.size >= 16) throw new Error('Too many peer SSH tunnels');
+    if (this.locals.size + this.openingLocals >= MAX_LOCAL_TUNNELS) throw new Error('Too many peer SSH tunnels');
     if (this.opening >= 4) throw new Error('Too many concurrent peer SSH tunnels');
-    this.opening++;
-    const directory = await mkdtemp(join(tmpdir(), 'zcc-peer-ssh-'));
+    this.opening++; this.openingLocals++;
+    let directory: string | undefined;
     let proc: ChildProcess | undefined;
-    const cleanup = async () => { if (proc) this.kill(proc); await rm(directory, { recursive: true, force: true }); };
+    const cleanup = async () => { if (proc) this.kill(proc); if (directory) await rm(directory, { recursive: true, force: true }); };
     try {
+      directory = await mkdtemp(join(tmpdir(), 'zcc-peer-ssh-'));
       await chmod(directory, 0o700);
       const knownHosts = join(directory, 'known_hosts');
       await writeFile(knownHosts, knownHostsLine(pinned), { mode: 0o600, flag: 'wx' });
@@ -178,7 +186,7 @@ export class PeerTunnels {
     } catch (error) {
       await cleanup();
       throw error;
-    } finally { this.opening--; }
+    } finally { this.opening--; this.openingLocals--; }
   }
 
   /**
@@ -190,19 +198,22 @@ export class PeerTunnels {
   async openPeerLink(input: PeerLinkInput, onState: (up: boolean, failure?: PeerSshFailure) => void, options: PeerLinkOptions = {}): Promise<PeerLink> {
     options.signal?.throwIfAborted();
     const pinned = validatePinnedEndpoint({ ...input.endpoint, identityFile: undefined });
+    // peerLinkSshArgs forces HostKeyAlgorithms=ssh-ed25519, so any other pinned type could never connect.
+    if (!pinned.hostKey.startsWith('ssh-ed25519 ')) throw new Error('Invalid pinned SSH endpoint');
     for (const port of [input.listenPort, input.targetPort, input.reversePort, ...(input.localPort === undefined ? [] : [input.localPort])]) {
       if (!validPort(port)) throw new Error('Invalid peer tunnel port');
     }
-    if (this.links.size >= 32) throw new Error('Too many peer SSH tunnels');
+    if (this.links.size + this.openingLinks >= MAX_PEER_LINKS) throw new Error('Too many peer SSH tunnels');
     if (this.opening >= 4) throw new Error('Too many concurrent peer SSH tunnels');
-    this.opening++;
-    const directory = await mkdtemp(join(tmpdir(), 'zcc-peer-link-'));
+    this.opening++; this.openingLinks++;
+    let directory: string | undefined;
     let current: ChildProcess | undefined;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let attempts = 0, closed = false, wasUp = false;
     const killCurrent = () => { if (current) this.kill(current); current = undefined; };
-    const cleanup = async () => { clearTimeout(timer); killCurrent(); await rm(directory, { recursive: true, force: true }); };
+    const cleanup = async () => { clearTimeout(timer); killCurrent(); if (directory) await rm(directory, { recursive: true, force: true }); };
     try {
+      directory = await mkdtemp(join(tmpdir(), 'zcc-peer-link-'));
       await chmod(directory, 0o700);
       const knownHosts = join(directory, 'known_hosts');
       const identityFile = join(directory, 'id_ed25519');
@@ -248,7 +259,7 @@ export class PeerTunnels {
       };
       const retry = () => {
         if (closed || timer) return;
-        const delay = Math.min((options.reconnectMs ?? 1000) * 2 ** Math.min(attempts++, 5), 30_000);
+        const delay = Math.min((options.reconnectMs ?? DEFAULT_RECONNECT_MS) * 2 ** Math.min(attempts++, 5), MAX_RECONNECT_BACKOFF_MS);
         timer = setTimeout(() => {
           timer = undefined;
           if (closed) return;
@@ -276,7 +287,7 @@ export class PeerTunnels {
       closed = true;
       await cleanup();
       throw error;
-    } finally { this.opening--; }
+    } finally { this.opening--; this.openingLinks--; }
   }
 
   close(): void {

@@ -10,6 +10,8 @@ export const MAX_PEER_GROUP_MEMBERS = 8;
 export const MAX_PEER_PACKET_BYTES = 512 * 1024;
 export const MAX_PEER_CHUNK_BYTES = 256 * 1024;
 export const MAX_PEER_SESSION_BYTES = 32 * 1024 * 1024;
+/** Chunks in one missing-chunk window: a session's byte cap over the chunk size. */
+export const MAX_PEER_WINDOW_CHUNKS = MAX_PEER_SESSION_BYTES / MAX_PEER_CHUNK_BYTES;
 /** Frozen transfer may span several bounded missing-chunk windows. */
 export const MAX_PEER_TRANSFER_BYTES = 128 * 1024 * 1024;
 export const PEER_RETRY_MAX_MS = 15 * 60 * 1000;

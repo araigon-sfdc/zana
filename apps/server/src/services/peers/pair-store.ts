@@ -13,6 +13,10 @@ import {
 export type { PeerKeyProvider, PeerRequestEnvelope } from './peer-auth.js';
 export const MAX_PEER_PAIRS = 256;
 const MAX_ACTIVE_LEASES = 128;
+const MAX_CREDENTIAL_TRANSFER_BYTES = 8192;
+const PEER_SECRET_BYTES = 32;
+const PEER_NONCE_BYTES = 24;
+const CREDENTIAL_TRANSFER_AAD = 'zcc-peer-transfer-v2';
 export const PEER_COMMIT_LEASE_TIMEOUT_MS = 10_000;
 
 export interface PeerPairGrant {
@@ -152,12 +156,12 @@ export class PairStore {
       if (existing && (status !== 'proposed' || grant.epoch !== existing.epoch || grant.proposalId === existing.proposalId ||
         !sameGrant({ ...existing, epoch: grant.epoch, proposalId: grant.proposalId }, grant))) throw new Error('peer pair is revoked');
       if (!existing && state.pairs.length + state.revokedIds.length >= this.maxPairs) throw new Error('peer pair capacity exceeded');
-      const record: StoredPair = { ...grant, secret: randomBytes(32).toString('base64url') };
+      const record: StoredPair = { ...grant, secret: randomBytes(PEER_SECRET_BYTES).toString('base64url') };
       if (existing) state.pairs[state.pairs.indexOf(existing)] = record; else state.pairs.push(record);
       await save();
       if (this.isFenced(grant.pairId)) throw new Error('peer pair is revoked');
       return publicGrant(record);
-    });
+    }, { pairId: grant.pairId });
   }
 
   async activate(pairId: string, proposalId: string, epoch: number): Promise<PeerPairGrant> {
@@ -167,7 +171,7 @@ export class PairStore {
       if (pair.status !== 'active') { pair.status = 'active'; await save(); }
       if (this.isFenced(pairId)) throw new Error('peer proposal no longer valid');
       return publicGrant(pair);
-    });
+    }, { pairId });
   }
 
   async grant(pairId: string): Promise<PeerPairGrant | null> {
@@ -175,7 +179,7 @@ export class PairStore {
     return this.transaction(async (state) => {
       const record = state.pairs.find((pair) => pair.pairId === pairId && pair.status === 'active');
       return record && !this.isFenced(pairId) ? publicGrant(record) : null;
-    });
+    }, { pairId });
   }
 
   async revoke(pairId: string): Promise<void> {
@@ -208,7 +212,7 @@ export class PairStore {
         // Retry uncertain writes durably, even if rename committed before fsync failed.
         await save();
         this.abortLeases(pairId);
-      }, false);
+      }, { validate: false, pairId });
       fence.failed.delete(pairId);
     } catch (error) { fence.failed.add(pairId); throw error; }
     finally {
@@ -242,11 +246,11 @@ export class PairStore {
       if (!pair || this.isFenced(pairId) || pair.pluginId !== pluginId || pair.scope !== scope) return null;
       const fields: PeerRequestFields = { protocolVersion: 2, pairId, senderId: pair.localInstanceId,
         recipientId: pair.remoteInstanceId, pluginId: pair.pluginId, scope: pair.scope, route, httpMethod: 'POST',
-        payloadHash, nonce: randomBytes(24).toString('base64url'), issuedAt: this.now(), epoch: pair.epoch };
+        payloadHash, nonce: randomBytes(PEER_NONCE_BYTES).toString('base64url'), issuedAt: this.now(), epoch: pair.epoch };
       validatePeerFields(fields);
       if (fields.issuedAt < state.replay.clock) throw new Error('peer clock moved backwards');
       return { ...fields, signature: this.mac(pair, fields).toString('base64url') };
-    });
+    }, { pairId });
   }
 
   /** Sender obtains an epoch-bound cancellation lease for its public signed envelope. */
@@ -256,7 +260,7 @@ export class PairStore {
       if (!pair || this.isFenced(pairId) || pair.epoch !== epoch || pair.pluginId !== pluginId || pair.scope !== scope) return null;
       if ((leases.get(resolve(this.directory))?.size ?? 0) >= MAX_ACTIVE_LEASES) throw new Error('peer active stream capacity exceeded');
       return this.lease(pair);
-    });
+    }, { pairId });
   }
 
   /** Validate host-selected route/plugin/scope and exact body before durable replay commit or dispatch. */
@@ -285,7 +289,7 @@ export class PairStore {
       await save();
       if (this.disposed || this.isFenced(pair.pairId)) return null;
       return this.lease(pair);
-    });
+    }, { pairId: envelope.pairId });
   }
 
   /** Compatibility adapter: raw signing is allowed only for validated outbound canonical bytes. */
@@ -299,7 +303,7 @@ export class PairStore {
         fields.pluginId !== pair.pluginId || fields.scope !== pair.scope || fields.epoch !== pair.epoch || now < state.replay.clock ||
         fields.issuedAt <= now - PEER_REQUEST_TTL_MS || fields.issuedAt > now + PEER_FUTURE_SKEW_MS) return null;
       return this.mac(pair, fields).toString('base64url');
-    });
+    }, { pairId });
   }
 
   /** Compatibility only. Receiving HTTP must migrate to authenticateRequest and retain its lease. */
@@ -319,13 +323,13 @@ export class PairStore {
       const key = await this.transferKey(context, pair, 'export');
       const plain = Buffer.from(JSON.stringify({ pairId: pair.pairId, senderId: pair.localInstanceId, recipientId: pair.remoteInstanceId,
         pluginId: pair.pluginId, scope: pair.scope, epoch: pair.epoch, proposalId: pair.proposalId, secret: pair.secret }));
-      try { return sealPeerBytes(plain, key, 'zcc-peer-transfer-v2'); } finally { key.fill(0); plain.fill(0); }
-    });
+      try { return sealPeerBytes(plain, key, CREDENTIAL_TRANSFER_AAD); } finally { key.fill(0); plain.fill(0); }
+    }, { pairId });
   }
 
   async importCredential(input: PeerPairInput, sealed: Uint8Array, context: unknown): Promise<PeerPairGrant> {
     const grant = normalizeGrant(input, this.localInstanceId, 'proposed');
-    if (sealed.byteLength > 8192) throw new Error('peer credential transfer too large');
+    if (sealed.byteLength > MAX_CREDENTIAL_TRANSFER_BYTES) throw new Error('peer credential transfer too large');
     const bytes = Buffer.from(sealed);
     return this.transaction(async (state, save) => {
       if (state.revokedIds.includes(grant.pairId)) throw new Error('peer pair is revoked');
@@ -334,7 +338,7 @@ export class PairStore {
       let transfer;
       let plain: Buffer | undefined;
       try {
-        plain = unsealPeerBytes(bytes, key, 'zcc-peer-transfer-v2');
+        plain = unsealPeerBytes(bytes, key, CREDENTIAL_TRANSFER_AAD);
         transfer = JSON.parse(plain.toString('utf8')) as Record<string, unknown>;
       } catch { throw new Error('invalid peer credential transfer'); } finally { key.fill(0); plain?.fill(0); }
       if (!transfer || Array.isArray(transfer) || Object.keys(transfer).sort().join(',') !== 'epoch,pairId,pluginId,proposalId,recipientId,scope,secret,senderId' ||
@@ -356,7 +360,7 @@ export class PairStore {
       await save();
       if (this.isFenced(grant.pairId)) throw new Error('peer pair is revoked');
       return publicGrant(record);
-    });
+    }, { pairId: grant.pairId });
   }
 
   private async transferKey(context: unknown, grant: PeerPairGrant, operation: 'export' | 'import'): Promise<Buffer> {
@@ -401,7 +405,7 @@ export class PairStore {
         const result = commit();
         if (result && typeof (result as { then?: unknown }).then === 'function') throw new Error('peer commit fence requires synchronous callback');
         return result;
-      }),
+      }, { pairId: grant.pairId }),
       commitWorkerSync: async (observe, signal) => this.transaction(async (state, _save, assertCurrent) => {
         const current = state.pairs.find(item => item.pairId === grant.pairId && item.status === 'active');
         if (released || controller.signal.aborted || signal.aborted || this.isFenced(grant.pairId) || !current || !sameGrant(current, grant)) {
@@ -409,6 +413,7 @@ export class PairStore {
         }
         // QUEUED=0, RUNNING=1, CANCELLED=2. CAS admission is the linearization point.
         const gate = new SharedArrayBuffer(16), word = new Int32Array(gate);
+        // Wall clock, not this.now: the worker thread checks this deadline with its own Date.now().
         Atomics.store(new BigInt64Array(gate, 8), 0, BigInt(Date.now() + PEER_COMMIT_LEASE_TIMEOUT_MS));
         const cancel = () => { Atomics.compareExchange(word, 0, 0, 2); };
         controller.signal.addEventListener('abort', cancel, { once: true });
@@ -427,7 +432,7 @@ export class PairStore {
           controller.signal.removeEventListener('abort', cancel);
           signal.removeEventListener('abort', cancel);
         }
-      }),
+      }, { pairId: grant.pairId }),
       release: () => {
         released = true;
         controller.abort(new Error('peer grant lease no longer active'));
@@ -446,8 +451,16 @@ export class PairStore {
     if (active.size === 0) leases.delete(id);
   }
 
-  private async transaction<T>(run: (state: PairState, save: () => Promise<void>, assertCurrent: () => void) => Promise<T>, validate = true): Promise<T> {
+  /**
+   * `pairId` scopes lease aborts for errors raised by `run` (ordinary rejections such as conflicts or
+   * capacity); storage, authority and enrollment-guard failures still abort every lease in the directory.
+   * A newly inserted grant is not authority-checked here: it stays unusable until authority approves it, and
+   * the next transaction revokes it if it does not.
+   */
+  private async transaction<T>(run: (state: PairState, save: () => Promise<void>, assertCurrent: () => void) => Promise<T>,
+    { validate = true, pairId }: { validate?: boolean; pairId?: string } = {}): Promise<T> {
     if (this.disposed) throw new Error('peer pair store disposed');
+    let inRun = false;
     try {
       const guards = new Map<string, { grant: PeerPairGrant; current: (() => boolean) | null }>();
       if (validate && this.options?.validateGrant) {
@@ -476,10 +489,14 @@ export class PairStore {
           if (this.disposed) throw new Error('peer pair store disposed');
           if (validate && this.options?.validateGrant) for (const pair of state.pairs) {
             const guard = guards.get(pair.pairId);
-            if (pair.status !== 'revoked' && (!guard?.current || !sameGrant(pair, guard.grant) || !guard.current())) throw new Error('peer enrollment changed');
+            if (pair.status !== 'revoked' && (!guard?.current || !sameGrant(pair, guard.grant) || !guard.current())) {
+              this.abortLeases(pair.pairId); throw new Error('peer enrollment changed');
+            }
           }
         };
+        inRun = true;
         const result = await run(state, save, assertCurrent);
+        inRun = false;
         if (validate && this.options?.validateGrant) for (const pair of state.pairs) {
           const guard = guards.get(pair.pairId);
           if ((pair.status !== 'revoked' && guard && (!guard.current || !guard.current())) || this.isFenced(pair.pairId)) {
@@ -489,7 +506,7 @@ export class PairStore {
         return result;
       });
     }
-    catch (error) { this.abortLeases(); throw error; }
+    catch (error) { this.abortLeases(inRun ? pairId : undefined); throw error; }
   }
 
   dispose(): void { this.disposed = true; this.abortLeases(); this.storage.dispose(); }

@@ -164,7 +164,7 @@ export class DesignDocBackups {
         if (stopped) return;
         stop();
         this.fence = 'lost';
-        onLost(error);
+        try { onLost(error); } catch (callbackError) { console.warn('[design-docs] backup fence-lost callback failed:', callbackError); }
       }).finally(() => { busy = false; });
     }, intervalMs);
     timer.unref?.();

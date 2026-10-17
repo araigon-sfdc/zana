@@ -387,13 +387,32 @@ describe('peer authority wiring', () => {
     expect(recover).toHaveBeenCalledTimes(2);
     expect(sweep).toHaveBeenCalledTimes(1);
   });
-  it('a sweep failure is swallowed', async () => {
+  it('a sweep failure is logged and the next tick still runs', async () => {
     vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const ctx = make({ peerKeyProvider: { getKey: async () => null } });
     vi.spyOn(ctx.peerAuthority, 'recover').mockResolvedValue({ pending: 0, blocked: 0 } as any);
-    vi.spyOn(ctx.peerInstaller!, 'sweep').mockRejectedValue(new Error('sweep failed'));
+    const sweep = vi.spyOn(ctx.peerInstaller!, 'sweep').mockRejectedValue(new Error('sweep failed'));
     await vi.advanceTimersByTimeAsync(30_000);
-    expect(ctx.peerPairs).toBeDefined();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(sweep).toHaveBeenCalledTimes(2);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('installer sweep failed: sweep failed'));
+    warn.mockRestore();
+  });
+  it('a non-key recovery failure is logged, disposes pairs and stops further recovery', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const ctx = make({ peerKeyProvider: { getKey: async () => null } });
+    const recover = vi.spyOn(ctx.peerAuthority, 'recover').mockRejectedValue(new Error('disk full'));
+    const dispose = vi.spyOn(ctx.peerPairs, 'dispose');
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(dispose).toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('recovery (peer sync disabled) failed: disk full'));
+    const calls = recover.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(90_000);
+    ctx.hub.emit('hosts:changed', []);
+    expect(recover.mock.calls.length).toBe(calls);
+    warn.mockRestore();
   });
   it('hosts:changed from the installer is suppressed after dispose', async () => {
     const ctx = make({ peerKeyProvider: { getKey: async () => randomBytes(32) } });
@@ -431,7 +450,7 @@ describe('lifecycle', () => {
     await ctx.whenIdle();
     expect(idle).toHaveBeenCalled();
   });
-  it('creates peer storage directories lazily under the real data dir', () => {
+  it('creates the data dir at startup', () => {
     const ctx = make();
     expect(existsSync(ctx.dataDir)).toBe(true);
   });

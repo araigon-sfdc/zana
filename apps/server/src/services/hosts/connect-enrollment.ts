@@ -86,9 +86,12 @@ const PEER_LINK_REASONS: Record<string, string> = {
   invalid_response: 'Zana Connect returned an invalid peer link response.'
 };
 
+/** Own-property lookup: a Connect-supplied code such as `toString` must not resolve through `Object.prototype`. */
+function knownReason(code: unknown): code is string { return typeof code === 'string' && Object.hasOwn(PEER_LINK_REASONS, code); }
+
 /** Bounded, secret-free failure. `reason` is a stable machine code callers map to user copy. */
 export class PeerLinkConnectError extends Error {
-  constructor(readonly reason: string, readonly status?: number) { super(PEER_LINK_REASONS[reason] ?? 'Zana Connect peer link request failed.'); this.name = 'PeerLinkConnectError'; }
+  constructor(readonly reason: string, readonly status?: number) { super(knownReason(reason) ? PEER_LINK_REASONS[reason]! : 'Zana Connect peer link request failed.'); this.name = 'PeerLinkConnectError'; }
 }
 
 type PeerLinkContext = Pick<ProductHttpContext, 'dataDir' | 'productInstanceId' | 'joinCodes'>;
@@ -104,7 +107,7 @@ async function peerLinkRequest(origin: string, path: string, credential: string 
   try { return await connectRequest(origin, path, credential, body, fetcher); }
   catch (error) {
     if (error instanceof ConnectRequestError) {
-      const reason = error.code && PEER_LINK_REASONS[error.code] ? error.code : error.status === 401 || error.status === 403 ? 'unauthorized' : 'connect_failed';
+      const reason = knownReason(error.code) ? error.code : error.status === 401 || error.status === 403 ? 'unauthorized' : 'connect_failed';
       throw new PeerLinkConnectError(reason, error.status);
     }
     if (error instanceof PeerLinkConnectError) throw error;
@@ -148,8 +151,13 @@ export function peerLinkHostName(peerName: string, peerInstanceId: string, taken
   };
   const plain = build('');
   if (!taken.has(plain)) return plain;
-  const short = sanitizeName(String(peerInstanceId ?? '')).replace(/[^A-Za-z0-9]/g, '').slice(0, 6).toLowerCase();
-  return build(` [${short || 'peer'}]`);
+  const id = sanitizeName(String(peerInstanceId ?? '')).replace(/[^A-Za-z0-9]/g, '').toLowerCase();
+  // Probe progressively longer tags so peers sharing a six-character prefix still get distinct names.
+  for (let length = 6; length <= id.length; length++) {
+    const candidate = build(` [${id.slice(0, length)}]`);
+    if (!taken.has(candidate)) return candidate;
+  }
+  return build(` [${id.slice(0, 6) || 'peer'}]`);
 }
 
 function validPeerLinkName(name: unknown): name is string {
@@ -214,7 +222,8 @@ export async function redeemConnectPeerLinkCode(accountUrl: string, code: string
   if (result.accountUrl !== accountUrl || !serverUrlUnder(result.serverUrl, accountUrl) ||
     typeof result.hostId !== 'string' || !UUID_RE.test(result.hostId) || typeof result.serverId !== 'string' || !UUID_RE.test(result.serverId) ||
     typeof result.instanceId !== 'string' || !UUID_RE.test(result.instanceId) || typeof result.credential !== 'string' || !SECRET_RE.test(result.credential) ||
-    typeof result.enrollToken !== 'string' || !ENROLL_TOKEN_RE.test(result.enrollToken) || !Number.isSafeInteger(result.expiresAt)) throw new PeerLinkConnectError('invalid_response');
+    typeof result.enrollToken !== 'string' || !ENROLL_TOKEN_RE.test(result.enrollToken) || !Number.isSafeInteger(result.expiresAt) ||
+    result.expiresAt <= Date.now()) throw new PeerLinkConnectError('invalid_response');
   return { hostId: result.hostId, serverId: result.serverId, instanceId: result.instanceId, serverUrl: result.serverUrl,
     credential: result.credential, enrollToken: result.enrollToken, expiresAt: result.expiresAt };
 }

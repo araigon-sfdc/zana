@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { peerRouteOriginRequestSchema, peerSshEndpointSchema } from '@zana-ai/zcc-server-contract';
-import { readJsonBody, sendJson } from '../../http/json.js';
+import { readJsonBody, rejectMobilePeerManagement, sendJson } from '../../http/json.js';
 import type { ProductHttpContext } from '../../http/product-context.js';
 import { PEER_ID } from './peer-auth.js';
 
@@ -17,10 +17,11 @@ function pathId(match: RegExpMatchArray | null): string | null | undefined {
 /** Composed after product browser/desktop authorization. Responses never include codes, keys or tunnels. */
 export async function handlePeerInstallerApi(request: IncomingMessage, response: ServerResponse, ctx: ProductHttpContext,
   path: string, method: string): Promise<boolean> {
-  if (path === ROUTE_ORIGINS) return handleRouteOrigins(request, response, ctx, method);
+  if (path === ROUTE_ORIGINS) return (method !== 'GET' && rejectMobilePeerManagement(request, response)) || handleRouteOrigins(request, response, ctx, method);
   const enrollId = pathId(path.match(ENROLL)), endpointId = pathId(path.match(ENDPOINT));
   if (enrollId === undefined && endpointId === undefined && path !== '/api/v1/peers/installations' && path !== '/api/v1/peers/ssh-endpoints') return false;
   const installer = ctx.peerInstaller, endpoints = ctx.peerSshEndpoints;
+  if (method !== 'GET' && rejectMobilePeerManagement(request, response)) return true;
   if (enrollId !== undefined) {
     if (method !== 'POST') { sendJson(response, 405, { error: 'method not allowed' }); return true; }
     if (!installer) { sendJson(response, 503, { error: 'peer installer unavailable' }); return true; }

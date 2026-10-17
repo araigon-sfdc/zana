@@ -207,7 +207,10 @@ describe('bridge and runtime hook', () => {
     await Promise.resolve();
     expect(getDeepLinkBase()).toBeNull();
     installCc({ config: async () => { throw new Error('x'); }, open: async () => ({ ok: false, reason: 'unavailable' }), onLink: () => () => undefined });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     expect(() => installDeepLinkBridge()()).not.toThrow();
+    await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(expect.stringContaining('[deep-links] config load failed'), expect.any(Error)));
+    warn.mockRestore();
   });
 
   it('open() goes through main and fails closed on error or bad input', async () => {

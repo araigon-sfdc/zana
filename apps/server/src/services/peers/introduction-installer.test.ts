@@ -433,6 +433,38 @@ it('a failed responder link is replaced by a fresh awaiting consent on re-approv
   await expect(g.make().enroll(g.approve())).rejects.toThrow('peer is already enrolled');
 });
 
+it('a newer approval replaces an unnotified awaiting responder record so the notice goes through the new introduction', async () => {
+  const f = await fixture(undefined, { responder: true }), installer = f.make(), first = f.approve();
+  f.authority.notifyIntroductionConsent.mockRejectedValueOnce(new Error('old sponsor offline'));
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  await installer.enroll(first);
+  expect(warn).toHaveBeenCalledWith(expect.stringContaining('consent notification failed'));
+  expect(await installer.list()).toEqual([expect.objectContaining({ introductionId: first, status: 'awaiting' })]);
+  const second = f.approve();
+  await expect(installer.enroll(second)).resolves.toMatchObject({ introductionId: second, status: 'awaiting' });
+  expect(f.authority.notifyIntroductionConsent).toHaveBeenLastCalledWith(second, expect.any(AbortSignal));
+  expect(await installer.list()).toEqual([expect.objectContaining({ introductionId: second, status: 'awaiting' })]);
+  // Once the notice was delivered the record is left alone.
+  const third = f.approve();
+  await installer.enroll(third);
+  expect(await installer.list()).toEqual([expect.objectContaining({ introductionId: second })]);
+  warn.mockRestore();
+});
+
+it('a teardown failure never blocks the failed state transition', async () => {
+  const f = await fixture(undefined, { responder: true }), installer = f.make();
+  f.approve();
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  vi.spyOn(f.joinCodes, 'invalidateHost').mockImplementation(() => { throw new Error('disk gone'); });
+  f.connector.enroll.mockRejectedValue(new Error('unreachable'));
+  await installer.install(f.sponsor, { introductionId: randomUUID(), pluginId: 'test-plugin', scope: 'opaque-scope', peerInstanceId: f.peer,
+    route: 'http://127.0.0.1:4100/', joinCode: code('r') });
+  await installer.whenIdle();
+  expect(await installer.list()).toEqual([expect.objectContaining({ status: 'failed' })]);
+  expect(warn).toHaveBeenCalledWith(expect.stringContaining('teardown failed'));
+  warn.mockRestore();
+});
+
 it('half-approved pairs expire cleanly on sweep, along with stale consents, leaving nothing behind', async () => {
   const f = await fixture(), installer = f.make(), id = f.approve();
   const r = await fixture(undefined, { responder: true }), responder = r.make(), rid = r.approve();

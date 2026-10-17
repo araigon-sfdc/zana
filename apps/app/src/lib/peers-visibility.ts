@@ -43,11 +43,11 @@ export function usePeersSettingsVisibility(): PeersVisibility {
     let cancelled = false;
     product.config.get()
       .then((next) => { if (!cancelled) setConfig(next); })
-      .catch(() => {})
+      .catch((error: unknown) => { console.warn('[peers] visibility config load failed', error); })
       .finally(() => { if (!cancelled) setConfigSettled(true); });
     product.pluginApps.list()
       .then((next) => { if (!cancelled) setPlugins(next); })
-      .catch(() => {})
+      .catch((error: unknown) => { console.warn('[peers] visibility plugin list load failed', error); })
       .finally(() => { if (!cancelled) setPluginsSettled(true); });
     const offConfig = product.config.onChanged((next) => { if (!cancelled) setConfig(next); });
     const offPlugins = product.pluginApps.onChanged((next) => { if (!cancelled) setPlugins(next); });

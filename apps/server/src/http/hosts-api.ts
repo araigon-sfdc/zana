@@ -20,7 +20,7 @@ import {
   updateHostPermissionCeiling,
   updateHostSshIdentity
 } from '@zana-ai/zcc-db';
-import { readJsonBody, sendJson, beginNdjson } from './json.js';
+import { readJsonBody, sendJson, beginNdjson, rejectMobilePeerManagement } from './json.js';
 import type { ProductHttpContext } from './product-context.js';
 import { listPublicHosts, parseHostUpdate, toPublicHost } from '../services/hosts/host-public.js';
 import { listPeerLinks, pausePeerLink, removePeerLink, removePeerLinkUse, resumePeerLink, type PeerLinkRemoval } from '../services/hosts/peer-link-view.js';
@@ -70,6 +70,8 @@ function sendPeerLinkRemoval(response: ServerResponse, result: PeerLinkRemoval):
   else sendJson(response, 503, { error: 'Could not remove this link right now. Retry when your account connection is available.' });
 }
 
+const SAFE_DECISION_ERRORS = /^(peer introduction unavailable|introduction already decided|invalid introduction decision)$/;
+
 /**
  * Public `/api/v1/hosts` surface. Join codes do not create a host row.
  */
@@ -82,11 +84,7 @@ export async function handleHostsApi(
   requestUrl: URL
 ): Promise<boolean> {
   if (path === '/api/v1/peer-links' || path.startsWith('/api/v1/peer-links/')) {
-    // Link management is an owner gesture on this machine; the phone proxy marks its requests.
-    if (request.headers['x-zcc-app-surface'] === 'mobile') {
-      sendJson(response, 403, { error: 'peer links are managed from the desktop app' });
-      return true;
-    }
+    if (rejectMobilePeerManagement(request, response)) return true;
     if (path === '/api/v1/peer-links' && method === 'GET') {
       sendJson(response, 200, listPeerLinks(ctx));
       return true;
@@ -191,6 +189,7 @@ export async function handleHostsApi(
 
   const introductionParams = method === 'POST' ? routeParams(path, '/api/v1/peers/introductions/:id/decision') : null;
   if (introductionParams) {
+    if (rejectMobilePeerManagement(request, response)) return true;
     let body: unknown;
     try { body = await readJsonBody(request); } catch { sendJson(response, 400, { error: 'invalid JSON' }); return true; }
     const parsed = peerIntroductionDecisionRequestSchema.safeParse(body);
@@ -198,14 +197,22 @@ export async function handleHostsApi(
     try {
       const decided = await ctx.peerAuthority.decideIntroduction(introductionParams.id!, parsed.data.decision);
       // Consent is the trigger: a bounded, tracked forward-only enrollment; failures stay visible in installations.
-      if (decided.status === 'approved') void ctx.peerInstaller?.enroll(decided.introductionId).catch(() => undefined);
+      if (decided.status === 'approved') {
+        void ctx.peerInstaller?.enroll(decided.introductionId).catch(error => {
+          console.warn(`[zcc] peer enrollment after approval failed for introduction ${decided.introductionId}: ${error instanceof Error ? error.message : String(error)}`);
+        });
+      }
       sendJson(response, 200, decided);
     }
-    catch (error) { sendJson(response, 409, { error: error instanceof Error ? error.message : 'introduction unavailable' }); }
+    catch (error) {
+      const message = error instanceof Error && SAFE_DECISION_ERRORS.test(error.message) ? error.message : 'introduction unavailable';
+      sendJson(response, 409, { error: message });
+    }
     return true;
   }
 
   if (path === '/api/v1/hosts/forward-join-codes' && method === 'POST') {
+    if (rejectMobilePeerManagement(request, response)) return true;
     let body: unknown = {};
     try { body = await readJsonBody(request); } catch { sendJson(response, 400, { error: 'invalid JSON' }); return true; }
     if (!createHostJoinCodeRequestSchema.safeParse(body).success) { sendJson(response, 400, { error: 'invalid join-code request' }); return true; }

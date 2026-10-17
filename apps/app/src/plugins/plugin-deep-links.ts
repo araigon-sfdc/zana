@@ -181,7 +181,7 @@ export function installDeepLinkBridge(): () => void {
     .then((next) => {
       if (active && next && (next.base === null || typeof next.base === 'string')) config = next;
     })
-    .catch(() => {});
+    .catch((error: unknown) => { console.warn('[deep-links] config load failed; links stay hidden', error); });
   const off = api.onLink((delivery) => {
     void routeDeepLink(delivery);
   });

@@ -18,7 +18,7 @@ export async function registerBoundLocalPeerApp(server: Server, dataDir: string,
   const onEnd = () => {
     server.off('close', onEnd);
     server.off('error', onEnd);
-    void retire().catch(() => {});
+    void retire().catch(error => console.warn(`[zcc] local peer app endpoint retirement failed: ${error instanceof Error ? error.message : String(error)}`));
   };
   server.once('close', onEnd);
   server.once('error', onEnd);

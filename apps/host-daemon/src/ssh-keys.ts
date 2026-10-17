@@ -47,7 +47,14 @@ export function publicKeyLine(seed: string): string {
 export function fingerprint(publicLine: string): string {
   const [type, body] = publicLine.trim().split(/\s+/);
   if (type !== KEY_TYPE || !body || !/^[A-Za-z0-9+/]+={0,2}$/.test(body)) throw new Error('Invalid SSH public key');
-  return `SHA256:${createHash('sha256').update(Buffer.from(body, 'base64')).digest('base64').replace(/=+$/, '')}`;
+  const blob = Buffer.from(body, 'base64');
+  // Canonical wire form: string "ssh-ed25519" then a 32-byte string, nothing else.
+  const expected = publicBlob(Buffer.alloc(32));
+  if (blob.length !== expected.length || !blob.subarray(0, expected.length - 32).equals(expected.subarray(0, expected.length - 32))
+    || blob.toString('base64') !== body) {
+    throw new Error('Invalid SSH public key');
+  }
+  return `SHA256:${createHash('sha256').update(blob).digest('base64').replace(/=+$/, '')}`;
 }
 
 /** An unencrypted `openssh-key-v1` private key file (PEM armoured) for `ssh -i`. */

@@ -672,7 +672,10 @@ describe('PeerInvitations v3', () => {
       const inv = w.make('inv', { onChanged: boom, onTerminated: boom, onConsented: boom }), red = w.make('red', { onChanged: boom, onConsented: boom });
       const c = await w.consent(inv, red);
       expect(c.onInviter.state).toBe('consented');
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
       await inv.svc.cancel({ pluginId: PLUGIN, invitationId: c.invitationId });
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('onTerminated observer failed'));
+      warn.mockRestore();
     });
   });
 

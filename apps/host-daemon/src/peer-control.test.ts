@@ -165,3 +165,11 @@ it('an unpinned forward-only link never registers or carries control', async () 
   await expect(peer.forward(f.command)).rejects.toThrow();
   expect(f.paths).toEqual([]);
 });
+
+it('logs the cause of a sanitized control failure without leaking it to the caller', async () => {
+  const f = await fixture(); f.paths.length = 0;
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  const failure = f.peer.forward({ ...f.command, packet: { ...f.command.packet, senderId: randomUUID() } });
+  await expect(failure).rejects.toMatchObject({ code: 'peer_control_failed', message: 'peer control unavailable or not authorized' });
+  expect(warn).toHaveBeenCalledWith(expect.stringContaining('[peer-control] forward failed: peer control destination mismatch'));
+});

@@ -89,7 +89,9 @@ export async function handlePeerControlApi(req: IncomingMessage, res: ServerResp
       const received = await ctx.peerAuthority.receiveIntroduction(packet.senderId, { pluginId, scope, peerInstanceId, introductionId }, Date.now(),
         { consented });
       if (received?.status === 'approved' && consented) {
-        void ctx.peerInstaller?.enroll(received.introductionId).catch(() => undefined);
+        void ctx.peerInstaller?.enroll(received.introductionId).catch(error => {
+          console.warn(`[zcc] peer enrollment after relayed introduction failed for ${received.introductionId}: ${error instanceof Error ? error.message : String(error)}`);
+        });
       }
       result = { accepted: true };
     } else if (input.operation === 'introduction.enroll') {
@@ -125,7 +127,11 @@ export async function handlePeerControlApi(req: IncomingMessage, res: ServerResp
     }
     await assertEnrollment();
     sendJson(res, 200, controlResponse(packet, result, key));
-  } catch { if (!res.destroyed) sendJson(res, 403, { error: 'peer control unavailable or not authorized' }); }
+  } catch (error) {
+    // Admission, replay and validation failures are indistinguishable by type, so the client still sees 403; the cause is logged (never key material).
+    console.warn(`[zcc] peer control request rejected (${req.url}): ${error instanceof Error ? error.message : String(error)}`);
+    if (!res.destroyed) sendJson(res, 403, { error: 'peer control unavailable or not authorized' });
+  }
   finally { key?.fill(0); clearTimeout(timer); res.off('close', cancel); active--; }
   return true;
 }

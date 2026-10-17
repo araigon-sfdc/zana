@@ -1,11 +1,11 @@
 import { chmodSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import { readProductInstanceId } from './instance-identity.js';
 
 const roots: string[] = [];
-afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 const root = () => { const path = mkdtempSync(join(tmpdir(), 'zcc-instance-')); roots.push(path); return path; };
 it('persists one private identity independent of other instances', () => {
   const dir = root(), id = readProductInstanceId(dir);
@@ -37,4 +37,13 @@ it('refuses to mint a replacement when established pair storage loses its identi
   const dir = root(); mkdirSync(join(dir, 'peer-pairs'), { mode: 0o700 });
   expect(() => readProductInstanceId(dir)).toThrow('Product instance identity missing after peer initialization');
   expect(readdirSync(dir)).toEqual(['peer-pairs']);
+});
+it('skips POSIX ownership and mode checks on Windows but keeps content validation', () => {
+  vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+  const dir = root(), file = join(dir, 'product-instance.json'), id = readProductInstanceId(dir);
+  // Windows reports permissive modes and group-writable directories; neither may reject the identity.
+  chmodSync(file, 0o666); chmodSync(dir, 0o777);
+  expect(readProductInstanceId(dir)).toBe(id);
+  writeFileSync(file, '{"id":"other"}');
+  expect(() => readProductInstanceId(dir)).toThrow('Invalid product instance identity');
 });

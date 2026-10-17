@@ -402,6 +402,34 @@ describe('invitation pairing UI', () => {
     expect(dismiss.className).toBe('btn dd-btn-secondary');
   });
 
+  it('Dismiss is disabled while a panel action is in flight and enabled again once it settles', async () => {
+    let finish!: (value: InviteItem) => void;
+    const redeem = vi.fn(() => new Promise<InviteItem>((resolve) => { finish = resolve; }));
+    mount({ inviteState: async () => view({ invitations: [item({ state: 'denied', reason: 'denied', peer })] }), redeemInvitation: redeem });
+    const dismiss = await screen.findByRole('button', { name: 'Dismiss' }) as HTMLButtonElement;
+    expect(dismiss.disabled).toBe(false);
+    fireEvent.change(await screen.findByLabelText('Paste invitation'), { target: { value: 'zccinv1.pending' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Join peer' }));
+    await waitFor(() => expect(redeem).toHaveBeenCalledOnce());
+    expect((screen.getByRole('button', { name: 'Dismiss' }) as HTMLButtonElement).disabled).toBe(true);
+    finish(item({ role: 'redeemer', state: 'redeeming' }));
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Dismiss' }) as HTMLButtonElement).disabled).toBe(false));
+  });
+
+  it('keeps a still-open invitation when cancelling it fails, instead of issuing a second live token', async () => {
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText: vi.fn(async () => undefined) }, configurable: true });
+    const create = vi.fn(async () => ({ invitationId: 'inv-1', token: 'zccinv1.first', expiresAt: Date.now() + 600_000 }));
+    const cancel = vi.fn(async () => { throw new Error('host busy'); });
+    mount({ createInvitation: create, cancelInvitation: cancel });
+    fireEvent.click(await screen.findByRole('button', { name: 'Add peer' }));
+    await screen.findByRole('button', { name: 'New invitation' });
+    fireEvent.click(screen.getByRole('button', { name: 'New invitation' }));
+    await waitFor(() => expect(cancel).toHaveBeenCalledOnce());
+    expect((await screen.findByRole('alert')).textContent).toContain('Could not cancel the current invitation, so no new one was created: host busy');
+    expect(create).toHaveBeenCalledOnce();
+    expect((screen.getByLabelText('Invitation') as HTMLInputElement).value).toBe('zccinv1.first');
+  });
+
   it('older hosts: only the new action is blocked, with the stable reason; an existing group still renders and syncs', async () => {
     const members = ['a', 'b'].map((name) => ({ replicaId: `r-${name}`, machineId: `app-${name}`, authorized: true, connected: true }));
     mount({ inviteState: async () => view({ available: false, reason: 'host cannot invite peers' }),

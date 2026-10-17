@@ -88,6 +88,22 @@ describe('PairStore persistence and lifecycle', () => {
     await expect(f.authenticate(packet)).rejects.toThrow('enrollment changed');
     expect(await f.b.grant('pair-a')).toBeNull();
   });
+  it('scopes lease aborts for ordinary rejections to the affected pair', async () => {
+    const f = await fixture();
+    await f.a.create(grant);
+    const lease = (await f.a.acquireGrant('pair-a', 1, 'design-docs', 'opaque-repo-1'))!;
+    await expect(f.a.create({ ...grant, pairId: 'pair-b', scope: 'other-scope' })).resolves.toMatchObject({ pairId: 'pair-b' });
+    await expect(f.a.create({ ...grant, pairId: 'pair-b', proposalId: 'conflict' })).rejects.toThrow('conflicts');
+    await expect(lease.commitSync(() => { throw new Error('plugin apply failed'); })).rejects.toThrow('plugin apply failed');
+    const other = (await f.a.acquireGrant('pair-b', 1, 'design-docs', 'other-scope'))!;
+    await expect(other.commitSync(() => { throw new Error('other apply failed'); })).rejects.toThrow('other apply failed');
+    expect(other.signal.aborted).toBe(true); // Failing pair fails closed...
+    const unrelated = (await f.a.acquireGrant('pair-a', 1, 'design-docs', 'opaque-repo-1'))!;
+    await expect(f.a.create({ ...grant, pairId: 'pair-b', proposalId: 'conflict' })).rejects.toThrow('conflicts');
+    expect(unrelated.signal.aborted).toBe(false); // ...without tearing down other pairs' streams.
+    expect(await unrelated.commitSync(() => 7)).toBe(7);
+    unrelated.release(); other.release(); lease.release();
+  });
   it('stores encrypted, private credentials; all public APIs omit secrets; survives disk restart', async () => {
     const f = await fixture();
     await f.pair();

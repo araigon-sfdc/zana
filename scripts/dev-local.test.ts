@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -99,6 +99,26 @@ describe('dev-local turbo TUI', () => {
     const replaced = prepareLocalDevEnv({ ZCC_DATA_DIR: dataDir, PATH: '/usr/bin' }).env.ZCC_PEER_STORAGE_BOOT_KEY;
     expect(replaced).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(replaced).not.toBe(first);
+    // A group/world-readable key file is not trusted; a symlink or hard link to a chosen key is replaced, never written through.
+    const keyPath = join(dataDir, 'dev-peer-key');
+    const planted = 'A'.repeat(43);
+    writeFileSync(keyPath, planted);
+    chmodSync(keyPath, 0o644);
+    const afterMode = prepareLocalDevEnv({ ZCC_DATA_DIR: dataDir, PATH: '/usr/bin' }).env.ZCC_PEER_STORAGE_BOOT_KEY;
+    expect(afterMode).not.toBe(planted);
+    expect(statSync(keyPath).mode & 0o777).toBe(0o600);
+    const target = join(makeTempDir(), 'target');
+    writeFileSync(target, planted, { mode: 0o600 });
+    rmSync(keyPath);
+    symlinkSync(target, keyPath);
+    const afterLink = prepareLocalDevEnv({ ZCC_DATA_DIR: dataDir, PATH: '/usr/bin' }).env.ZCC_PEER_STORAGE_BOOT_KEY;
+    expect(afterLink).not.toBe(planted);
+    expect(lstatSync(keyPath).isSymbolicLink()).toBe(false);
+    expect(readFileSync(target, 'utf8')).toBe(planted);
+    rmSync(keyPath);
+    linkSync(target, keyPath);
+    expect(prepareLocalDevEnv({ ZCC_DATA_DIR: dataDir, PATH: '/usr/bin' }).env.ZCC_PEER_STORAGE_BOOT_KEY).not.toBe(planted);
+    expect(readFileSync(target, 'utf8')).toBe(planted);
     // An explicit key wins; the packaged target never gets the file-backed dev key.
     expect(prepareLocalDevEnv({ ZCC_DATA_DIR: dataDir, ZCC_PEER_STORAGE_BOOT_KEY: 'explicit', PATH: '/usr/bin' }).env.ZCC_PEER_STORAGE_BOOT_KEY).toBe('explicit');
     const packagedDir = join(makeTempDir(), 'zcc');

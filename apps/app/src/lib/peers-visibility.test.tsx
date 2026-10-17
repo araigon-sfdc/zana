@@ -112,9 +112,13 @@ describe('usePeersSettingsVisibility', () => {
   it('settles as hidden when loading fails', async () => {
     h.configFails = true;
     h.pluginsFail = true;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const { result } = renderHook(() => usePeersSettingsVisibility());
     await waitFor(() => expect(result.current.ready).toBe(true));
     expect(result.current.visible).toBe(false);
+    expect(warn).toHaveBeenCalledWith('[peers] visibility config load failed', expect.any(Error));
+    expect(warn).toHaveBeenCalledWith('[peers] visibility plugin list load failed', expect.any(Error));
+    warn.mockRestore();
   });
 
   it('reacts to live config and plugin changes', async () => {

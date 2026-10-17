@@ -122,6 +122,18 @@ describe('listing', () => {
     expect(listPluginLinkHosts(db, 'none')).toEqual([]);
   });
 
+  it('loads uses for many plugin links in one grouped query, ordered and not mixed across hosts', () => {
+    const hosts = Array.from({ length: 600 }, (_, i) => link(`h${i}`));
+    addHostLinkUse(db, hosts[0]!.id, use('p1'));
+    addHostLinkUse(db, hosts[0]!.id, { ...use('p2'), scope: 's2' });
+    addHostLinkUse(db, hosts[599]!.id, use('p3'));
+    const listed = new Map(listHosts(db).map((h) => [h.id, h]));
+    const usesOf = (id: string) => { const p = listed.get(id)!.purpose; return p.kind === 'plugin-link' ? p.uses.map((u) => u.pluginId) : null; };
+    expect(usesOf(hosts[0]!.id)).toEqual(['p1', 'p2']);
+    expect(usesOf(hosts[1]!.id)).toEqual([]);
+    expect(usesOf(hosts[599]!.id)).toEqual(['p3']);
+  });
+
   it('findHostBySsh never returns a plugin link', () => {
     const fwd = link();
     db.sqlite.prepare("UPDATE hosts SET ssh_host = 'box' WHERE id = ?").run(fwd.id);

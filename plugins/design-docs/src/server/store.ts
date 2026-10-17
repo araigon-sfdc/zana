@@ -482,8 +482,9 @@ export class DesignDocStore {
     }
     this.db.transaction(() => {
       const before = this.requireRow(row.id);
-      const paired = this.db.prepare('SELECT repo_id FROM sync_repositories WHERE group_id IS NOT NULL AND roster_epoch > 0 LIMIT 1').get();
-      if (paired && patch.expectedHead === undefined) {
+      // Local-only navigation (alternativeTo) never replicates, so it needs no peer head; any other field does.
+      const replicated = sets.some((set) => !set.startsWith('alternative_to ='));
+      if (replicated && this.isPaired() && patch.expectedHead === undefined) {
         throw new DesignDocError('conflict', 'expectedHead is required for paired metadata updates; re-read the doc');
       }
       if (patch.expectedHead !== undefined) {
@@ -504,7 +505,7 @@ export class DesignDocStore {
       const after = this.requireRow(row.id);
       const semanticChange = !!projectReferenceChanged || ['title', 'summary', 'status', 'tags', 'entry_path', 'project_id'].some((key) =>
         before[key as keyof DocRow] !== after[key as keyof DocRow]);
-      if (!semanticChange && this.db.prepare('SELECT repo_id FROM sync_repositories WHERE group_id IS NOT NULL LIMIT 1').get()) return;
+      if (!semanticChange && this.isPaired()) return;
       this.touch(row.id, actor);
       if (semanticChange) this.notifyMutation({ docId: row.id, kind: 'update', payload: null,
         statusBefore: before.status as DocStatus, statusAfter: after.status as DocStatus });
@@ -684,7 +685,6 @@ export class DesignDocStore {
     return this.db.transaction(() => {
       const existing = this.fileRow(row.id, from);
       if (!existing) throw this.missingFile(row.id, from);
-      const identity = this.db.prepare('SELECT sync_id FROM doc_files WHERE doc_id = ? AND path = ?').get(row.id, from) as { sync_id: string | null };
       checkBaseRevision(from, existing, options.baseRevision, options.baseFileId);
       if (isBinaryKind(fileKindOf(from)) !== isBinaryKind(fileKindOf(to))) {
         throw new DesignDocError('invalid', `cannot rename ${from} to ${to}: the file type would change encoding`);
@@ -702,7 +702,7 @@ export class DesignDocStore {
       const revision = this.nextRevisionFor(row.id, to);
       const moved = { path: to, content: existing.content, encoding: existing.encoding, size: existing.size };
       this.insertFile(row.id, moved, revision, at, actorJson);
-      this.db.prepare('UPDATE doc_files SET sync_id = ? WHERE doc_id = ? AND path = ?').run(identity.sync_id, row.id, to);
+      this.db.prepare('UPDATE doc_files SET sync_id = ? WHERE doc_id = ? AND path = ?').run(existing.sync_id, row.id, to);
       this.recordRevision(row.id, to, revision, 'rename', moved, actorJson, at, { note, renamedFrom: from });
       // Comments follow the file so they stay anchored (and filterable) after a move.
       this.db.prepare('UPDATE doc_comments SET path = ? WHERE doc_id = ? AND path = ?').run(to, row.id, from);

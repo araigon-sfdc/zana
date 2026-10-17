@@ -7,7 +7,7 @@ import type { PluginDatabase, PluginPeerRequest, PluginSdkPeers, ZccPluginApi } 
 import { DesignDocPeerService } from './peer-service.js';
 import { DesignDocSyncStore } from './sync-store.js';
 import { DesignDocStore } from './store.js';
-import { canonicalPeerHash } from '../shared/peer-contract.js';
+import { canonicalPeerHash, PeerProtocolError } from '../shared/peer-contract.js';
 import { createScopeHash, createTransferHash, peerBlobHash, transferQuery } from './peer-protocol.js';
 import { MAX_PEER_CHUNK_BYTES, MAX_PEER_PACKET_BYTES, MAX_PEER_SESSION_BYTES } from '../shared/peer-limits.js';
 import { createRoster, transferSeat, requestRetirement } from './peer-slots.js';
@@ -997,5 +997,13 @@ describe('peer protocol negotiation', () => {
     expect(b.service.handshake('machine-a', { ...hello, maxProtocolVersion: 3 }).protocolVersion).toBe(3);
     expect(b.service.handshake('machine-a', { ...hello, protocolVersion: 3 }).protocolVersion).toBe(3);
     expect(() => b.service.handshake('machine-a', { ...hello, protocolVersion: 4 })).toThrow('unsupported peer protocol version');
+  });
+  it('rejects unconfigured and non-roster requests with a typed PeerProtocolError', () => {
+    const unpaired = fixture('b');
+    expect(() => unpaired.service.handshake('machine-a', {})).toThrow(PeerProtocolError);
+    const paired = fixture('b'); paired.pair();
+    const caught = (() => { try { paired.service.handshake('machine-x', { senderReplicaId: 'replica-zzz' }); } catch (error) { return error; } })();
+    expect(caught).toBeInstanceOf(PeerProtocolError);
+    expect(caught).toMatchObject({ code: 'invalid' });
   });
 });

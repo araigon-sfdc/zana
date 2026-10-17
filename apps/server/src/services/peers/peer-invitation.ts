@@ -342,7 +342,10 @@ export function parseInvitationToken(input: unknown): InvitationTokenPayload {
 type Plan = { id: string; op: NonNullable<Rec['outbox']>['op'] | FoundingOp; link: InvitationLinkRef; kind: 'redeem' | 'exchange'; body: unknown; expect: string };
 type LinkStep = { id: string; input: Parameters<InvitationLinks['redeem']>[0] };
 const TERMINAL_CODES: readonly string[] = ['expired', 'cancelled', 'already_redeemed', 'attempt_limit', 'not_found', 'invalid_invitation', 'identity_mismatch'];
-/** Terminal invitation reason for an inviter refusal code; null when the failure is transient. */
+/**
+ * Terminal invitation reason for an inviter refusal code; null when the failure is transient. `denied` is deliberately
+ * absent: the inviter never refuses with it, a denial reaches the redeemer as a signed 200 receipt (`receipt.state`).
+ */
 export function terminalInvitationReason(code: unknown): InvitationReason | null {
   return typeof code === 'string' && TERMINAL_CODES.includes(code) ? code as InvitationReason : null;
 }
@@ -387,7 +390,10 @@ export class PeerInvitations {
   /** Applies expiry and retention (firing `onTerminated` for anything that expired). Bounded by the stored records. */
   async sweep(): Promise<void> {
     if (this.disposed) return;
-    await this.mutate(undefined, async () => undefined).catch(() => undefined);
+    await this.mutate(undefined, async () => undefined).catch(error => {
+      // Stuck invitations keep their pending slots; leave a trail (error name/code only, never record contents).
+      console.warn(`[peer-invitations] sweep failed: ${error instanceof InvitationError ? error.code : error instanceof Error ? error.name : 'unknown error'}`);
+    });
   }
 
   private live(): void { if (this.disposed) throw new InvitationError('unavailable'); }
@@ -456,7 +462,8 @@ export class PeerInvitations {
   }
 
   private notifyTerminated(invitationId: string, role: 'inviter' | 'redeemer', reason: InvitationReason): void {
-    try { this.options.onTerminated?.(invitationId, role, reason); } catch { /* observer only */ }
+    try { this.options.onTerminated?.(invitationId, role, reason); }
+    catch (error) { console.warn(`[peer-invitations] onTerminated observer failed (${role}, ${reason}): ${error instanceof Error ? error.message : 'unknown error'}`); }
   }
 
   /** Mutating transaction with sweep and change/consent/termination notification after commit. */

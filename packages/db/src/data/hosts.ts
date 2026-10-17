@@ -89,11 +89,15 @@ function isPluginLink(row: HostSqlRow): boolean {
 function loadUses(db: ZccDatabase, hostIds: readonly string[]): Map<string, HostLinkUse[]> {
   const byHost = new Map<string, HostLinkUse[]>();
   if (hostIds.length === 0) return byHost;
-  const select = db.sqlite.prepare(
-    'SELECT host_id, plugin_id, scope, label, since FROM host_link_uses WHERE host_id = ? ORDER BY since, plugin_id, scope'
-  );
-  for (const hostId of hostIds) {
-    byHost.set(hostId, (select.all(hostId) as HostLinkUseSqlRow[]).map(toUse));
+  for (const hostId of hostIds) byHost.set(hostId, []);
+  // One query per chunk (not per host), kept under SQLite's bound-variable limit.
+  const CHUNK = 500;
+  for (let start = 0; start < hostIds.length; start += CHUNK) {
+    const chunk = hostIds.slice(start, start + CHUNK);
+    const rows = db.sqlite.prepare(
+      `SELECT host_id, plugin_id, scope, label, since FROM host_link_uses WHERE host_id IN (${chunk.map(() => '?').join(',')}) ORDER BY since, plugin_id, scope`
+    ).all(...chunk) as HostLinkUseSqlRow[];
+    for (const row of rows) byHost.get(row.host_id)?.push(toUse(row));
   }
   return byHost;
 }

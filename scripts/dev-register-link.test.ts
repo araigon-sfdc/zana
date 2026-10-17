@@ -236,6 +236,14 @@ describe('unregister', () => {
     expect(errs.join('\n')).toContain(MARKER_FILE);
   });
 
+  it('reports a failed inspection instead of throwing when the dir vanishes after the existence check', () => {
+    const home = tmpHome();
+    const { deps, exec, errs } = makeDeps(home, { existsSync: () => true });
+    expect(unregister({}, deps)).toBe(1);
+    expect(exec).not.toHaveBeenCalled();
+    expect(errs.join('\n')).toContain('could not inspect');
+  });
+
   it('refuses a symlinked helper dir', () => {
     const home = tmpHome();
     const target = tmpHome();

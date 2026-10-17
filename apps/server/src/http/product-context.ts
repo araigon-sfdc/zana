@@ -526,7 +526,7 @@ export function createProductHttpContext(
     onFounding: (pairing, message) => links.onFounding(pairing, message),
     onTerminated: (invitationId, role, reason) => links.onTerminated(invitationId, role, reason)
   }) : undefined;
-  const sweepLinks = () => { if (!disposed) void peerLinks?.sweep().catch(() => undefined); };
+  const sweepLinks = () => { if (!disposed) void peerLinks?.sweep().catch(error => console.warn(`[zcc] peer links sweep failed: ${error instanceof Error ? error.message : String(error)}`)); };
   let disposed = false;
   ctx = {
     productInstanceId,
@@ -575,7 +575,7 @@ export function createProductHttpContext(
       ctx.peerInstaller?.dispose();
       ctx.peerLinks?.dispose();
       peerSsh?.dispose();
-      void peerForwarderLease?.close().catch(() => undefined);
+      void peerForwarderLease?.close().catch(error => console.warn(`[zcc] peer forwarder lease close failed: ${error instanceof Error ? error.message : String(error)}`));
       ctx.peerInvitations?.dispose();
       ctx.peerSshEndpoints?.dispose();
       ctx.peerRouteAllowlist?.dispose();
@@ -619,17 +619,24 @@ export function createProductHttpContext(
     await retryDueConversationSends(ctx,
       (threadId) => flushHeldConversationSends(ctx, threadId, { enforceConcurrencyCap: true }));
   });
+  const warnPeer = (component: string) => (error: unknown) => {
+    console.warn(`[zcc] peer ${component} failed: ${error instanceof Error ? error.message : String(error)}`);
+  };
   const recoverPeers = () => { if (options.peerKeyProvider && !disposed) void peerAuthority.recover().catch(error => {
-    if (!(error instanceof PeerKeyUnavailableError)) peerPairs.dispose();
+    if (error instanceof PeerKeyUnavailableError) return;
+    // A non-key failure disposes the pair store for good; stop retrying against it and say why peer sync stopped.
+    warnPeer('recovery (peer sync disabled)')(error);
+    peerPairs.dispose();
+    stopPeerAuthority();
   }); };
-  const sweepInstaller = () => { if (!disposed) void peerInstaller?.sweep().catch(() => undefined); };
+  const sweepInstaller = () => { if (!disposed) void peerInstaller?.sweep().catch(warnPeer('installer sweep')); };
   const unsubscribePeers = hub.subscribe('hosts:changed', recoverPeers);
   const peerTimer = options.peerKeyProvider ? setInterval(() => { recoverPeers(); sweepInstaller(); sweepLinks(); }, 30_000) : undefined;
   peerTimer?.unref();
   const stopPeerAuthority = () => { unsubscribePeers(); if (peerTimer) clearInterval(peerTimer); };
   recoverPeers();
-  if (peerInstaller) void peerInstaller.start().catch(() => undefined);
+  if (peerInstaller) void peerInstaller.start().catch(warnPeer('installer start'));
   peerInvitations?.start();
-  if (peerLinks) void peerLinks.start().catch(() => undefined);
+  if (peerLinks) void peerLinks.start().catch(warnPeer('links start'));
   return ctx;
 }

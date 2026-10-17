@@ -111,7 +111,12 @@ describe('DesignDocStore peer mutation boundary', () => {
     expectError(() => store.update(doc.id, { title: 'Stale', expectedHead: 'missing' }, user), 'conflict', /head/);
     const sync = new DesignDocSyncStore(db); sync.initialize('repo', 'replica-a');
     sync.setGroup('repo', 'group', ['a', 'b'].map((name) => ({ replicaId: `replica-${name}`, machineId: `machine-${name}`, sponsorReplicaId: null, joinedAt: 1 })));
-    expectError(() => store.update(doc.id, {}, user), 'conflict', /expectedHead/);
+    expectError(() => store.update(doc.id, { title: 'No head' }, user), 'conflict', /expectedHead/);
+    // Local-only navigation and empty patches replicate nothing, so they need no peer head.
+    const other = store.create({ title: 'Other', template: 'blank' }, user);
+    expect(store.update(doc.id, {}, user).title).toBe('Explicit null');
+    expect(store.update(doc.id, { alternativeTo: other.id }, user).alternativeTo).toBe(other.id);
+    expectError(() => store.update(doc.id, { alternativeTo: null, title: 'x' }, user), 'conflict', /expectedHead/);
     expect(store.update(doc.id, { title: 'Paired null', expectedHead: null }, user).title).toBe('Paired null');
   });
 

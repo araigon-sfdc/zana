@@ -185,9 +185,9 @@ export function validateMissing(input: unknown, transfer: PeerTransfer): PeerMis
   const parsed = z.object({ chunks: z.array(z.object({ blobHash: hash, index: z.number().int().nonnegative() }).strict())
     .max(MAX_PEER_SESSION_BYTES / MAX_PEER_CHUNK_BYTES) }).strict().safeParse(input);
   if (!parsed.success) throw new PeerProtocolError('invalid', 'invalid missing chunk window');
-  const seen = new Set<string>();
+  const seen = new Set<string>(), blobs = new Map(transfer.blobs.map((blob) => [blob.hash, blob]));
   for (const chunk of parsed.data.chunks) {
-    const blob = transfer.blobs.find((blob) => blob.hash === chunk.blobHash), key = `${chunk.blobHash}:${chunk.index}`;
+    const blob = blobs.get(chunk.blobHash), key = `${chunk.blobHash}:${chunk.index}`;
     if (!blob || chunk.index >= Math.ceil(blob.bytes / MAX_PEER_CHUNK_BYTES) || seen.has(key)) {
       throw new PeerProtocolError('invalid', 'missing chunk outside frozen transfer');
     }
@@ -261,17 +261,19 @@ export function validateSessionOffer(input: unknown, expected: PeerSessionExpect
     sequences.add(sequence);
   }
   const reachable = new Set<string>();
-  const visit = (head: string): void => {
-    if (reachable.has(head)) return;
-    const operation = versions.get(head)?.operation ?? stubs.get(head);
-    // Heads are checked against the offer below; any other absent node is a verified locally held delta parent.
-    if (!operation) return;
-    reachable.add(head);
-    operation.parents.forEach(visit);
-  };
+  // Iterative: a peer-controlled linear history up to MAX_PEER_SESSION_OPERATIONS deep must not overflow the call stack.
   for (const [docId, head] of Object.entries(offer.heads)) {
     if (versions.get(head)?.operation.docId !== docId) throw new PeerProtocolError('invalid', 'frozen head document mismatch');
-    visit(head);
+    const pending = [head];
+    while (pending.length) {
+      const next = pending.pop()!;
+      if (reachable.has(next)) continue;
+      const operation = versions.get(next)?.operation ?? stubs.get(next);
+      // Heads are checked against the offer above; any other absent node is a verified locally held delta parent.
+      if (!operation) continue;
+      reachable.add(next);
+      pending.push(...operation.parents);
+    }
   }
   if (!reachable.size || reachable.size !== versions.size + stubs.size) throw new PeerProtocolError('invalid', 'payload outside frozen closure');
   if (offer.scopeHash !== createScopeHash(offer)) throw new PeerProtocolError('conflict', 'peer session scope hash does not match');

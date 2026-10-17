@@ -122,7 +122,6 @@ it('signs exact target app, plugin, scope, route and body through the encrypted 
   await expect(handle.api.sdk.peers.call('app-b', 'handshake', {}, { scope: 'other' })).rejects.toThrow('not authorized');
   expect(call).toHaveBeenCalledOnce();
 });
-
 it('cancels in-flight peer calls on caller abort and grant revocation, fences disposal and denies later calls', async () => {
   const { handle, call, pair, a, grant } = await fixture();
   await pair('host-b');
@@ -167,7 +166,9 @@ it.each([
   { status: 403, body: '{}', error: 'peer request failed: 403' },
   { status: 200, body: '{"ok":false}', error: 'peer request was rejected' },
   { status: 200, body: '{"result":true}', error: 'peer request was rejected' },
-  { status: 200, body: '{', error: /JSON/ },
+  // The parser message is never surfaced: it can quote fragments of the peer body.
+  { status: 200, body: '{"ok":true, SECRET', error: /^invalid peer response$/ },
+  { status: 200, body: 'null', error: 'peer request was rejected' },
   { status: 200, body: 'x'.repeat(8 * 1024 * 1024 + 1), error: 'peer response exceeds 8 MiB' }
 ])('rejects invalid peer response without leaking the grant lease (status=$status)', async ({ status, body, error }) => {
   const { handle, call, pair } = await fixture();

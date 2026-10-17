@@ -78,7 +78,7 @@ describe('protocol negotiation', () => {
 
   it('appends one migration for the compaction marker and negotiated protocol rows', () => {
     const { db } = peer('a');
-    expect(DESIGN_DOC_MIGRATIONS.at(-1)).toContain('ADD COLUMN compacted');
+    expect(DESIGN_DOC_MIGRATIONS.some((sql) => sql.includes('ADD COLUMN compacted'))).toBe(true);
     expect((db.prepare('PRAGMA table_info(sync_versions)').all() as Array<{ name: string; dflt_value: string }>)
       .find((column) => column.name === 'compacted')).toMatchObject({ dflt_value: '0' });
     expect(db.prepare('SELECT COUNT(*) AS n FROM sync_peer_protocols').get()).toEqual({ n: 0 });

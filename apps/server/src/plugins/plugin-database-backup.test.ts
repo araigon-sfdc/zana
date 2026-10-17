@@ -58,9 +58,9 @@ describe('createPluginDatabaseBackup', () => {
         await new Promise((resolve) => setImmediate(resolve));
       }
     })();
-    const result = await backupFor(dir, db)({ name: 'snapshot' });
-    writing = false;
-    await writer;
+    let result: Awaited<ReturnType<ReturnType<typeof backupFor>>>;
+    // Stop the writer even when the backup rejects, so a failure surfaces instead of a hang or a late DB error.
+    try { result = await backupFor(dir, db)({ name: 'snapshot' }); } finally { writing = false; await writer; }
     expect(writes).toBeGreaterThan(0);
     expect(result).toMatchObject({ name: 'snapshot', path: join(dir, 'backups', 'snapshot.db'), createdAt: 1234 });
     expect(result.sha256).toBe(createHash('sha256').update(await readFile(result.path)).digest('hex'));

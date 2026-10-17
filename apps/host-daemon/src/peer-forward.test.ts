@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HOST_RPC_PROTOCOL_VERSION } from '@zana-ai/zcc-contracts/host-rpc';
 import {
   createStoredLocalPeerAppResolver,
+  ownedByCurrentUser,
   PEER_FORWARD_MAX_BYTES,
   PEER_FORWARD_MAX_CONCURRENCY,
   PeerForwarder,
@@ -365,6 +366,21 @@ async function storage() {
   return { dir, marker: join(dir, 'peer-app', 'endpoint.json'), resolve: createStoredLocalPeerAppResolver(dir) };
 }
 const signal = () => new AbortController().signal;
+
+describe('ownership check', () => {
+  it('treats a platform without process.getuid as not mismatched, and otherwise compares uids', () => {
+    const original = Object.getOwnPropertyDescriptor(process, 'getuid');
+    try {
+      Object.defineProperty(process, 'getuid', { value: undefined, configurable: true });
+      expect(ownedByCurrentUser(12345)).toBe(true);
+      Object.defineProperty(process, 'getuid', { value: () => 1000, configurable: true });
+      expect(ownedByCurrentUser(1000)).toBe(true);
+      expect(ownedByCurrentUser(0)).toBe(false);
+    } finally {
+      if (original) Object.defineProperty(process, 'getuid', original); else delete (process as { getuid?: unknown }).getuid;
+    }
+  });
+});
 
 describe('host-owned local app registration', () => {
   it('persists private bounded registration, resolves after restart, fences older disposal', async () => {

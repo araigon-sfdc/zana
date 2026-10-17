@@ -115,6 +115,12 @@ describe('peerLinkHostName', () => {
     expect(peerLinkHostName('Alice', 'AB-c1_23-zzz', new Set([plain]))).toBe('Zana peer link: Alice (sync only) [abc123]');
     expect(peerLinkHostName('Alice', '---', new Set([plain]))).toBe('Zana peer link: Alice (sync only) [peer]');
     expect(peerLinkHostName('Alice', undefined as unknown as string, new Set([plain]))).toBe('Zana peer link: Alice (sync only) [peer]');
+    // Two peers sharing a six-character id prefix must still get distinct names.
+    const first = peerLinkHostName('Alice', 'abcdef111', new Set([plain]));
+    expect(first).toBe('Zana peer link: Alice (sync only) [abcdef]');
+    const second = peerLinkHostName('Alice', 'abcdef222', new Set([plain, first]));
+    expect(second).toBe('Zana peer link: Alice (sync only) [abcdef2]');
+    expect(second).not.toBe(first);
     const longPlain = peerLinkHostName('x'.repeat(300), 'x', none);
     const tagged = peerLinkHostName('x'.repeat(300), 'abcdef123', new Set([longPlain]));
     expect(tagged.length).toBeLessThanOrEqual(80);
@@ -336,6 +342,20 @@ describe('redeemConnectPeerLinkCode', () => {
     expect(await redeemConnectPeerLinkCode(ACCOUNT, CODE, asFetch(() => new Response('<html>', { headers: { 'content-type': 'text/html' } }))).catch(e => e)).toMatchObject({ reason: 'connect_unreachable' });
     expect(await redeemConnectPeerLinkCode(ACCOUNT, CODE, asFetch(() => reply({ error: 'expired_or_used' }, 409))).catch(e => e)).toMatchObject({ reason: 'expired_or_used', status: 409 });
     expect(await redeemConnectPeerLinkCode(ACCOUNT, CODE, asFetch(() => reply({ error: 'too_many_attempts' }, 429))).catch(e => e)).toMatchObject({ reason: 'too_many_attempts' });
+  });
+
+  it('rejects an already-expired redeem result', async () => {
+    const expired = await redeemConnectPeerLinkCode(ACCOUNT, CODE, asFetch(() => reply({ ...grant(), expiresAt: Date.now() - 1 }))).catch(e => e);
+    expect(expired).toMatchObject({ reason: 'invalid_response' });
+  });
+
+  it('treats inherited Object.prototype keys as unknown Connect error codes', async () => {
+    for (const code of ['toString', 'constructor', '__proto__', 'hasOwnProperty']) {
+      const error = await redeemConnectPeerLinkCode(ACCOUNT, CODE, asFetch(() => reply({ error: code }, 400))).catch(e => e);
+      expect(error).toMatchObject({ reason: 'connect_failed', status: 400, message: 'Zana Connect peer link request failed.' });
+    }
+    expect(new PeerLinkConnectError('toString').message).toBe('Zana Connect peer link request failed.');
+    expect(new PeerLinkConnectError('constructor').message).toBe('Zana Connect peer link request failed.');
   });
 });
 

@@ -5,11 +5,17 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AuthorizedKeyInput } from './peer-ssh-contract.js';
 
-const fsState = vi.hoisted(() => ({ failRename: false }));
+const fsState = vi.hoisted(() => ({ failRename: false, freshLockOnBreak: false }));
 vi.mock('node:fs/promises', async importOriginal => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return { ...actual, rename: vi.fn(async (...args: Parameters<typeof actual.rename>) => {
     if (fsState.failRename) throw Object.assign(new Error('boom'), { code: 'EIO' });
+    if (fsState.freshLockOnBreak && String(args[0]).endsWith('.zana-ak.lock')) {
+      // Another process replaces the stale lock with its own live one between the verdict and the break.
+      fsState.freshLockOnBreak = false;
+      await actual.writeFile(`${String(args[0])}.next`, `${process.ppid}:fresh`);
+      await actual.rename(`${String(args[0])}.next`, args[0]);
+    }
     return actual.rename(...args);
   }) };
 });
@@ -282,6 +288,23 @@ describe('SshAuthorizedKeys', () => {
     await ak.upsert(base());
     await writeFile(lock, '2147483646:dead');
     await ak.upsert(base({ linkId: 'two', pub: key('B') }));
+    expect((await readdir(ssh)).sort()).toEqual(['authorized_keys']);
+  });
+
+  it('does not delete a live lock that replaced the one judged stale', async () => {
+    await mkdir(ssh, { mode: 0o700 });
+    const lock = join(ssh, '.zana-ak.lock');
+    await writeFile(lock, '1:old');
+    const old = new Date(Date.now() - 120_000);
+    await utimes(lock, old, old);
+    fsState.freshLockOnBreak = true;
+    const pending = mk().upsert(base());
+    await new Promise(r => setTimeout(r, 150));
+    expect(await readFile(lock, 'utf8')).toBe(`${process.ppid}:fresh`);
+    await expect(stat(file)).rejects.toMatchObject({ code: 'ENOENT' });
+    await rm(lock);
+    await pending;
+    expect(await mk().list()).toHaveLength(1);
     expect((await readdir(ssh)).sort()).toEqual(['authorized_keys']);
   });
 

@@ -21,6 +21,8 @@ const MAX_CONTROL_ROWS = 1024;
 export { MAX_PERMANENT_JOB_ATTEMPTS };
 /** Job states that still owe work; `done` and `failed` are terminal. */
 const OPEN = "state NOT IN ('done', 'failed')";
+/** Page size of `jobs()`; anything that decides on "is any work outstanding" must use `openJobs()` instead. */
+const JOBS_PAGE_LIMIT = 64;
 const RESERVED_LIFECYCLE_ROWS = 176;
 export const retirementJobSchema = z.object({ replicaId: id, admission: z.string().regex(/^[a-f0-9]{64}$/), scope: id }).strict();
 const introductionSchema = z.object({ peerId: id, sponsorPeerId: id, scope: id }).strict();
@@ -88,7 +90,7 @@ export class DesignDocPeerGroup {
       return { kind: 'blocked', reason: 'That computer was removed from this sync group earlier, and a group cannot take a removed computer back. Remove the other computers from this group (or leave it), then pair again.' };
     }
     // Only this peer's teardown may be dropped: the leaver's own roster delivery must reach the others first.
-    const pending = this.jobs().filter((job) => job.state !== 'done' && job.state !== 'failed' && !(job.kind === 'local-revoke' && (job.payload as { peerId?: string }).peerId === peerId) &&
+    const pending = this.openJobs().filter((job) => !(job.kind === 'local-revoke' && (job.payload as { peerId?: string }).peerId === peerId) &&
       !(live && job.kind === 'roster' && job.peerId === peerId));
     if (pending.length) {
       const job = pending[0]!;
@@ -467,23 +469,35 @@ export class DesignDocPeerGroup {
       const live = !!this.liveRoster();
       const rows = this.db.prepare(`SELECT id, kind, peer_id, payload_json FROM sync_group_jobs WHERE state IN ('blocked', 'failed')`)
         .all() as Array<{ id: string; kind: GroupJob['kind']; peer_id: string; payload_json: string }>;
-      let discarded = 0;
+      const doomed: string[] = [];
       for (const row of rows) {
         const target = (JSON.parse(row.payload_json) as { peerId?: unknown } | null)?.peerId;
         const owed = row.kind === 'local-revoke' ? target === peerId && !live
           : row.kind === 'introduce' ? false : row.peer_id === peerId;
         if (!owed) continue;
-        this.db.prepare('DELETE FROM sync_group_jobs WHERE id = ?').run(row.id);
-        discarded++;
+        doomed.push(row.id);
       }
-      return discarded;
+      for (let i = 0; i < doomed.length; i += 500) {
+        const chunk = doomed.slice(i, i + 500);
+        this.db.prepare(`DELETE FROM sync_group_jobs WHERE id IN (${chunk.map(() => '?').join(',')})`).run(...chunk);
+      }
+      return doomed.length;
     });
   }
 
+  /** Every unfinished job, unbounded (the queue is capped per kind on enqueue): checks that gate destructive steps must not see a page. */
+  private openJobs(): Array<GroupJob & { payload: unknown }> {
+    return this.queryJobs(`WHERE ${OPEN}`, [], '');
+  }
+
   jobs(readyOnly = false): Array<GroupJob & { payload: unknown }> {
-    const rows = this.db.prepare(`SELECT * FROM sync_group_jobs ${readyOnly ? `WHERE ${OPEN} AND next_at <= ?` : ''}
-      ORDER BY CASE kind WHEN 'retire' THEN 0 WHEN 'roster' THEN 1 WHEN 'revoke' THEN 2 WHEN 'local-revoke' THEN 3 ELSE 4 END, roster_epoch, id LIMIT 64`)
-      .all(...(readyOnly ? [this.now()] : [])) as Array<{ id: string; peer_id: string; kind: GroupJob['kind']; roster_epoch: number;
+    return this.queryJobs(readyOnly ? `WHERE ${OPEN} AND next_at <= ?` : '', readyOnly ? [this.now()] : [], `LIMIT ${JOBS_PAGE_LIMIT}`);
+  }
+
+  private queryJobs(where: string, params: unknown[], limit: string): Array<GroupJob & { payload: unknown }> {
+    const rows = this.db.prepare(`SELECT * FROM sync_group_jobs ${where}
+      ORDER BY CASE kind WHEN 'retire' THEN 0 WHEN 'roster' THEN 1 WHEN 'revoke' THEN 2 WHEN 'local-revoke' THEN 3 ELSE 4 END, roster_epoch, id ${limit}`)
+      .all(...params) as Array<{ id: string; peer_id: string; kind: GroupJob['kind']; roster_epoch: number;
         state: GroupJob['state']; attempts: number; error: string | null; payload_json: string }>;
     return rows.map((row) => ({ id: row.id, peerId: row.peer_id, kind: row.kind, rosterEpoch: row.roster_epoch,
       state: row.state, attempts: row.attempts, error: row.error, payload: JSON.parse(row.payload_json) }));

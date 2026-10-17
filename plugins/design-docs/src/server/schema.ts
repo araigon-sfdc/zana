@@ -261,5 +261,18 @@ export const DESIGN_DOC_MIGRATIONS: readonly string[] = [
     CREATE TABLE sync_peer_protocols (
       repo_id TEXT NOT NULL, member_replica_id TEXT NOT NULL, protocol_version INTEGER NOT NULL,
       updated_at INTEGER NOT NULL, PRIMARY KEY (repo_id, member_replica_id)
-    );`
+    );`,
+  // A rename or identity change applied in place must also retire the old path and file id, not only record the new ones.
+  `DROP TRIGGER sync_file_generation_update;
+    CREATE TRIGGER sync_file_generation_update AFTER UPDATE ON doc_files BEGIN
+      INSERT INTO sync_file_generations SELECT OLD.doc_id, OLD.path, OLD.revision + 1, OLD.sync_id WHERE OLD.path IS NOT NEW.path
+        ON CONFLICT (doc_id, path) DO UPDATE SET generation = MAX(generation + 1, excluded.generation), file_id = excluded.file_id;
+      INSERT INTO sync_file_identity_generations SELECT OLD.doc_id, OLD.sync_id, OLD.revision + 1
+        WHERE OLD.sync_id IS NOT NULL AND OLD.sync_id IS NOT NEW.sync_id
+        ON CONFLICT (doc_id, file_id) DO UPDATE SET generation = MAX(generation + 1, excluded.generation);
+      INSERT INTO sync_file_generations VALUES (NEW.doc_id, NEW.path, NEW.revision, NEW.sync_id)
+        ON CONFLICT (doc_id, path) DO UPDATE SET generation = MAX(generation, excluded.generation), file_id = excluded.file_id;
+      INSERT INTO sync_file_identity_generations SELECT NEW.doc_id, NEW.sync_id, NEW.revision WHERE NEW.sync_id IS NOT NULL
+        ON CONFLICT (doc_id, file_id) DO UPDATE SET generation = MAX(generation, excluded.generation);
+    END;`
 ];

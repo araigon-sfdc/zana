@@ -123,16 +123,21 @@ export function AlternativeDialog({
  */
 export function DeleteDocBody({ doc }: { doc: Pick<DesignDocSummary, 'title' | 'fileCount'> }) {
   const api = useApi();
-  const [paired, setPaired] = useState(false);
+  // null = not known yet (loading or the lookup failed): warn conservatively rather than imply the delete stays local.
+  const [paired, setPaired] = useState<boolean | null>(null);
   useEffect(() => {
     let active = true;
-    void api.peerStatus().then((status) => { if (active) setPaired(status.configured); }, () => undefined);
+    void api.peerStatus().then(
+      (status) => { if (active) setPaired(status.configured); },
+      (error) => { console.warn('[design-docs] could not read sync status for the delete confirmation', error); }
+    );
     return () => { active = false; };
   }, [api]);
   return (
     <>
       Delete <strong>{doc.title}</strong> with its {doc.fileCount} file{doc.fileCount === 1 ? '' : 's'}, comments and history?
-      {paired ? ' It will also be deleted on your paired computers.' : null} This cannot be
+      {paired === true ? ' It will also be deleted on your paired computers.' : null}
+      {paired === null ? ' If this computer is paired with others, it will also be deleted on them.' : null} This cannot be
       undone. Archive it instead to keep it out of agents' way.
     </>
   );

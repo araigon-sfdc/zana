@@ -1,5 +1,6 @@
 import { z } from 'zod';
-import type { PluginApprovalRequest, PluginInvitationDecision, PluginInvitationReason, PluginInvitationState, PluginInvitationStatus, PluginPeerLink, PluginPeerRequest, PluginSdkPeers, ZccPluginApi } from '@zana-ai/zcc-plugin-sdk/server';
+import type { InviteItem, InviteView } from '../shared/invite-contract.js';
+import type { PluginApprovalRequest, PluginInvitationState, PluginInvitationStatus, PluginPeerLink, PluginPeerRequest, PluginSdkPeers, ZccPluginApi } from '@zana-ai/zcc-plugin-sdk/server';
 import { canonicalPeerHash, PeerProtocolError } from '../shared/peer-contract.js';
 import { ownerText, syncedWith, UNREADABLE_REPLY, type GroupRoster, type GroupStatus, type PeerLifecycleReason, type RepairResult } from '../shared/peer-group.js';
 import { PEER_CALL_TIMEOUT_MS, PEER_PENDING_TICK_MS } from '../shared/peer-limits.js';
@@ -26,6 +27,9 @@ type InviteMethod = typeof INVITE_METHODS[number];
 type InvitePeers = PluginSdkPeers & Required<Pick<PluginSdkPeers, InviteMethod>>;
 const ACTIVE_INVITATION = new Set<PluginInvitationState>(['open', 'redeeming', 'reserved', 'consented', 'connecting']);
 const INVITATION_LIST_LIMIT = 6;
+/** Cap on the per-peer maps (`following`, `restoring`) so a long-lived process cannot grow them without bound. */
+const TRACKED_PEER_LIMIT = 6;
+const CAPACITY_WAIT = 'waiting for reserved capacity';
 /** Thrown by the core pair store while a link re-key or rotation is in flight; it clears on its own, so it is retried, not shown. */
 const TRANSIENT_PEER_ERROR = 'peer enrollment changed or revoked';
 const LIFECYCLE_REASONS: readonly PeerLifecycleReason[] = ['encryption-unavailable', 'insecure-backend', 'keychain-denied', 'storage-permissions', 'key-missing', 'key-corrupt', 'core-unsupported', 'unknown'];
@@ -86,36 +90,9 @@ export function inviteCapability(peers: Pick<PluginSdkPeers, never> | undefined)
     : { available: false, reason: INVITE_UNSUPPORTED_REASON };
 }
 
-/** What the Peers view may show about an invitation: no token, locator, key or credential. */
-export interface InviteItem {
-  invitationId: string;
-  role: 'inviter' | 'redeemer';
-  state: PluginInvitationState;
-  reason: PluginInvitationReason | null;
-  /** The other computer once discovered; the fingerprint is for out-of-band confirmation. */
-  peer: { instanceId: string; name: string; fingerprint: string } | null;
-  localFingerprint: string;
-  myDecision: PluginInvitationDecision;
-  theirDecision: PluginInvitationDecision;
-  /** This owner must still decide: the reserved invitation is waiting on them. */
-  awaitingMyApproval: boolean;
-  expiresAt: number;
-  consentExpiresAt: number | null;
-}
+export type { InviteItem, InviteView };
 
-export interface InviteView {
-  available: boolean;
-  /** Set when `available` is false: why the new action cannot run on this host. */
-  reason: string | null;
-  invitations: InviteItem[];
-  links: PluginPeerLink[];
-  /** The last automatic Enable failure for an invitation-founded peer, shown until it succeeds. */
-  enableError: string | null;
-  /** Set when the host failed transiently: this is the last good view, with the failure reason (never a secret). */
-  stale?: string;
-}
-
-interface InviteSnapshot { list: PluginInvitationStatus[]; links: PluginPeerLink[] }
+interface InviteSnapshot { list: PluginInvitationStatus[]; links: PluginPeerLink[]; /** Why `links` is the previous read, when the link lookup failed this time. */ linksStale?: string }
 
 function inviteItem(status: PluginInvitationStatus): InviteItem {
   const inviter = status.role === 'inviter';
@@ -194,7 +171,7 @@ export class DesignDocPairing {
     this.peers.handle('group-hello', async (request) => {
       this.fence(request);
       z.object({}).strict().parse(request.body);
-      const self = id.parse((await this.peers.localIdentity()).id), local = this.group.sync.localRepository()!;
+      const self = id.parse((await this.peers.localIdentity()).id), local = this.requireLocal();
       if (request.scope !== bootstrapScope(self, request.peerId) && request.scope !== local.repoId) {
         throw new PeerProtocolError('invalid', 'database negotiation scope mismatch');
       }
@@ -222,7 +199,7 @@ export class DesignDocPairing {
         this.fence(request);
         try { return this.group.transfer(input, request.peerId); }
         catch (error) {
-          if (!(error instanceof PeerProtocolError) || error.message !== 'waiting for reserved capacity') throw error;
+          if (!(error instanceof PeerProtocolError) || error.message !== CAPACITY_WAIT) throw error;
           // Explicit authenticated refusal is not an unknown commit outcome. Refresh donor state before retrying elsewhere.
           return { requestId: input.requestId, roster: this.group.roster(), unavailable: true };
         }
@@ -278,14 +255,14 @@ export class DesignDocPairing {
     this.peers.handle('state-digest', async (request) => {
       this.fence(request);
       z.object({}).strict().parse(request.body);
-      const local = this.group.sync.localRepository()!;
+      const local = this.requireLocal();
       if (request.scope !== local.repoId) throw new PeerProtocolError('invalid', 'state scope mismatch');
       return { digest: this.hooks.stateDigest?.() ?? null };
     });
     this.peers.handle('state-changed', async (request) => {
       this.fence(request);
       z.object({}).strict().parse(request.body);
-      if (request.scope !== this.group.sync.localRepository()!.repoId) throw new PeerProtocolError('invalid', 'state scope mismatch');
+      if (request.scope !== this.requireLocal().repoId) throw new PeerProtocolError('invalid', 'state scope mismatch');
       try { this.hooks.stateChanged?.(); } catch { /* a UI nudge must never fail the peer call */ }
       return { ok: true };
     });
@@ -295,9 +272,21 @@ export class DesignDocPairing {
       if (this.timer) clearInterval(this.timer);
       this.timer = null;
     });
-    this.timer = setInterval(() => { void this.retry().catch(() => {}); void this.invitations().catch(() => {}); }, PEER_PENDING_TICK_MS);
+    this.timer = setInterval(() => { void this.retry().catch(this.background('retry')); void this.invitations().catch(this.background('invitations')); }, PEER_PENDING_TICK_MS);
     this.timer.unref();
-    void this.retry().catch(() => {});
+    void this.retry().catch(this.background('retry'));
+  }
+
+  /** The local repository, or a typed refusal when a peer calls before one exists. */
+  private requireLocal(): NonNullable<ReturnType<DesignDocPeerGroup['sync']['localRepository']>> {
+    const local = this.group.sync.localRepository();
+    if (!local) throw new PeerProtocolError('invalid', 'no local repository');
+    return local;
+  }
+
+  /** Catch handler for fire-and-forget loops: aborts are expected at shutdown, anything else is logged once. */
+  private background(label: string): (error: unknown) => void {
+    return (error) => { if (!this.abort.signal.aborted) this.logOnce(`background:${label}`, `background ${label} failed: ${this.message(error)}`); };
   }
 
   /** Invitation flow, one method per owner action. Tokens pass through only `createInvitation`; nothing here logs or stores them. */
@@ -318,6 +307,7 @@ export class DesignDocPairing {
       if (!this.lastSnapshot) throw error;
       snapshot = this.lastSnapshot; stale = this.message(error);
     }
+    stale ??= snapshot?.linksStale;
     const now = Date.now();
     // A finished attempt with no live purpose (no link to it, nothing pending) is history after a while, even if never dismissed.
     const history = (item: PluginInvitationStatus) => !ACTIVE_INVITATION.has(item.state) && item.state !== 'ready' &&
@@ -337,13 +327,21 @@ export class DesignDocPairing {
     const peers = this.invitePeers(), signal = this.abort.signal;
     const listed = await peers.listInvitations({ limit: INVITATION_LIST_LIMIT, signal });
     const list = await Promise.all(listed.map((item) => item.role === 'redeemer' && ACTIVE_INVITATION.has(item.state)
-      ? peers.invitationStatus({ invitationId: item.invitationId, refresh: true, signal }).catch(() => item) : item));
-    let linksKnown = true;
-    const links = await peers.peerLinks({ signal }).catch(() => { linksKnown = false; return [] as PluginPeerLink[]; });
+      ? peers.invitationStatus({ invitationId: item.invitationId, refresh: true, signal }).catch((error) => {
+        if (!signal.aborted) this.logOnce(`invitation-status:${item.invitationId}`, `refreshing invitation failed: ${this.message(error)}`);
+        return item;
+      }) : item));
+    let linksKnown = true, linksStale: string | undefined;
+    const links = await peers.peerLinks({ signal }).catch((error) => {
+      linksKnown = false; linksStale = this.message(error);
+      if (!signal.aborted) this.logOnce('peer-links', `listing peer links failed: ${linksStale}`);
+      return [] as PluginPeerLink[];
+    });
     this.trackOpenInvite(list);
     this.pairingKeys = new Map();
     for (const peer of pairedPeers(list, links)) this.pairingKeys.set(peer.peerId, peer.keys);
-    const snapshot = { list, links };
+    // A failed link lookup keeps the last good links in the view (flagged stale) rather than blanking them as removed.
+    const snapshot: InviteSnapshot = { list, links: linksKnown ? links : this.lastSnapshot?.links ?? [], ...(linksStale ? { linksStale } : {}) };
     this.lastSnapshot = snapshot;
     // Best effort and independent: a failure of one step (e.g. a re-key in flight) must not fail the read or skip the other, and is retried next tick.
     let failure: unknown = null;
@@ -352,7 +350,7 @@ export class DesignDocPairing {
     }
     this.setupError = failure ? this.message(failure) : null;
     if (failure) this.logOnce('setup', `peer setup step failed: ${this.setupError}`);
-    await this.reportLinkNotes(links).catch(() => undefined);
+    if (linksKnown) await this.reportLinkNotes(links).catch((error) => { if (!signal.aborted) this.logOnce('link-notes', `reporting link notes failed: ${this.message(error)}`); });
     return snapshot;
   }
 
@@ -370,19 +368,19 @@ export class DesignDocPairing {
     const live = links.filter((link) => link.phase === 'linked' && link.state === 'connected');
     if (!live.length && !this.reportedNotes.size) return;
     const status = live.length ? await this.status() : null;
-    for (const link of links) {
+    const changed = links.flatMap((link) => {
       const key = keyOf(link), unsynced = !!status && live.includes(link) && !syncedWith(status, link.peerInstanceId);
-      const want = unsynced ? 'attention' : 'clear';
-      if ((this.reportedNotes.get(key) ?? 'clear') === want) continue;
-      try {
-        await peers.setPeerLinkNote(link.peerInstanceId, { scope: link.scope, signal: this.abort.signal,
-          note: unsynced ? { state: 'attention', label: 'Sync not set up', detail: 'Connected, but database sync is not set up with this computer.' } : null });
-        this.reportedNotes.set(key, want);
-      } catch (error) {
-        this.abort.signal.throwIfAborted();
-        this.logOnce(`link-note:${link.peerInstanceId}`, `reporting link status failed: ${this.message(error)}`);
-      }
-    }
+      const want = unsynced ? 'attention' as const : 'clear' as const;
+      return (this.reportedNotes.get(key) ?? 'clear') === want ? [] : [{ link, key, want, unsynced }];
+    });
+    const results = await Promise.allSettled(changed.map(({ link, unsynced }) => peers.setPeerLinkNote!(link.peerInstanceId, { scope: link.scope, signal: this.abort.signal,
+      note: unsynced ? { state: 'attention', label: 'Sync not set up', detail: 'Connected, but database sync is not set up with this computer.' } : null })));
+    this.abort.signal.throwIfAborted();
+    results.forEach((result, index) => {
+      const { link, key, want } = changed[index];
+      if (result.status === 'fulfilled') this.reportedNotes.set(key, want);
+      else this.logOnce(`link-note:${link.peerInstanceId}`, `reporting link status failed: ${this.message(result.reason)}`);
+    });
   }
 
   /**
@@ -403,7 +401,7 @@ export class DesignDocPairing {
     const grants = await this.peers.list({ signal: this.abort.signal });
     for (const { peerId } of due) {
       if (grants.some((grant) => grant.id === peerId && grant.scope === roster.repoId)) continue;
-      if (this.restoring.size >= INVITATION_LIST_LIMIT) this.restoring.clear();
+      if (this.restoring.size >= TRACKED_PEER_LIMIT && !this.restoring.has(peerId)) this.restoring.delete(this.restoring.keys().next().value as string);
       this.restoring.set(peerId, now + PEER_PENDING_TICK_MS);
       await this.peers.enable(peerId, { scope: roster.repoId, signal: this.abort.signal }).catch((error) => {
         this.logOnce(`restore:${peerId}`, `restoring database grant failed: ${this.message(error)}`);
@@ -471,7 +469,7 @@ export class DesignDocPairing {
   private async initiatorReady(self: string, peerId: string, links: PluginPeerLink[]): Promise<boolean> {
     let wait = this.following.get(peerId);
     if (!wait) {
-      if (this.following.size >= INVITATION_LIST_LIMIT) this.following.clear();
+      if (this.following.size >= TRACKED_PEER_LIMIT) this.following.delete(this.following.keys().next().value as string);
       wait = { attempts: 0, nextAt: 0, scope: null, failedAt: null };
       this.following.set(peerId, wait);
     }
@@ -1080,7 +1078,7 @@ export class DesignDocPairing {
       [...roster.members].sort((a, b) => a.machineId < b.machineId ? -1 : 1).find((member) =>
         member.replicaId !== local.replicaId && ownedSeats(roster, member.replicaId).length &&
         grants.some((grant) => grant.id === member.machineId && grant.scope === roster.repoId && grant.connected));
-    if (!donor) throw new PeerProtocolError('limit', 'waiting for reserved capacity');
+    if (!donor) throw new PeerProtocolError('limit', CAPACITY_WAIT);
     const capacity = await request.commitSync(() => {
       this.fence(request); this.group.authorizeSponsor(input, request.peerId);
       return this.group.freezeCapacity({ requestId: capacityRequestId(input.requestId, donor.replicaId), admissionRequestId: input.requestId,
@@ -1099,7 +1097,7 @@ export class DesignDocPairing {
       this.fence(request); this.group.authorizeSponsor(input, request.peerId);
       this.group.apply(transferred, donor.machineId); this.group.clearCapacity();
     });
-    if (result.unavailable) throw new PeerProtocolError('limit', 'waiting for reserved capacity');
+    if (result.unavailable) throw new PeerProtocolError('limit', CAPACITY_WAIT);
   }
   private async sameGrant(peerId: string, scope: string, epoch: number): Promise<void> {
     if ((await this.grant(peerId, scope)).grantEpoch !== epoch || this.abort.signal.aborted) throw new PeerProtocolError('invalid', 'authorization changed before control ACK');

@@ -31,6 +31,12 @@ it('fingerprints as SHA256 without padding and validates the public line', () =>
   expect(fingerprint(publicKeyLine(RFC_SEED))).toMatch(/^SHA256:[A-Za-z0-9+/]{43}$/);
   expect(fingerprint(`${publicKeyLine(RFC_SEED)} comment`)).toBe(fingerprint(publicKeyLine(RFC_SEED)));
   for (const bad of ['', 'ssh-rsa AAAA', 'ssh-ed25519', 'ssh-ed25519 !!!']) expect(() => fingerprint(bad)).toThrow('Invalid SSH public key');
+  // Valid base64 that is not an ssh-ed25519 wire blob: short body, wrong embedded type, wrong key length, trailing bytes.
+  const good = Buffer.from(publicKeyLine(RFC_SEED).split(' ')[1]!, 'base64');
+  const wrongType = Buffer.from(good); wrongType.write('ssh-ed25518', 4);
+  for (const blob of [Buffer.from('hello'), wrongType, good.subarray(0, good.length - 1), Buffer.concat([good, Buffer.from([0])])]) {
+    expect(() => fingerprint(`ssh-ed25519 ${blob.toString('base64')}`)).toThrow('Invalid SSH public key');
+  }
 });
 
 it('writes an armoured openssh-key-v1 file with 8-byte aligned private section', () => {

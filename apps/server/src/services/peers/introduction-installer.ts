@@ -229,10 +229,20 @@ export class PeerIntroductionInstaller {
     destroyHost(this.options.db, hostId);
   }
 
+  /** Diagnostic trail for deliberately swallowed failures. Never logs codes, credentials or record contents. */
+  private warn(operation: string, error: unknown, subject?: string): void {
+    console.warn(`[peer-installer] ${operation} failed${subject ? ` (${subject})` : ''}: ${error instanceof Error ? error.message : 'unknown error'}`);
+  }
+
   private async closeConnection(key: string): Promise<void> {
     const current = this.connections.get(key);
     this.connections.delete(key);
-    await current?.connection.close().catch(() => undefined);
+    await current?.connection.close().catch(error => this.warn('close connection', error, key.slice(0, 8)));
+  }
+
+  /** Tears down links removed from state inside a transaction; runs after the transaction and lane so slow network work never blocks them. */
+  private async teardownAll(doomed: readonly Link[]): Promise<void> {
+    for (const link of doomed) await this.teardown(link).catch(error => this.warn('teardown', error, this.pairKey(link).slice(0, 8)));
   }
 
   private daemonDir(key: string): string {
@@ -243,7 +253,8 @@ export class PeerIntroductionInstaller {
   private async teardown(link: Link): Promise<void> {
     const key = this.pairKey(link);
     await this.closeConnection(key);
-    if (link.outbound) await this.options.channels.unregister(link.peerInstanceId, link.outbound.hostId).catch(() => false);
+    if (link.outbound) await this.options.channels.unregister(link.peerInstanceId, link.outbound.hostId)
+      .catch(error => { this.warn('unregister channel', error, link.outbound!.hostId); return false; });
     this.removeInbound(link.inboundHostId);
     if (link.offer && link.offer.hostId !== link.inboundHostId) this.removeInbound(link.offer.hostId);
     if (link.connectInbound) {
@@ -265,7 +276,8 @@ export class PeerIntroductionInstaller {
   /** Best effort `/hosts/revoke` for a Connect-minted inbound host; Connect also expires an unredeemed code. */
   private async revoke(hostId: string): Promise<void> {
     if (!this.options.dataDir) return;
-    await revokeConnectPeerLink({ dataDir: this.options.dataDir }, hostId, this.options.connectFetch).catch(() => false);
+    await revokeConnectPeerLink({ dataDir: this.options.dataDir }, hostId, this.options.connectFetch)
+      .catch(error => { this.warn('Connect revoke', error, hostId); return false; });
   }
 
   /** Mints this app's forward-only Connect code for the peer (a `peer.forward` host at this app's Connect server). */
@@ -322,10 +334,12 @@ export class PeerIntroductionInstaller {
   private async fail(link: Link): Promise<void> {
     const key = this.pairKey(link);
     // Tear down what is persisted now (a superset of the caller's snapshot), so late-written credentials are not leaked.
-    await this.teardown((await this.stored(key).catch(() => undefined)) ?? link);
+    // A teardown failure must not block the `failed` transition, or the link stays stuck `pending`.
+    try { await this.teardown((await this.stored(key).catch(() => undefined)) ?? link); }
+    catch (error) { this.warn('teardown', error, key.slice(0, 8)); }
     await this.update(key, current => {
       current.status = 'failed'; delete current.outbound; delete current.offer; delete current.inboundHostId; delete current.peerCodeHash; delete current.notified;
-    }).catch(() => undefined);
+    }).catch(error => this.warn('mark failed', error, key.slice(0, 8)));
     this.options.onChanged?.();
   }
 
@@ -346,11 +360,16 @@ export class PeerIntroductionInstaller {
       onConnectionChange: connected => { entry.connected = connected; } });
     this.connections.set(key, entry);
     void entry.connection.ready.catch(() => undefined);
-    if (signal) await Promise.race([entry.connection.ready, new Promise<never>((_resolve, reject) => {
-      const abort = () => reject(new Error('peer enrollment cancelled or timed out'));
-      signal.addEventListener('abort', abort, { once: true });
-      if (signal.aborted) abort();
-    })]);
+    if (signal) {
+      let abort: (() => void) | undefined;
+      try {
+        await Promise.race([entry.connection.ready, new Promise<never>((_resolve, reject) => {
+          abort = () => reject(new Error('peer enrollment cancelled or timed out'));
+          signal.addEventListener('abort', abort, { once: true });
+          if (signal.aborted) abort();
+        })]);
+      } finally { if (abort) signal.removeEventListener('abort', abort); }
+    }
   }
 
   /** Both directions present and forward-only: our daemon's channel to the peer and the peer's daemon session here. */
@@ -380,14 +399,15 @@ export class PeerIntroductionInstaller {
     if (channel && (!existing?.outbound || channel.hostId !== existing.outbound.hostId)) throw new Error('peer is already enrolled');
   }
 
-  private async reserve(state: State): Promise<void> {
+  /** Evicts one link when full; the evicted link is appended to `doomed` for {@link teardownAll} after the transaction. */
+  private reserve(state: State, doomed: Link[]): void {
     if (state.links.length < INSTALLER_MAX_LINKS) return;
     const now = this.now();
     const evictable = state.links.findIndex(entry => entry.status === 'failed' ||
       ((entry.status === 'pending' || entry.status === 'awaiting') && entry.expiresAt <= now));
     if (evictable < 0) throw new Error('peer installer capacity exceeded');
     const [evicted] = state.links.splice(evictable, 1);
-    await this.teardown(evicted!).catch(() => undefined);
+    doomed.push(structuredClone(evicted!));
   }
 
   private async approved(introductionId: string): Promise<ReceivedIntroduction> {
@@ -426,14 +446,23 @@ export class PeerIntroductionInstaller {
 
   /** Non-initiator: record consent as an awaiting responder link and tell the initiator through the sponsor. */
   private async consentOnce(intro: ReceivedIntroduction, key: string, outer?: AbortSignal): Promise<PeerInstallation> {
+    const doomed: Link[] = [];
     const link = await this.serial(() => this.storage.transaction(async (state, save) => {
       this.assertLive();
       const existing = this.find(state, key);
       if (existing && existing.role !== 'responder') throw new Error('peer installation conflicts');
+      if (existing && existing.status === 'awaiting' && !existing.notified && existing.introductionId !== intro.introductionId) {
+        // The pair is still blocked on the older introduction's sponsor, which may be unavailable: notify through the newly approved one.
+        existing.introductionId = intro.introductionId; existing.sponsorInstanceId = intro.sponsorInstanceId;
+        existing.expiresAt = intro.receivedAt + INTRODUCTION_APPROVAL_TTL_MS;
+        linkSchema.parse(existing); await save();
+        this.options.onChanged?.();
+        return structuredClone(existing);
+      }
       if (existing && existing.status !== 'failed') return structuredClone(existing);
       await this.assertNoForeignChannel(intro.peerInstanceId, undefined);
-      if (existing) { await this.teardown(existing); state.links.splice(state.links.indexOf(existing), 1); }
-      await this.reserve(state);
+      if (existing) { doomed.push(structuredClone(existing)); state.links.splice(state.links.indexOf(existing), 1); }
+      this.reserve(state, doomed);
       const fresh: Link = { introductionId: intro.introductionId, role: 'responder', sponsorInstanceId: intro.sponsorInstanceId,
         peerInstanceId: intro.peerInstanceId, pluginId: intro.pluginId, scope: intro.scope, status: 'awaiting', createdAt: this.now(),
         expiresAt: intro.receivedAt + INTRODUCTION_APPROVAL_TTL_MS, notified: false };
@@ -441,6 +470,7 @@ export class PeerIntroductionInstaller {
       this.options.onChanged?.();
       return structuredClone(fresh);
     }));
+    await this.teardownAll(doomed);
     if (link.status !== 'awaiting' || link.notified) return this.publicLink(link);
     await this.notify(link, outer);
     return this.publicLink((await this.stored(key)) ?? link);
@@ -457,7 +487,10 @@ export class PeerIntroductionInstaller {
         if (entry.status === 'awaiting' && entry.introductionId === link.introductionId) entry.notified = true;
       });
       return true;
-    } catch { return false; } finally { done(); }
+    } catch (error) {
+      this.warn('consent notification', error, `introduction ${link.introductionId}, peer ${link.peerInstanceId}`);
+      return false;
+    } finally { done(); }
   }
 
   /** Initiator: enroll only when both owners consented; otherwise wait without minting anything. */
@@ -465,6 +498,7 @@ export class PeerIntroductionInstaller {
     const introductionId = intro.introductionId;
     const { signal, done } = this.budget(outer, ENROLL_BUDGET_MS);
     let link: Link | undefined;
+    const doomed: Link[] = [];
     try {
       link = await this.serial(async () => {
         this.assertLive();
@@ -477,8 +511,8 @@ export class PeerIntroductionInstaller {
           if (!this.liveConsent(state, key, now)) {
             if (existing?.status === 'awaiting') return structuredClone(existing);
             await this.assertNoForeignChannel(intro.peerInstanceId, undefined);
-            if (existing) { await this.teardown(existing); state.links.splice(state.links.indexOf(existing), 1); }
-            await this.reserve(state);
+            if (existing) { doomed.push(structuredClone(existing)); state.links.splice(state.links.indexOf(existing), 1); }
+            this.reserve(state, doomed);
             const awaiting: Link = { introductionId, role: 'requester', sponsorInstanceId: intro.sponsorInstanceId, peerInstanceId: intro.peerInstanceId,
               pluginId: intro.pluginId, scope: intro.scope, status: 'awaiting', createdAt: now, expiresAt: intro.receivedAt + INTRODUCTION_APPROVAL_TTL_MS };
             state.links.push(linkSchema.parse(awaiting)); await save();
@@ -488,10 +522,10 @@ export class PeerIntroductionInstaller {
           const viaConnect = this.connectMode();
           const local = viaConnect ? '' : this.localRoute();
           await this.assertNoForeignChannel(intro.peerInstanceId, existing);
-          if (existing) { await this.teardown(existing); state.links.splice(state.links.indexOf(existing), 1); }
+          if (existing) { doomed.push(structuredClone(existing)); state.links.splice(state.links.indexOf(existing), 1); }
           const fresh: Link = { introductionId, role: 'requester', sponsorInstanceId: intro.sponsorInstanceId, peerInstanceId: intro.peerInstanceId,
             pluginId: intro.pluginId, scope: intro.scope, status: 'pending', createdAt: now, expiresAt: 0 };
-          await this.reserve(state);
+          this.reserve(state, doomed);
           if (viaConnect) {
             // Minted inside the pair's transaction so concurrent attempts never mint twice; the Connect request is time-bounded.
             const minted = await this.mintConnect(intro.peerInstanceId);
@@ -505,9 +539,10 @@ export class PeerIntroductionInstaller {
           return { ...structuredClone(fresh), request: { route: local, joinCode: issued.joinCode } } as Link & { request: EnrollmentOffer };
         });
       });
+      await this.teardownAll(doomed);
       if (link.status === 'awaiting') return this.publicLink(link);
       if (link.status === 'enrolled') {
-        if (!this.connections.has(key)) await this.connect(link).catch(() => undefined);
+        if (!this.connections.has(key)) await this.connect(link).catch(error => this.warn('reconnect', error, key.slice(0, 8)));
         return this.publicLink(link);
       }
       const { request, ...stored } = link as Link & { request: EnrollmentOffer };
@@ -592,6 +627,7 @@ export class PeerIntroductionInstaller {
     const local = viaConnect ? '' : this.localRoute();
     const key = this.pairKey(input);
     const codeHash = createHash('sha256').update(viaConnect ? offerIn.connect.code : offerIn.joinCode).digest('hex');
+    const doomed: Link[] = [];
     const { link, restart } = await this.serial(() => this.storage.transaction(async (state, save) => {
       this.assertLive(); signal?.throwIfAborted();
       let existing = this.find(state, key);
@@ -601,7 +637,7 @@ export class PeerIntroductionInstaller {
       if (!existing) {
         existing = { introductionId: input.introductionId, role: 'responder', sponsorInstanceId, peerInstanceId: input.peerInstanceId,
           pluginId: input.pluginId, scope: input.scope, status: 'pending', createdAt: now, expiresAt: 0 };
-        await this.reserve(state);
+        this.reserve(state, doomed);
         state.links.push(existing);
       }
       // Same relayed code: an enrolled link is left intact (start() owns reconnects) and a live attempt is not duplicated.
@@ -636,6 +672,7 @@ export class PeerIntroductionInstaller {
       }
       return { link: structuredClone(existing), restart };
     }));
+    await this.teardownAll(doomed);
     if (restart) void this.track(this.respond(link, offerIn, codeHash));
     return link.offer!.connect ? { connect: link.offer!.connect } : { route: local, joinCode: link.offer!.joinCode! };
   }
@@ -687,11 +724,11 @@ export class PeerIntroductionInstaller {
     }));
     for (const link of enrolled) {
       if (this.disposed) return;
-      try { await this.connect(link); } catch { /* stays enrolled; the next start retries */ }
+      try { await this.connect(link); } catch (error) { this.warn('reconnect (next start retries)', error, link.peerInstanceId); }
     }
     for (const link of ready) {
       if (this.disposed) return;
-      await this.enroll(link.introductionId).catch(() => undefined);
+      await this.enroll(link.introductionId).catch(error => this.warn('resume enrollment', error, `introduction ${link.introductionId}`));
     }
   }
 
@@ -717,7 +754,7 @@ export class PeerIntroductionInstaller {
       return structuredClone({ stale, expired, renotify });
     });
     for (const link of stale) await this.fail(link);
-    for (const link of expired) await this.teardown(link).catch(() => undefined);
+    await this.teardownAll(expired);
     if (expired.length) this.options.onChanged?.();
     for (const link of renotify) await this.notify(link);
     return stale.length + expired.length;

@@ -6,6 +6,7 @@ it('fences admission and waits for admitted handlers, including failure cleanup'
   let release!: () => void;
   const held = new Promise<void>(resolve => { release = resolve; });
   const handler = vi.fn(async () => { await held; throw new Error('failed handler'); });
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
   const drain = createHttpRequestDrain(handler);
   const response = { destroy: vi.fn(), writeHead: vi.fn().mockReturnThis(), end: vi.fn() } as unknown as ServerResponse;
   drain.handle({} as IncomingMessage, response);
@@ -18,6 +19,8 @@ it('fences admission and waits for admitted handlers, including failure cleanup'
   await Promise.resolve(); expect(idle).toBe(false);
   release(); await closing;
   expect(response.destroy).toHaveBeenCalledOnce();
+  expect(warn).toHaveBeenCalledWith(expect.stringContaining('failed handler'));
+  warn.mockRestore();
   await drain.whenIdle();
 });
 

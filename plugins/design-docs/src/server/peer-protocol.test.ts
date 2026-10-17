@@ -91,6 +91,19 @@ describe('payload protocol', () => {
     expect(validateSessionOffer(offer, expected)).toEqual(offer);
     expect(() => validateSessionOffer({ ...offer, scopeHash: 'f'.repeat(64) }, expected)).toThrow('scope hash');
   });
+  it('walks a linear parent chain iteratively and rejects payloads outside the frozen closure', () => {
+    const { offer, expected } = fixture();
+    const DEEP = 300, base = offer.versions[0]!, docId = base.operation.docId;
+    const versions = Array.from({ length: DEEP }, (_, i) => ({ ...base,
+      operation: { ...base.operation, id: `deep-${i}`, sequence: i + 1, parents: i ? [`deep-${i - 1}`] : [] } }));
+    const deep = { ...offer, versions, heads: { [docId]: `deep-${DEEP - 1}` } };
+    deep.scopeHash = createScopeHash(deep);
+    expect(validateSessionOffer(deep, expected).versions).toHaveLength(DEEP);
+    const stray = { ...base, operation: { ...base.operation, id: 'stray', sequence: DEEP + 1, parents: [] } };
+    const orphan = { ...deep, versions: [stray, ...versions] };
+    orphan.scopeHash = createScopeHash(orphan);
+    expect(() => validateSessionOffer(orphan, expected)).toThrow('payload outside frozen closure');
+  });
   it('bounds missing windows and rejects unoffered, duplicate, overflowing chunks', () => {
     const { offer } = fixture();
     const transfer = { ...offer, versions: offer.versions.map(({ operation }) => ({ operation, manifestHash: 'a'.repeat(64) })),

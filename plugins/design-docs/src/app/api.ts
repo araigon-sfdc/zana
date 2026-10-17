@@ -21,7 +21,7 @@ import type { PageFile } from '../shared/frame-protocol.js';
 import type { PublishFolder } from '../shared/publish.js';
 import type { PageRenderReport, RenderedPage, SiteFile } from '../shared/page.js';
 import type { GroupStatus, RepairResult } from '../shared/peer-group.js';
-import type { InviteItem, InviteView } from '../server/pairing.js';
+import type { InviteItem, InviteView } from '../shared/invite-contract.js';
 
 export type { InviteItem, InviteView };
 
@@ -86,7 +86,7 @@ export interface DesignDocsApi {
   retryIntroductions(): Promise<GroupStatus>;
   /** Invitations and invitation-founded link states; `available: false` carries the reason older hosts cannot invite. */
   inviteState(): Promise<InviteView>;
-  /** The token is returned once, to be copied; later reads never include it. */
+  /** The token is returned here, to be copied; `inviteState` never includes it. `openInvitation` is the sanctioned re-read while the invitation stays open. */
   createInvitation(): Promise<{ invitationId: string; token: string; expiresAt: number }>;
   /** Re-read the token of this computer's still-open invitation (null once redeemed, expired or cancelled). */
   openInvitation(): Promise<{ invitationId: string; token: string; expiresAt: number } | null>;

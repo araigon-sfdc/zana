@@ -101,6 +101,21 @@ describe('zcc design-docs', () => {
     expect(helpText()).toContain('--expected-head <head|null>');
   });
 
+  it('rejects agent callers for owner-only peer verbs', async () => {
+    const pairing = { enable: vi.fn(), remove: vi.fn(), revoke: vi.fn(), status: vi.fn(async () => ({ configured: false })) };
+    const syncNow = vi.fn();
+    const deps: CliDeps = { store: new DesignDocStore(createTestDatabase()), changed: vi.fn(),
+      caller: async () => ({ actor: { kind: 'agent', label: 'CLI agent', threadId: null }, projectId: null, files: null }),
+      readLocalFile: vi.fn(), pairing: pairing as never, peers: {} as never, peerSync: { syncNow } as never };
+    const ctx = { pluginId: 'design-docs', argv: [] };
+    for (const argv of [['enable', 'app'], ['remove-peer', 'r'], ['revoke-peer', 'app'], ['sync']]) {
+      expect(await runCli(deps, argv, ctx)).toMatchObject({ exitCode: 2, stderr: expect.stringContaining('reserved for the owner') });
+    }
+    expect(pairing.enable).not.toHaveBeenCalled(); expect(pairing.remove).not.toHaveBeenCalled();
+    expect(pairing.revoke).not.toHaveBeenCalled(); expect(syncNow).not.toHaveBeenCalled();
+    expect((await runCli(deps, ['peers'], ctx)).exitCode).toBe(0);
+  });
+
   it('exposes group status, enable, retries, removal blockers and database sync', async () => {
     const status = { configured: false, installerAvailable: false };
     const pairing = { status: vi.fn(async () => status), enable: vi.fn(async () => status), retry: vi.fn(async () => {}), revoke: vi.fn(async () => status),

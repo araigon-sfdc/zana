@@ -211,6 +211,26 @@ it('bounds concurrent opens and live local tunnels; close() releases them all', 
   for (const proc of f.processes) expect(proc.kill).toHaveBeenCalled();
 });
 
+it('reserves capacity for in-flight local opens and does not leak slots when mkdtemp fails', async () => {
+  const f = fixture();
+  const live = [];
+  for (let i = 0; i < 15; i++) { const next = f.tunnels.openLocal(endpoint, 8780); await vi.waitFor(() => expect(f.processes).toHaveLength(i + 1)); ready(f.processes[i]); live.push(await next); }
+  const last = f.tunnels.openLocal(endpoint, 8780);
+  // 15 live + 1 opening already fills the 16 cap
+  await expect(f.tunnels.openLocal(endpoint, 8780)).rejects.toThrow('Too many peer SSH tunnels');
+  await vi.waitFor(() => expect(f.processes).toHaveLength(16)); ready(f.processes[15]); live.push(await last);
+  f.tunnels.close();
+  await vi.waitFor(() => expect(live.every(tunnel => tunnel.closed)).toBe(true));
+  const g = fixture();
+  const original = process.env.TMPDIR;
+  process.env.TMPDIR = join(tmpdir(), 'zcc-missing-tmp-root', 'nested');
+  try {
+    for (let i = 0; i < 5; i++) await expect(g.tunnels.openLocal(endpoint, 8780)).rejects.toThrow(/ENOENT/);
+  } finally { if (original === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = original; }
+  const ok = g.tunnels.openLocal(endpoint, 8780); await vi.waitFor(() => expect(g.processes).toHaveLength(1));
+  ready(g.processes[0]); await (await ok).close();
+});
+
 it('carries real loopback traffic through a mocked ssh binary over argv (no shell)', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'zcc-fake-ssh-'));
   const app = createServer((_req, res) => res.end('peer-app'));
@@ -334,7 +354,11 @@ it.each([
   expect(error.code).toBe(code); expect(error.message).toBe(code); expect(error.message).not.toContain('secret');
   expect(f.states).toEqual([]);
   // slot released
-  const next = f.open(); await vi.waitFor(() => expect(f.processes).toHaveLength(2));
+  const controller = new AbortController();
+  const next = f.open(linkInput, { signal: controller.signal }).then(() => undefined, failure => failure as Error);
+  await vi.waitFor(() => expect(f.processes).toHaveLength(2));
+  controller.abort();
+  expect(await next).toBeInstanceOf(Error);
 });
 
 it.each(['timeout', 'abort', 'error'])('first open %s kills ssh and cleans up', async mode => {
@@ -370,6 +394,19 @@ it('reconnects on the same local port with backoff, reports state, and stops on 
   const spawned = f.spawnProcess.mock.calls.length;
   await new Promise(resolve => setTimeout(resolve, 50));
   expect(f.spawnProcess).toHaveBeenCalledTimes(spawned);
+});
+
+it('rejects non-ed25519 peer-link host keys (ssh is forced to HostKeyAlgorithms=ssh-ed25519) and frees slots when mkdtemp fails', async () => {
+  const f = linkFixture();
+  const ecdsa = `ecdsa-sha2-nistp256 ${'A'.repeat(68)}`;
+  await expect(f.open({ ...linkInput, endpoint: { ...linkEndpoint, hostKey: ecdsa } })).rejects.toThrow('Invalid pinned SSH endpoint');
+  expect(f.spawnProcess).not.toHaveBeenCalled();
+  const original = process.env.TMPDIR;
+  process.env.TMPDIR = join(tmpdir(), 'zcc-missing-tmp-root', 'nested');
+  try {
+    for (let i = 0; i < 5; i++) await expect(f.open()).rejects.toThrow(/ENOENT/);
+  } finally { if (original === undefined) delete process.env.TMPDIR; else process.env.TMPDIR = original; }
+  const link = await f.open(); await link.close();
 });
 
 it('bounds concurrent and live peer links; close() releases them all', async () => {

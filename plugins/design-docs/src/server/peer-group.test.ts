@@ -503,6 +503,26 @@ describe('Reset sync with one computer', () => {
     expect(a.group.rejoinState(b.peer)).toEqual({ kind: 'detach' });
   });
 
+  it('rejoinState sees open work beyond the 64-row jobs() page', () => {
+    const a = fixture('a'), b = fixture('b'); found(a, b);
+    a.group.remove(a.replica);
+    a.db.prepare("UPDATE sync_group_jobs SET state = 'done'").run();
+    const insert = a.db.prepare("INSERT INTO sync_group_jobs (id, peer_id, kind, roster_epoch, payload_json, state) VALUES (?, ?, 'revoke', 1, '{}', ?)");
+    for (let i = 0; i < 70; i++) insert.run(`done-${i}`, 'app-c', 'done');
+    insert.run('zz-open', 'app-c', 'pending');
+    expect(a.group.jobs().some((job) => job.id === 'zz-open')).toBe(false);
+    expect(a.group.rejoinState(b.peer)).toMatchObject({ kind: 'blocked' });
+  });
+
+  it('resetPeer discards many owed jobs in bulk', () => {
+    const a = fixture('a'), b = fixture('b'); found(a, b);
+    a.db.prepare('DELETE FROM sync_group_jobs').run();
+    const insert = a.db.prepare("INSERT INTO sync_group_jobs (id, peer_id, kind, roster_epoch, payload_json, state) VALUES (?, ?, 'roster', 1, '{}', 'failed')");
+    for (let i = 0; i < 1200; i++) insert.run(`j-${i}`, b.peer);
+    expect(a.group.resetPeer(b.peer)).toBe(1200);
+    expect(a.db.prepare('SELECT COUNT(*) AS n FROM sync_group_jobs').get()).toEqual({ n: 0 });
+  });
+
   it('a failed job is terminal: it never blocks rejoin and is not retried', () => {
     const a = fixture('a'), b = fixture('b'); found(a, b);
     a.group.remove(a.replica);

@@ -24,7 +24,7 @@ beforeEach(() => {
   writeText = vi.fn(async () => undefined);
   Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
 });
-afterEach(() => cleanup());
+afterEach(() => { cleanup(); localStorage.clear(); });
 
 function mount(options: { deepLinkBase?: string | null; token?: string; redeem?: ReturnType<typeof vi.fn> } = {}) {
   const redeem = options.redeem ?? vi.fn(async () => ({ invitationId: 'inv-9', state: 'redeeming' }));

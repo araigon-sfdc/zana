@@ -51,6 +51,7 @@ function state(roster: GroupRoster) {
     members.set(member.replicaId, member); machines.add(member.machineId); admissions.set(member.replicaId, reference);
   };
   const founders = roster.genesis.founders;
+  if (founders[0]!.replicaId === founders[1]!.replicaId) fail('duplicate founder replica identity');
   if (founders[0]!.machineId >= founders[1]!.machineId ||
     !founders.some((member) => member.replicaId === roster.genesis.sponsorReplicaId) ||
     founders.find((member) => member.replicaId === roster.genesis.sponsorReplicaId)!.sponsorReplicaId !== null ||

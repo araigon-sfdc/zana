@@ -121,26 +121,19 @@ export function createRpcHandlers(deps: RpcDeps): Record<string, (args: unknown)
     peerStatus: async () => {
       const local = deps.peerSync?.status() ?? null;
       if (!local?.configured) return local ?? { configured: false, members: [] };
-      const connected = new Set(await deps.pairing?.connectedMembers().catch(() => [] as string[]) ?? []);
+      const connected = new Set(await deps.pairing?.connectedMembers().catch((error: unknown) => {
+        console.warn('[design-docs] connectedMembers failed; showing members as disconnected:', error instanceof Error ? error.message : error);
+        return [] as string[];
+      }) ?? []);
       return { ...local, members: local.members.map((member) => ({ ...member, connected: member.replicaId === local.replicaId || connected.has(member.machineId) })) };
     },
 
-    groupStatus: () => {
-      if (!deps.pairing) throw new DesignDocError('invalid', 'database group setup is unavailable');
-      return deps.pairing.status();
-    },
+    groupStatus: () => requirePairing(deps).status(),
 
-    enablePeer: (raw) => {
-      const input = asInput(raw);
-      if (Object.keys(input).some((key) => key !== 'peerId')) throw new DesignDocError('invalid', 'enablePeer accepts only peerId, never a roster');
-      if (!deps.pairing) throw new DesignDocError('invalid', 'database group setup is unavailable');
-      return deps.pairing.enable(requiredString(input, 'peerId'));
-    },
+    // Never a roster: the only accepted key is the peer id.
+    enablePeer: (raw) => requirePairing(deps).enable(requiredString(onlyKeys(raw, ['peerId']), 'peerId')),
 
-    inviteState: () => {
-      if (!deps.pairing) throw new DesignDocError('invalid', 'database group setup is unavailable');
-      return deps.pairing.inviteState();
-    },
+    inviteState: () => requirePairing(deps).inviteState(),
 
     createInvitation: () => requirePairing(deps).createInvitation(),
 
@@ -175,28 +168,22 @@ export function createRpcHandlers(deps: RpcDeps): Record<string, (args: unknown)
     peersOutOfSync: async () => ({ outOfSync: await requirePairing(deps).outOfSync() }),
 
     retryIntroductions: async () => {
-      if (!deps.pairing) throw new DesignDocError('invalid', 'database group setup is unavailable');
-      await deps.pairing.retry(true);
-      return deps.pairing.status();
+      const pairing = requirePairing(deps);
+      await pairing.retry(true);
+      return pairing.status();
     },
 
-    removePeer: (raw) => {
-      if (!deps.pairing) throw new DesignDocError('invalid', 'database group setup is unavailable');
-      return deps.pairing.remove(requiredString(asInput(raw), 'replicaId'));
-    },
+    removePeer: (raw) => requirePairing(deps).remove(requiredString(onlyKeys(raw, ['replicaId']), 'replicaId')),
 
-    revokePeer: (raw) => {
-      const input = asInput(raw);
-      if (Object.keys(input).some((key) => key !== 'peerId')) throw new DesignDocError('invalid', 'revokePeer accepts only peerId');
-      if (!deps.pairing) throw new DesignDocError('invalid', 'database group setup is unavailable');
-      return deps.pairing.revoke(requiredString(input, 'peerId'));
-    },
+    revokePeer: (raw) => requirePairing(deps).revoke(requiredString(onlyKeys(raw, ['peerId']), 'peerId')),
 
     syncNow: async () => {
       if (!deps.peerSync) throw new DesignDocError('invalid', 'peer sync is unavailable');
       const result = await deps.peerSync.syncNow(deps.sdk.peers);
       // Peers re-check their out-of-sync notice once this side finished; not awaited, never fails the sync.
-      void deps.pairing?.notifyStateChanged().catch(() => undefined);
+      void deps.pairing?.notifyStateChanged().catch((error: unknown) => {
+        console.warn('[design-docs] peer state-change notification failed after sync:', error instanceof Error ? error.message : error);
+      });
       return result;
     },
 

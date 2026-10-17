@@ -4,7 +4,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
 import { sqliteWorkerConfiguration } from '@zana-ai/zcc-db';
 import type { ZccPluginApi } from '@zana-ai/zcc-plugin-sdk';
-import { createPluginWorkerBridge } from './plugin-worker-bridge.js';
+import { createPluginWorkerBridge, PEER_WORKER_COMMIT_TIMEOUT_MS } from './plugin-worker-bridge.js';
 
 let active = 0;
 function workerEntry(): string {
@@ -44,8 +44,17 @@ export function createIsolatedPluginRuntime(options: {
   // Disposal can race the installer attaching its await during application shutdown.
   void started.catch(() => {});
   const startup = setTimeout(() => fail(new Error('Plugin factory timed out')), options.startupTimeoutMs ?? 10_000);
+  // A synchronous peer commit blocks worker heartbeats, so it is exempt — but only for a bounded grace. The bridge
+  // terminates a commit at PEER_WORKER_COMMIT_TIMEOUT_MS; a count that stops moving past that (e.g. a failed
+  // termination) must not disable the watchdog forever. Any change in the count is progress and restarts the grace.
+  let commitCount = 0, commitProgressAt = 0;
+  const commitGraceActive = (now: number) => {
+    const count = bridge.activeCommits;
+    if (count !== commitCount) { commitCount = count; commitProgressAt = now; }
+    return count > 0 && now - commitProgressAt < PEER_WORKER_COMMIT_TIMEOUT_MS + 5_000;
+  };
   const watchdog = setInterval(() => {
-    if (ready && !bridge.activeCommits && !(apiWaitStarted !== undefined && Date.now() - apiWaitStarted < 10_000) && Date.now() - lastHeartbeat > (options.heartbeatTimeoutMs ?? 1500)) fail(new Error('Plugin event loop stopped responding'));
+    if (ready && !commitGraceActive(Date.now()) && !(apiWaitStarted !== undefined && Date.now() - apiWaitStarted < 10_000) && Date.now() - lastHeartbeat > (options.heartbeatTimeoutMs ?? 1500)) fail(new Error('Plugin event loop stopped responding'));
   }, 250);
   watchdog.unref();
   function dispose(error = new Error('Plugin runtime stopped')) {

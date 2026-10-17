@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { constants as fsc } from 'node:fs';
-import { mkdir, lstat, open, readFile, rename, stat, unlink, type FileHandle } from 'node:fs/promises';
+import { mkdir, lstat, link, open, readFile, rename, stat, unlink, type FileHandle } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import type { AuthorizedKeyInput, AuthorizedKeyKind, AuthorizedKeys } from './peer-ssh-contract.js';
@@ -220,19 +220,34 @@ export class SshAuthorizedKeys implements AuthorizedKeys {
       } catch (error) {
         if (!isCode(error, 'EEXIST')) throw error;
       }
-      if (await this.lockIsStale(lock)) { await unlink(lock).catch(() => undefined); continue; }
+      const staleIno = await this.lockIsStale(lock);
+      if (staleIno !== undefined) { await this.breakStaleLock(lock, staleIno); continue; }
       if (Date.now() >= deadline) throw new AuthorizedKeysRefusedError('authorized_keys lock timeout');
       await sleep(LOCK_POLL_MS + Math.floor(Math.random() * LOCK_POLL_MS));
     }
   }
 
-  private async lockIsStale(lock: string): Promise<boolean> {
+  /** The inode of a lock judged stale, else undefined. */
+  private async lockIsStale(lock: string): Promise<number | undefined> {
     const info = await stat(lock).catch(() => undefined);
-    if (!info) return false;
-    if (Date.now() - info.mtimeMs > LOCK_STALE_MS) return true;
+    if (!info) return undefined;
+    if (Date.now() - info.mtimeMs > LOCK_STALE_MS) return info.ino;
     const pid = Number((await readFile(lock, 'utf8').catch(() => '')).split(':')[0]);
-    if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return false;
-    try { process.kill(pid, 0); return false; } catch (error) { return isCode(error, 'ESRCH'); }
+    if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return undefined;
+    try { process.kill(pid, 0); return undefined; } catch (error) { return isCode(error, 'ESRCH') ? info.ino : undefined; }
+  }
+
+  /**
+   * Check-then-unlink would delete a fresh lock another process created after the stale verdict. Move the lock aside
+   * atomically, then confirm it is the inode judged stale; if a live lock was taken instead, put it back.
+   */
+  private async breakStaleLock(lock: string, staleIno: number): Promise<void> {
+    const aside = `${lock}.stale-${process.pid}-${randomBytes(6).toString('hex')}`;
+    try { await rename(lock, aside); } catch { return; }
+    try {
+      const moved = await stat(aside).catch(() => undefined);
+      if (moved && moved.ino !== staleIno) await link(aside, lock).catch(() => undefined);
+    } finally { await unlink(aside).catch(() => undefined); }
   }
 }
 

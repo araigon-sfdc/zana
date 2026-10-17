@@ -11,7 +11,7 @@ function migrate(db: ReturnType<typeof createTestDatabase>, statements: readonly
 describe('DESIGN_DOC_MIGRATIONS', () => {
   it('upgrades the peer-first development lineage without replaying migrations', () => {
     const db = createTestDatabase();
-    const peerFirstMigrations = [...DESIGN_DOC_MIGRATIONS.slice(0, 2), ...DESIGN_DOC_MIGRATIONS.slice(3)];
+    const peerFirstMigrations = [...DESIGN_DOC_MIGRATIONS.slice(0, 2), ...DESIGN_DOC_MIGRATIONS.slice(3, -1)];
     migrate(db, peerFirstMigrations);
     db.prepare(`INSERT INTO docs (id, slug, title, created_at, updated_at, created_by, updated_by)
       VALUES (?, ?, ?, ?, ?, ?, ?)`).run('doc-1', 'legacy', 'Legacy doc', 1, 1, 'you', 'you');
@@ -43,5 +43,18 @@ describe('DESIGN_DOC_MIGRATIONS', () => {
     expect(db.prepare('SELECT id FROM _zcc_migrations ORDER BY id').all()).toEqual(
       DESIGN_DOC_MIGRATIONS.map((_, id) => ({ id }))
     );
+  });
+
+  it('advances the old path and file id generations when a doc_files row is updated in place', () => {
+    const db = createTestDatabase();
+    migrate(db, DESIGN_DOC_MIGRATIONS);
+    db.prepare(`INSERT INTO docs (id, slug, title, created_at, updated_at, created_by, updated_by)
+      VALUES ('d', 's', 't', 1, 1, 'you', 'you')`).run();
+    db.prepare(`INSERT INTO doc_files (doc_id, path, content, encoding, size, revision, updated_at, updated_by, sync_id)
+      VALUES ('d', 'old.md', 'x', 'utf8', 1, 3, 1, 'you', 'f-old')`).run();
+    db.prepare("UPDATE doc_files SET path = 'new.md', sync_id = 'f-new', revision = 4 WHERE doc_id = 'd'").run();
+    expect(db.prepare("SELECT generation FROM sync_file_generations WHERE path = 'old.md'").get()).toEqual({ generation: 4 });
+    expect(db.prepare("SELECT generation FROM sync_file_generations WHERE path = 'new.md'").get()).toEqual({ generation: 4 });
+    expect(db.prepare("SELECT generation FROM sync_file_identity_generations WHERE file_id = 'f-old'").get()).toEqual({ generation: 4 });
   });
 });

@@ -5,7 +5,7 @@
  * starts Vite; the default path starts electron-vite.
  */
 import { randomBytes } from 'node:crypto';
-import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
@@ -134,11 +134,18 @@ const DEV_PEER_KEY_FILE = 'dev-peer-key';
 export function loadOrCreateDevPeerKey(dataDir) {
   const path = join(dataDir, DEV_PEER_KEY_FILE);
   try {
-    const existing = readFileSync(path, 'utf8').trim();
-    if (/^[A-Za-z0-9_-]{43}$/.test(existing)) return existing;
+    // Trust an existing key only if it is a regular, single-link file no one else can read or write (lstat: never follow a link).
+    const stat = lstatSync(path);
+    const ownerOnly = process.platform === 'win32' || (stat.mode & 0o077) === 0;
+    if (stat.isFile() && stat.nlink === 1 && ownerOnly) {
+      const existing = readFileSync(path, 'utf8').trim();
+      if (/^[A-Za-z0-9_-]{43}$/.test(existing)) return existing;
+    }
   } catch { /* first run or unreadable: mint a fresh one */ }
   const key = randomBytes(32).toString('base64url');
-  writeFileSync(path, key, { encoding: 'utf8', mode: 0o600 });
+  // Replace by unlink + exclusive create so a planted symlink or hard link is never written through.
+  rmSync(path, { force: true });
+  writeFileSync(path, key, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
   chmodSync(path, 0o600);
   return key;
 }

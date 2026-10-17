@@ -2,17 +2,21 @@ import { randomUUID } from 'node:crypto';
 import { constants, closeSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+/** Ownership and mode bits are only meaningful on POSIX; Windows keeps the symlink, size, file-type and content checks. */
+const posixPermissions = (): boolean => process.platform !== 'win32' && typeof process.getuid === 'function';
+const NO_FOLLOW = (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
+
 /** Stable product identity, independent of a daemon's per-connection instanceId. */
 export function readProductInstanceId(dataDir: string): string {
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const base = realpathSync(dataDir), root = lstatSync(base);
-  if (!root.isDirectory() || root.uid !== process.getuid?.() || (root.mode & 0o022) !== 0) throw new Error('Invalid product instance directory');
+  if (!root.isDirectory() || posixPermissions() && (root.uid !== process.getuid!() || (root.mode & 0o022) !== 0)) throw new Error('Invalid product instance directory');
   const file = join(base, 'product-instance.json');
   const read = (): string => {
-    const handle = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const handle = openSync(file, constants.O_RDONLY | NO_FOLLOW);
     try {
       const info = fstatSync(handle);
-      if (!info.isFile() || info.nlink !== 1 || info.uid !== root.uid || (info.mode & 0o7777) !== 0o600 || info.size > 1024) throw new Error('Invalid product instance identity');
+      if (!info.isFile() || info.nlink !== 1 || info.size > 1024 || posixPermissions() && (info.uid !== root.uid || (info.mode & 0o7777) !== 0o600)) throw new Error('Invalid product instance identity');
       const bytes = Buffer.alloc(1025);
       let length = 0;
       while (length < bytes.length) {
@@ -40,7 +44,10 @@ export function readProductInstanceId(dataDir: string): string {
     // Publish a complete file without overwriting another process's winner.
     try { linkSync(temporary, file); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
   } finally { rmSync(temporary, { force: true }); }
-  const directory = openSync(base, constants.O_RDONLY);
-  try { fsyncSync(directory); } finally { closeSync(directory); }
+  // Directories cannot be opened or fsynced on Windows; the file itself was already synced.
+  if (process.platform !== 'win32') {
+    const directory = openSync(base, constants.O_RDONLY);
+    try { fsyncSync(directory); } finally { closeSync(directory); }
+  }
   return read();
 }

@@ -84,11 +84,6 @@ export interface GroupStatus {
   installerAvailable: false;
 }
 
-/**
- * The one definition of "this computer syncs its database with `peerId`", shared by the computer card badge, Repair and
- * the server: this computer is in a sync group (a roster it left is history), the peer is a current, non-retiring member
- * of it, and core holds exactly one database grant for it.
- */
 /** Attempts after which a job failing permanently stops retrying and no longer blocks other work (server `finishJob`). */
 export const MAX_PERMANENT_JOB_ATTEMPTS = 5;
 /** Work that stopped making progress: the owner may discard it with Reset sync. A merely waiting job is not stuck. */
@@ -107,6 +102,11 @@ export function ownerText(text: string | null | undefined): string | null {
 /** Core could not verify the other computer because there is no live connection to it right now. */
 export const NOT_CONNECTED = 'waiting for the other computer to connect; there is no link to it right now';
 
+/**
+ * The one definition of "this computer syncs its database with `peerId`", shared by the computer card badge, Repair and
+ * the server: this computer is in a sync group (a roster it left is history), the peer is a current, non-retiring member
+ * of it, and core holds exactly one database grant for it.
+ */
 export function syncedWith(status: Pick<GroupStatus, 'configured' | 'members' | 'replicaId'>, peerId: string): boolean {
   return status.configured && status.members.some((member) => member.replicaId === status.replicaId) &&
     status.members.some((member) => member.machineId === peerId && member.replicaId !== status.replicaId && !member.retiring && member.authorized);

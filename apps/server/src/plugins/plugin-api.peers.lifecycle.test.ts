@@ -1,5 +1,6 @@
 import { generateSeed, publicKeyLine } from '@zana-ai/zcc-host-daemon/ssh-keys';
 import { randomBytes, randomUUID } from 'node:crypto';
+import { mkdtempSync } from 'node:fs';
 import { mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -302,6 +303,7 @@ it('reports the storage epoch unavailable without a peer key or epoch store, and
   const live = plugin(owner);
   const advance = vi.spyOn(owner.server.ctx.pluginStorageEpochs!, 'advance');
   const pending = live.api.sdk.peers.advanceStorageEpoch!(0);
+  await vi.waitFor(() => expect(advance).toHaveBeenCalled());
   const isLive = advance.mock.calls[0]![2]!;
   expect(isLive()).toBe(true);
   await pending;
@@ -367,6 +369,12 @@ function invitationWorld() {
 }
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
+/** Per-test plugin root, removed after the test (never the shared OS tmpdir). */
+function scratch(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'plugin-invite-scratch-'));
+  roots.push(dir);
+  return dir;
+}
 function inviteApi(dir: string, pluginId: string, productContext: Record<string, unknown>) {
   const handle = createPluginApi(pluginId, join(dir, 'plugins', pluginId), { productContext: { productInstanceId: randomUUID(), ...productContext } as never });
   handles.push(handle);
@@ -458,7 +466,7 @@ it('cancels an open invitation without proof and isolates invitations per plugin
 
 it('rejects invalid scope, malformed arguments and unexpected keys before any invitation work', async () => {
   const create = vi.fn(), redeem = vi.fn(), decide = vi.fn();
-  const peers = inviteApi(tmpdir(), 'sync-plugin', { peerInvitations: { create, redeem, decide, status: vi.fn(), list: vi.fn(), cancel: vi.fn(), poll: vi.fn(), refresh: vi.fn(), approvalRequest: vi.fn() } });
+  const peers = inviteApi(scratch(), 'sync-plugin', { peerInvitations: { create, redeem, decide, status: vi.fn(), list: vi.fn(), cancel: vi.fn(), poll: vi.fn(), refresh: vi.fn(), approvalRequest: vi.fn() } });
   for (const bad of ['', '\u0000', 'x'.repeat(1025), 7 as never]) await expect(peers.createInvitation!({ scope: bad })).rejects.toThrow('not valid');
   await expect(peers.createInvitation!({ scope: INV_SCOPE, hostKey: 'k' } as never)).rejects.toThrow('not valid');
   await expect(peers.createInvitation!(undefined as never)).rejects.toThrow('not valid');
@@ -477,7 +485,7 @@ it('projects an ssh refusal with the ssh_* code as both reason and message', asy
   const status = { invitationId: id, role: 'redeemer', scope: INV_SCOPE, state: 'failed', reason: 'ssh_unreachable', localFingerprint: 'f', inviterDecision: 'pending',
     redeemerDecision: 'pending', generation: 0, expiresAt: Date.now() + 60_000 };
   const refuse = async () => { throw new InvitationError('ssh_unreachable'); };
-  const peers = inviteApi(tmpdir(), 'sync-plugin', { peerInvitations: { create: vi.fn(), redeem: refuse, status: async () => status, list: vi.fn(), poll: async () => status, refresh: async () => status,
+  const peers = inviteApi(scratch(), 'sync-plugin', { peerInvitations: { create: vi.fn(), redeem: refuse, status: async () => status, list: vi.fn(), poll: async () => status, refresh: async () => status,
     decide: vi.fn(), cancel: vi.fn(), approvalRequest: vi.fn() } });
   expect(await peers.invitationStatus!({ invitationId: id, refresh: true })).toMatchObject({ state: 'failed', reason: 'ssh_unreachable' });
   const error = await peers.redeemInvitation!({ token: 'zccinv1.' + Buffer.from('{}').toString('base64url') }).catch((caught: unknown) => caught);
@@ -488,7 +496,7 @@ it('projects an ssh refusal with the ssh_* code as both reason and message', asy
 it('maps unknown failures to a fixed message so tokens and secrets never reach plugin errors', async () => {
   const leaky = 'zccinv1.SECRETPAYLOAD hostKey=abc credential=def';
   const fail = async () => { throw new Error(leaky); };
-  const peers = inviteApi(tmpdir(), 'sync-plugin', { peerInvitations: { create: fail, redeem: fail, status: fail, list: fail, poll: fail, refresh: fail, decide: fail, cancel: fail, approvalRequest: fail },
+  const peers = inviteApi(scratch(), 'sync-plugin', { peerInvitations: { create: fail, redeem: fail, status: fail, list: fail, poll: fail, refresh: fail, decide: fail, cancel: fail, approvalRequest: fail },
     peerLinks: { links: fail, rotate: fail, release: fail } });
   const token = 'zccinv1.' + Buffer.from('{}').toString('base64url');
   const id = randomUUID();
@@ -512,7 +520,7 @@ it('maps unknown failures to a fixed message so tokens and secrets never reach p
 it('logs a sanitised diagnostic server-side when a non-Invitation error is reported as unavailable', async () => {
   const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
   const fail = async () => { throw Object.assign(new TypeError('zccinv1.SECRETPAYLOAD hostKey=abc'), { code: 'EBOOM' }); };
-  const peers = inviteApi(tmpdir(), 'sync-plugin', { peerInvitations: { list: fail } });
+  const peers = inviteApi(scratch(), 'sync-plugin', { peerInvitations: { list: fail } });
   await expect(peers.listInvitations!()).rejects.toThrow('Invitations are unavailable');
   expect(log).toHaveBeenCalledTimes(1);
   const line = String(log.mock.calls[0]![0]);
@@ -520,18 +528,55 @@ it('logs a sanitised diagnostic server-side when a non-Invitation error is repor
   expect(line).not.toMatch(/SECRET|hostKey/);
   // A fixed-message InvitationError is expected and not logged.
   const refuse = async () => { throw new InvitationError('not_ready'); };
-  const quiet = inviteApi(tmpdir(), 'sync-plugin', { peerInvitations: { list: refuse } });
+  const quiet = inviteApi(scratch(), 'sync-plugin', { peerInvitations: { list: refuse } });
   await expect(quiet.listInvitations!()).rejects.toBeInstanceOf(InvitationError);
   expect(log).toHaveBeenCalledTimes(1);
 });
 
+it('cancels an invitation minted for a caller that aborted after create resolved, logging cancel failures', async () => {
+  const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  const controller = new AbortController(), invitationId = randomUUID();
+  const create = vi.fn(async () => { controller.abort(new Error('caller cancelled')); return { invitationId, token: 'zccinv1.SECRET', expiresAt: 1 }; });
+  const cancel = vi.fn(async () => { throw Object.assign(new Error('hostKey=abc'), { code: 'ECANCEL' }); });
+  const peers = inviteApi(scratch(), 'sync-plugin', { peerInvitations: { create, cancel } });
+  await expect(peers.createInvitation!({ scope: INV_SCOPE, signal: controller.signal })).rejects.toThrow('caller cancelled');
+  expect(cancel).toHaveBeenCalledExactlyOnceWith({ pluginId: 'sync-plugin', invitationId });
+  expect(log).toHaveBeenCalledOnce();
+  expect(String(log.mock.calls[0]![0])).toMatch(/code=ECANCEL/);
+  expect(String(log.mock.calls[0]![0])).not.toMatch(/hostKey/);
+  // A create that never resolved leaves nothing to cancel.
+  const failing = inviteApi(scratch(), 'sync-plugin', { peerInvitations: { create: async () => { throw new InvitationError('not_ready'); }, cancel } });
+  await expect(failing.createInvitation!({ scope: INV_SCOPE })).rejects.toBeInstanceOf(InvitationError);
+  expect(cancel).toHaveBeenCalledOnce();
+});
+
+it('enrolled() keeps listing past an unexpected per-peer failure and logs it without the message', async () => {
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  const dir = scratch(), db = openDatabase(join(dir, 'hosts.sqlite'));
+  cleanups.push(async () => db.close());
+  const host = upsertHost(db, { name: 'Peer machine', hostKeyHash: 'hash', homeDir: '/home' });
+  const broken = randomUUID(), offline = randomUUID(), good = randomUUID();
+  const remote = vi.fn(async (id: string) => {
+    if (id === broken) throw Object.assign(new TypeError('hostKey=SECRET'), { code: 'EODD' });
+    return { remoteInstanceId: id, hostId: host.id, hostKey: 'k'.repeat(32), capability: 'peer.forward' as const };
+  });
+  const peers = inviteApi(dir, 'sync-plugin', { db, hostHub: { getSession: () => ({}) },
+    peerChannels: { list: async () => [broken, offline, good].map(remoteInstanceId => ({ remoteInstanceId, capability: 'peer.forward' })), remote },
+    peerAuthority: { resolveHost: async (id: string) => id === good ? host.id : null } });
+  expect(await peers.enrolled()).toEqual([{ id: good, hostId: host.id, name: 'Peer machine', connected: true }]);
+  // Only the unexpected failure is logged; an unverified (offline) peer is the normal hidden case.
+  expect(warn).toHaveBeenCalledOnce();
+  expect(String(warn.mock.calls[0]![0])).toMatch(/name=TypeError code=EODD/);
+  expect(String(warn.mock.calls[0]![0])).not.toMatch(/SECRET|hostKey/);
+});
+
 it('reports invitations unavailable on hosts without the service and keeps legacy lifecycle features intact', async () => {
-  const peers = inviteApi(tmpdir(), 'sync-plugin', { peerAuthority: {} });
+  const peers = inviteApi(scratch(), 'sync-plugin', { peerAuthority: {} });
   expect(await peers.features()).toEqual({ lifecycle: true, introductions: true, installer: false, invitations: false });
   await expect(peers.createInvitation!({ scope: INV_SCOPE })).rejects.toThrow('Invitations are unavailable');
   await expect(peers.peerLinks!()).rejects.toThrow('Invitations are unavailable');
   expect(typeof peers.enrolled).toBe('function');
-  const withService = inviteApi(tmpdir(), 'sync-plugin', { peerAuthority: {}, peerInvitations: {} });
+  const withService = inviteApi(scratch(), 'sync-plugin', { peerAuthority: {}, peerInvitations: {} });
   expect((await withService.features()).invitations).toBe(true);
   // Fake host: invitations are stubbed per test and report unsupported by default.
   const { zcc, harness } = createFakePluginHost();
@@ -599,7 +644,7 @@ it('honours abort and stale contexts; a create that completes after dispose is c
 it('copies the peer name through the plugin link projection only when the link has one', async () => {
   const named = link({ peerName: 'Bob\'s Mac' });
   const older = link();
-  const peers = inviteApi(tmpdir(), 'sync-plugin', { peerLinks: { links: vi.fn(async () => [named, older]) } });
+  const peers = inviteApi(scratch(), 'sync-plugin', { peerLinks: { links: vi.fn(async () => [named, older]) } });
   const projected = await peers.peerLinks!();
   expect(projected.find(item => item.peerInstanceId === named.peerInstanceId)).toMatchObject({ peerName: 'Bob\'s Mac' });
   expect(projected.find(item => item.peerInstanceId === older.peerInstanceId)).not.toHaveProperty('peerName');
@@ -614,8 +659,8 @@ it('projects only this plugin\'s peer links, rotates owned peers only, and ties 
   const peerLinks = { links: vi.fn(async (peer?: string) => all.filter(item => !peer || item.peerInstanceId === peer)), rotate, release };
   const revokeProposals = vi.fn(async () => []);
   const ctx = { peerLinks, peerAuthority: { proposals: revokeProposals, revoke: vi.fn() } };
-  const peers = inviteApi(tmpdir(), 'sync-plugin', ctx);
-  const other = inviteApi(tmpdir(), 'other-plugin', ctx);
+  const peers = inviteApi(scratch(), 'sync-plugin', ctx);
+  const other = inviteApi(scratch(), 'other-plugin', ctx);
   const projected = await peers.peerLinks!();
   expect(projected).toEqual([{ pairingId: 'p1', peerInstanceId: mine.peerInstanceId, scope: INV_SCOPE, role: 'inviter', phase: 'linked', state: 'reconnecting',
     reason: 'peer-offline', failure: 'unreachable', retryInMs: 500 }]);
@@ -657,7 +702,7 @@ it('lists execution machines only, names plugin-link peers by their owner record
     peerPairs: { list: async () => [...byHost].map(([targetHostId, remoteInstanceId], epoch) => ({ remoteInstanceId, targetHostId, scope: INV_SCOPE, epoch, pairId: randomUUID() })) },
     peerLinkDirectory: { describe: (hostId: string) => hostId === forward.id ? { peerInstanceId: byHost.get(forward.id)!, peerName: 'Laptop', state: 'linked' } : undefined }
   };
-  const handle = createPluginApi('sync-plugin', join(tmpdir(), 'plugins', 'sync-plugin'), { productContext: { productInstanceId: randomUUID(), ...ctx } as never });
+  const handle = createPluginApi('sync-plugin', join(scratch(), 'plugins', 'sync-plugin'), { productContext: { productInstanceId: randomUUID(), ...ctx } as never });
   handles.push(handle);
   try {
     expect(await handle.api.sdk.hosts.list()).toEqual([{ id: execution.id, name: 'Build box' }]);
@@ -678,7 +723,7 @@ it('setPeerLinkNote: a plugin annotates only live links it owns, with validated,
   const peerLinkNotes = new PluginLinkNotes();
   const ctx = { peerLinkNotes, peerLinks: { links: vi.fn(async (peer?: string) => all.filter(item => !peer || item.peerInstanceId === peer)), rotate: vi.fn(), release: vi.fn(async () => true) },
     peerAuthority: { proposals: vi.fn(async () => []), revoke: vi.fn() } };
-  const handle = createPluginApi('sync-plugin', join(tmpdir(), 'plugins', 'sync-plugin'), { productContext: { productInstanceId: randomUUID(), ...ctx } as never });
+  const handle = createPluginApi('sync-plugin', join(scratch(), 'plugins', 'sync-plugin'), { productContext: { productInstanceId: randomUUID(), ...ctx } as never });
   handles.push(handle);
   const peers = handle.api.sdk.peers;
   const note = { state: 'attention', label: 'Sync not set up', detail: 'x' } as const;
@@ -722,8 +767,8 @@ it('setPeerLinkNote: a plugin annotates only live links it owns, with validated,
 
 it('setPeerLinkNote reports unavailable without a notes store or invitation links', async () => {
   const mine = link({ peerInstanceId: randomUUID() });
-  const withoutStore = inviteApi(tmpdir(), 'sync-plugin', { peerLinks: { links: vi.fn(async () => [mine]) } });
+  const withoutStore = inviteApi(scratch(), 'sync-plugin', { peerLinks: { links: vi.fn(async () => [mine]) } });
   await expect(withoutStore.setPeerLinkNote!(mine.peerInstanceId, { scope: INV_SCOPE, note: { state: 'ok', label: 'x' } })).rejects.toThrow('unavailable');
-  const withoutLinks = inviteApi(tmpdir(), 'sync-plugin', { peerLinkNotes: new PluginLinkNotes() });
+  const withoutLinks = inviteApi(scratch(), 'sync-plugin', { peerLinkNotes: new PluginLinkNotes() });
   await expect(withoutLinks.setPeerLinkNote!(mine.peerInstanceId, { scope: INV_SCOPE, note: null })).rejects.toThrow('unavailable');
 });

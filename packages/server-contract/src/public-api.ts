@@ -648,7 +648,7 @@ export const publicApiRoutes = {
       ),
       response: jsonResponse<CreateHostJoinCodeResponse>({ status: 201 }),
     }),
-    /** Mints a single-use code whose enrollment can only relay peer traffic: no execution, threads, files or host calls. */
+    /** Lists pending and decided peer introductions awaiting this owner's consent. */
     listPeerIntroductions: defineRoute({
       path: "/peers/introductions",
       method: "get",
@@ -737,6 +737,7 @@ export const publicApiRoutes = {
       request: jsonRequest<EmptyInput, PeerRouteOriginRequest>(peerRouteOriginRequestSchema),
       response: jsonResponse<PeerRouteOriginRemoveResponse>(),
     }),
+    /** Mints a single-use code whose enrollment can only relay peer traffic: no execution, threads, files or host calls. */
     createForwardJoinCode: defineRoute({
       path: "/hosts/forward-join-codes",
       method: "post",

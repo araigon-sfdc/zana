@@ -31,6 +31,18 @@ function waitForPeerOperation<T>(operation: Promise<T>, signal: AbortSignal): Pr
   });
 }
 
+/** Lone surrogates cannot round-trip through UTF-8; avoids an 8 MiB Buffer round trip where `isWellFormed` exists. */
+function isWellFormedString(value: string): boolean {
+  const native = (value as string & { isWellFormed?: () => boolean }).isWellFormed;
+  return typeof native === 'function' ? native.call(value) : Buffer.from(value, 'utf8').toString('utf8') === value;
+}
+
+/** Windows has no process.getuid; ownership is then not checkable, so it is not a mismatch. */
+export function ownedByCurrentUser(uid: number): boolean {
+  const me = typeof process.getuid === 'function' ? process.getuid() : undefined;
+  return me === undefined || uid === me;
+}
+
 export class PeerForwarder {
   private readonly active = new Map<AbortController, string>();
   private closed = false;
@@ -66,7 +78,7 @@ export class PeerForwarder {
     if (Buffer.byteLength(command.body, 'utf8') > PEER_FORWARD_MAX_BYTES) {
       throw new HostCommandError('request_too_large', 'peer request exceeds 8 MiB');
     }
-    if (Buffer.from(command.body, 'utf8').toString('utf8') !== command.body) {
+    if (!isWellFormedString(command.body)) {
       throw new HostCommandError('invalid_request', 'invalid peer forwarding command');
     }
     if (this.closed) throw new HostCommandError('peer_forward_closed', 'peer forwarding is closed');
@@ -134,8 +146,8 @@ export class PeerForwarder {
       }
       if (!response.body) return { status: response.status, body: '' };
       reader = response.body.getReader();
-      // Fetch yields decompressed bytes. Reserve bounded storage even for many tiny chunks.
-      const bytes = Buffer.allocUnsafe(PEER_FORWARD_MAX_BYTES);
+      // Fetch yields decompressed bytes; the running total bounds memory without preallocating the cap.
+      const chunks: Uint8Array[] = [];
       let length = 0;
       for (;;) {
         const chunk = await waitForPeerOperation(reader.read(), controller.signal);
@@ -144,11 +156,11 @@ export class PeerForwarder {
         if (chunk.value.byteLength > PEER_FORWARD_MAX_BYTES - length) {
           throw new HostCommandError('response_too_large', 'peer response exceeds 8 MiB');
         }
-        bytes.set(chunk.value, length);
+        chunks.push(chunk.value);
         length += chunk.value.byteLength;
       }
       let body: string;
-      try { body = new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, length)); }
+      try { body = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, length)); }
       catch { throw new HostCommandError('peer_response_invalid', 'peer response is not valid UTF-8'); }
       checkDeadline();
       return { status: response.status, body };
@@ -181,7 +193,7 @@ async function registrationDirectory(dataDir: string, create: boolean): Promise<
   // Only a host-selected local app directory may be supplied, never an RPC path.
   const base = await realpath(dataDir);
   const root = await lstat(base);
-  if (!root.isDirectory() || root.uid !== process.getuid?.() || (root.mode & 0o022) !== 0) {
+  if (!root.isDirectory() || !ownedByCurrentUser(root.uid) || (root.mode & 0o022) !== 0) {
     throw new Error('untrusted local peer app directory');
   }
   const directory = join(base, 'peer-app');
@@ -197,7 +209,7 @@ async function readRegistration(directory: string): Promise<z.infer<typeof Local
   const file = await open(join(directory, 'endpoint.json'), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const info = await file.stat();
-    if (!info.isFile() || info.uid !== process.getuid?.() || (info.mode & 0o077) !== 0 || info.nlink !== 1 || info.size > 1024) {
+    if (!info.isFile() || !ownedByCurrentUser(info.uid) || (info.mode & 0o077) !== 0 || info.nlink !== 1 || info.size > 1024) {
       throw new Error('untrusted local peer app registration');
     }
     const bytes = Buffer.alloc(1025);
@@ -212,19 +224,7 @@ async function readRegistration(directory: string): Promise<z.infer<typeof Local
   } finally { await file.close(); }
 }
 
-export function createStoredLocalPeerAppResolver(dataDir: string): LocalPeerAppResolver {
-  return async signal => {
-    signal.throwIfAborted();
-    try {
-      const registration = await readRegistration(await registrationDirectory(dataDir, false));
-      process.kill(registration.pid, 0);
-      signal.throwIfAborted();
-      return registration.port;
-    } catch { return null; }
-  };
-}
-
-/** Core control needs the same verified registration plus its owning app identity. */
+/** Core control needs the verified registration plus its owning app identity. */
 export function createStoredLocalPeerControlResolver(dataDir: string): (signal: AbortSignal) => Promise<{ port: number; instanceId: string } | null> {
   return async signal => {
     signal.throwIfAborted();
@@ -235,6 +235,11 @@ export function createStoredLocalPeerControlResolver(dataDir: string): (signal: 
       return { port: registration.port, instanceId: registration.instanceId };
     } catch { return null; }
   };
+}
+
+export function createStoredLocalPeerAppResolver(dataDir: string): LocalPeerAppResolver {
+  const resolve = createStoredLocalPeerControlResolver(dataDir);
+  return async signal => (await resolve(signal))?.port ?? null;
 }
 
 async function withRegistrationLane<T>(directory: string, run: () => Promise<T>): Promise<T> {

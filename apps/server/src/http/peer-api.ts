@@ -47,8 +47,12 @@ async function handleAdmittedPeer(request: IncomingMessage, response: ServerResp
   }
   let raw: Buffer;
   try { raw = await readBoundedBody(request); }
-  catch {
-    if (!response.destroyed) sendJson(response, 413, { ok: false, code: 'peer-body-too-large' });
+  catch (error) {
+    const tooLarge = error instanceof Error && error.message === 'too large';
+    if (!response.destroyed) {
+      if (tooLarge) sendJson(response, 413, { ok: false, code: 'peer-body-too-large' });
+      else sendJson(response, 408, { ok: false, code: 'peer-body-read-failed' });
+    }
     return true;
   }
   let lease;

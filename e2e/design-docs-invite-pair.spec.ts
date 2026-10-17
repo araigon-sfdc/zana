@@ -168,7 +168,8 @@ test('two fresh apps pair over a private sshd, sync both ways, heal a killed ssh
     console.log('[invite-pair] A sees redeemer fingerprint', aFingerprint);
     expect(aFingerprint).not.toBe(bFingerprint);
     await approveInUi(a);
-    await expect(bList).toContainText(/Approved\. Connecting to |Ready: paired with /, { timeout: 60_000 }).catch(() => undefined);
+    // B's transient "Approved. Connecting" / "Ready" row is not asserted: it clears itself once the link exists, so it
+    // cannot be observed reliably. The Connected badges below are the checked outcome on both sides.
     // A finished pairing hands over to its computer card (the Ready row clears itself once the link exists).
     await expect((await openPeers(a)).getByLabel('Computers').locator('.dd-peers-badge', { hasText: /^Connected$/ })).toHaveCount(1, { timeout: 120_000 }).catch(error => { dumpLogs(a); dumpLogs(b); throw error; });
     await expect((await openPeers(b)).getByLabel('Computers').locator('.dd-peers-badge', { hasText: /^Connected$/ })).toHaveCount(1, { timeout: 120_000 });

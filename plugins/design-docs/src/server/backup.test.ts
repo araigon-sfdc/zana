@@ -410,6 +410,20 @@ describe('DesignDocBackups core storage-epoch fence', () => {
     expect(await new DesignDocBackups(db, group.sync, { kv }).verifyRestore(group, 'app-a')).toEqual({ restored: true, reason: 'replica-binding' });
   });
 
+  it('survives an onLost callback that throws', async () => {
+    const db = createTestDatabase(); const store = new DesignDocStore(db);
+    const group = new DesignDocPeerGroup(db), { state, epochs } = memoryEpochs();
+    const backups = new DesignDocBackups(db, group.sync, { kv: memoryKv(), epochs });
+    await backups.verifyRestore(group, 'app-a');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    backups.maintainFence(() => { throw new Error('callback boom'); }, 2);
+    state.value = 99;
+    store.create({ title: 'Changed', template: 'blank' }, actor);
+    await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(expect.stringContaining('fence-lost callback failed'), expect.objectContaining({ message: 'callback boom' })));
+    expect(backups.fenceStatus()).toBe('lost');
+    warn.mockRestore();
+  });
+
   it('marks the fence lost when a running re-fence fails, and ignores failures after stop', async () => {
     const db = createTestDatabase(); const store = new DesignDocStore(db);
     const group = new DesignDocPeerGroup(db), { state, epochs } = memoryEpochs();

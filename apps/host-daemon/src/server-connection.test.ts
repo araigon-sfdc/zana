@@ -71,6 +71,11 @@ describe('enrolled host with BB ws transport', () => {
     f.send({ type: 'host-rpc.request', protocolVersion: HOST_RPC_PROTOCOL_VERSION, requestId: 'denied', command: { type: 'provider.status' } });
     await vi.waitFor(() => expect(f.messages.find(m => m.requestId === 'denied')).toMatchObject({ ok: false, error: { code: 'capability_denied' } }));
   });
+  it('replies invalid_request to a malformed peer.control request instead of dropping it', async () => {
+    const f = await fixture(), connection = f.connect(); await connection.ready;
+    f.send({ type: 'host-rpc.request', protocolVersion: HOST_RPC_PROTOCOL_VERSION, requestId: 'bad-control', command: { type: 'peer.control' } });
+    await vi.waitFor(() => expect(f.messages.find(m => m.requestId === 'bad-control')).toMatchObject({ ok: false, error: { code: 'invalid_request' } }));
+  });
   it('closes an introduced link whose server identifies as a different app, before ready', async () => {
     const expected = '33333333-3333-4333-8333-333333333333';
     const wrong = await fixture(undefined, 'peer.forward', '44444444-4444-4444-8444-444444444444');

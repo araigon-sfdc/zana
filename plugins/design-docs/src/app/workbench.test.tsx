@@ -687,7 +687,8 @@ describe('doc header', () => {
     }
   });
 
-  it('keeps the delete confirm usable when sync status cannot be read', async () => {
+  it('keeps the delete confirm usable, with a conservative propagation warning, when sync status cannot be read', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const harness = createHarness({ rpcOverrides: { peerStatus: async () => { throw new Error('offline'); } } });
     const doc = seed(harness.store, { title: 'No status', projectId: 'p1' });
     openInProjectTab(harness, doc.id);
@@ -696,9 +697,11 @@ describe('doc header', () => {
     fireEvent.click(menuItem('Delete…'));
     const confirm = screen.getByRole('dialog', { name: 'Delete design doc' });
     await waitFor(() => expect(harness.rpcCalls.some((call) => call.method === 'peerStatus')).toBe(true));
-    expect(confirm.textContent).not.toContain('paired computers');
+    await waitFor(() => expect(warn).toHaveBeenCalled());
+    expect(confirm.textContent).toContain('If this computer is paired with others, it will also be deleted on them.');
     fireEvent.click(within(confirm).getByRole('button', { name: 'Delete' }));
     await waitFor(() => expect(harness.store.find(doc.id)).toBeNull());
+    warn.mockRestore();
   });
 
   it('reports a failed delete and keeps the doc', async () => {

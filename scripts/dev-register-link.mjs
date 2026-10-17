@@ -213,7 +213,13 @@ export function unregister(options = {}, overrides = {}) {
     deps.log('Nothing to remove.');
     return 0;
   }
-  const stat = lstatSync(paths.dir);
+  let stat;
+  try {
+    stat = lstatSync(paths.dir);
+  } catch (error) {
+    deps.err(`could not inspect ${paths.dir}: ${firstLine(error)}`);
+    return 1;
+  }
   if (!stat.isDirectory() || stat.isSymbolicLink() || !exists(paths.marker)) {
     deps.err(`refusing to delete ${paths.dir}: not a plain directory containing ${MARKER_FILE}`);
     return 1;

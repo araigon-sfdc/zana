@@ -94,7 +94,7 @@ describe('Design Docs RPC', () => {
       retry: vi.fn(async () => {}), revoke: vi.fn(async () => ({ configured: true })),
       remove: vi.fn(async () => { throw new Error('SDK peers.revoke unavailable'); }) };
     const handlers = createRpcHandlers({ store, changed: vi.fn(), sdk: {} as never, pairing: pairing as never });
-    expect(() => handlers.enablePeer!({ peerId: 'app', members: [] })).toThrow(/never a roster/);
+    expect(() => handlers.enablePeer!({ peerId: 'app', members: [] })).toThrow(/only peerId/);
     expect(() => handlers.enablePeer!({ peerId: 'app', scope: 'other' })).toThrow(/only peerId/);
     expect(() => handlers.enablePeer!({})).toThrow(/peerId/);
     await expect(handlers.enablePeer!({ peerId: 'app' })).resolves.toEqual({ configured: true });
@@ -102,6 +102,7 @@ describe('Design Docs RPC', () => {
     await expect(handlers.groupStatus!(undefined)).resolves.toEqual({ configured: false });
     await handlers.retryIntroductions!(undefined); expect(pairing.retry).toHaveBeenCalledOnce();
     await expect(handlers.removePeer!({ replicaId: 'replica' })).rejects.toThrow(/revoke unavailable/);
+    expect(() => handlers.removePeer!({ replicaId: 'replica', scope: 'other' })).toThrow(/only replicaId/);
     expect(() => handlers.revokePeer!({ peerId: 'app', scope: 'other' })).toThrow(/only peerId/);
     await expect(handlers.revokePeer!({ peerId: 'app' })).resolves.toEqual({ configured: true });
     expect(pairing.revoke).toHaveBeenCalledExactlyOnceWith('app');
@@ -580,7 +581,10 @@ describe('Design Docs invitation RPC handlers', () => {
     await expect(handlers.syncNow!(undefined)).resolves.toEqual({ attempted: 1, synced: 1, blocked: 0 });
     expect(pairing.notifyStateChanged).toHaveBeenCalledOnce();
     pairing.notifyStateChanged.mockRejectedValueOnce(new Error('peer down'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     await expect(handlers.syncNow!(undefined)).resolves.toMatchObject({ synced: 1 });
+    await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(expect.stringContaining('notification failed'), 'peer down'));
+    warn.mockRestore();
     const bare = createRpcHandlers({ store, changed: vi.fn(), sdk: { peers: {} } as never, peerSync: peerSync as never });
     await expect(bare.syncNow!(undefined)).resolves.toMatchObject({ synced: 1 });
   });

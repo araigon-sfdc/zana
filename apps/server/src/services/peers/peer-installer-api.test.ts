@@ -14,13 +14,13 @@ async function serve(ctx: Partial<ProductHttpContext>) {
     const path = new URL(request.url!, 'http://x').pathname;
     void handlePeerInstallerApi(request, response, ctx as ProductHttpContext, path, request.method!).then(handled => {
       if (!handled) { response.statusCode = 404; response.end('{"unhandled":true}'); }
-    });
+    }).catch(() => { response.statusCode = 500; response.end('{"error":"handler threw"}'); });
   });
   servers.push(server);
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  return async (path: string, method = 'GET', body?: string) => {
-    const response = await fetch(`${base}${path}`, { method, ...(body !== undefined ? { body, headers: { 'content-type': 'application/json' } } : {}) });
+  return async (path: string, method = 'GET', body?: string, extra: Record<string, string> = {}) => {
+    const response = await fetch(`${base}${path}`, { method, headers: { ...(body !== undefined ? { 'content-type': 'application/json' } : {}), ...extra }, ...(body !== undefined ? { body } : {}) });
     return { status: response.status, body: await response.json() as unknown };
   };
 }
@@ -106,4 +106,15 @@ it('manages the owner route-origin allowlist with validated bodies and allowlist
   const missing = await serve({});
   expect(await missing(path)).toEqual({ status: 503, body: { error: 'peer route origins unavailable' } });
   expect((await missing(path, 'PATCH')).status).toBe(405);
+});
+
+it('refuses mobile-proxied mutations but still serves reads', async () => {
+  const s = services(), call = await serve(s as never), mobile = { 'x-zcc-app-surface': 'mobile' };
+  expect((await call(`/api/v1/peers/introductions/${randomUUID()}/enroll`, 'POST', undefined, mobile)).status).toBe(403);
+  expect((await call(`/api/v1/peers/ssh-endpoints/${randomUUID()}`, 'DELETE', undefined, mobile)).status).toBe(403);
+  expect((await call('/api/v1/peers/ssh-endpoints', 'POST', '{}', mobile)).status).toBe(403);
+  expect((await call('/api/v1/peers/route-origins', 'POST', '{}', mobile)).status).toBe(403);
+  expect(s.peerInstaller.enroll).not.toHaveBeenCalled();
+  expect(s.peerSshEndpoints.remove).not.toHaveBeenCalled();
+  expect((await call('/api/v1/peers/installations', 'GET', undefined, mobile)).status).toBe(200);
 });

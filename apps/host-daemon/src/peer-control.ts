@@ -3,16 +3,18 @@ import { constants } from 'node:fs';
 import { open, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { PeerControlCommandSchema, PEER_CONTROL_ROUTE, PEER_CONTROL_MAX_BYTES } from '@zana-ai/zcc-contracts/host-rpc';
-import { createStoredLocalPeerControlResolver } from './peer-forward.js';
+import { createStoredLocalPeerControlResolver, ownedByCurrentUser } from './peer-forward.js';
 import { HostCommandError } from './host-command-error.js';
 
 const REGISTER_ROUTE = '/api/v1/peer-channel-register';
+const MAX_ACTIVE_CONTROL_REQUESTS = 4;
+const REGISTRATION_TIMEOUT_MS = 5000;
 const active = new Set<AbortController>();
 async function enrollmentToken(dataDir: string): Promise<string> {
   const file = await open(join(await realpath(dataDir), 'host-enroll.token'), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const info = await file.stat();
-    if (!info.isFile() || info.uid !== process.getuid?.() || (info.mode & 0o077) !== 0 || info.nlink !== 1 || info.size > 512) throw new Error('unsafe local app token');
+    if (!info.isFile() || !ownedByCurrentUser(info.uid) || (info.mode & 0o077) !== 0 || info.nlink !== 1 || info.size > 512) throw new Error('unsafe local app token');
     const bytes = Buffer.alloc(513); let length = 0;
     while (length < bytes.length) { const read = await file.read(bytes, length, bytes.length - length, null); if (!read.bytesRead) break; length += read.bytesRead; }
     if (length !== info.size) throw new Error('local app token changed');
@@ -44,7 +46,8 @@ export class PeerControlForwarder {
     this.remoteId = remoteId; this.capability = capability ?? 'peer.forward';
     if (!remoteId || !this.options.localAppDataDir || !this.linkCapable()) return;
     // Local app may start after its daemon. Forward retries registration before control dispatch.
-    try { await this.run(5000, async signal => { const target = await this.target(signal); await this.register(target, signal); }); } catch { /* unavailable stays fail-closed */ }
+    try { await this.run(REGISTRATION_TIMEOUT_MS, 'hello', async signal => { const target = await this.target(signal); await this.register(target, signal); }); }
+    catch { /* unavailable stays fail-closed; run() already logged the cause */ }
   }
   private async target(signal: AbortSignal): Promise<{ port: number; instanceId: string }> {
     signal.throwIfAborted();
@@ -89,7 +92,7 @@ export class PeerControlForwarder {
   }
   async forward(input: unknown): Promise<{ status: number; body: string }> {
     const command = PeerControlCommandSchema.parse(input);
-    return this.run(command.timeoutMs, async signal => {
+    return this.run(command.timeoutMs, 'forward', async signal => {
       const target = await this.target(signal);
       if (command.packet.senderId !== this.remoteId || command.packet.recipientId !== target.instanceId || command.packet.recipientHostId !== this.options.hostId) {
         throw new Error('peer control destination mismatch');
@@ -98,15 +101,19 @@ export class PeerControlForwarder {
       return this.post(target, PEER_CONTROL_ROUTE, command.packet, signal);
     });
   }
-  private async run<T>(timeoutMs: number, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
-    if (this.closed || active.size >= 4) throw new HostCommandError('peer_control_unavailable', 'peer control unavailable');
+  private async run<T>(timeoutMs: number, operation: string, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    if (this.closed || active.size >= MAX_ACTIVE_CONTROL_REQUESTS) throw new HostCommandError('peer_control_unavailable', 'peer control unavailable');
     const controller = new AbortController(); active.add(controller); this.controllers.add(controller);
     let complete!: () => void;
     const completion = new Promise<void>(resolve => { complete = resolve; });
     this.completions.add(completion);
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try { return await work(controller.signal); }
-    catch { throw new HostCommandError('peer_control_failed', 'peer control unavailable or not authorized'); }
+    catch (error) {
+      // Cause stays in the daemon log only; the peer sees the sanitized error.
+      console.warn(`[peer-control] ${operation} failed: ${error instanceof Error ? error.message : String(error)}`);
+      throw new HostCommandError('peer_control_failed', 'peer control unavailable or not authorized');
+    }
     finally {
       clearTimeout(timer); active.delete(controller); this.controllers.delete(controller);
       this.completions.delete(completion); complete();

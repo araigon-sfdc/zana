@@ -28,7 +28,8 @@ export class EnrolledPeerChannels {
     // Invalidate synchronous commit guards before the first disk await, including uncertain writes.
     if ((!this.generations.has(channel.remoteInstanceId) && this.generations.size >= 256) ||
       (!this.registrations.has(channel.remoteInstanceId) && this.registrations.size >= 256)) throw new Error('peer channel capacity exceeded');
-    this.generations.set(channel.remoteInstanceId, { hostId: channel.hostId, keyHash: channelHash(channel), capability: channel.capability });
+    const generation = { hostId: channel.hostId, keyHash: channelHash(channel), capability: channel.capability };
+    this.generations.set(channel.remoteInstanceId, generation);
     this.registrations.set(channel.remoteInstanceId, (this.registrations.get(channel.remoteInstanceId) ?? 0) + 1);
     try { await this.storage.transaction(async (state, save) => {
       if (channel.remoteInstanceId === state.instanceId) throw new Error('self peer enrollment');
@@ -36,7 +37,19 @@ export class EnrolledPeerChannels {
       if (previous) state.channels[state.channels.indexOf(previous)] = channel;
       else { if (state.channels.length >= 256) throw new Error('peer channel capacity exceeded'); state.channels.push(channel); }
       await save();
-    }); } catch (error) { this.generations.delete(channel.remoteInstanceId); throw error; }
+    }); } catch (error) {
+      // Only retract our own generation; a concurrent registration's generation stays. The failed write may or may
+      // not have landed, so re-read storage (the source of truth) rather than guessing the prior generation.
+      if (this.generations.get(channel.remoteInstanceId) === generation) {
+        this.generations.delete(channel.remoteInstanceId);
+        await this.storage.transaction(async state => {
+          const stored = state.channels.find(c => c.remoteInstanceId === channel.remoteInstanceId);
+          if (stored && !this.generations.has(channel.remoteInstanceId)) this.generations.set(channel.remoteInstanceId,
+            { hostId: stored.hostId, keyHash: channelHash(stored), capability: stored.capability });
+        }).catch(() => undefined);
+      }
+      throw error;
+    }
     finally {
       const count = this.registrations.get(channel.remoteInstanceId)! - 1;
       if (count) this.registrations.set(channel.remoteInstanceId, count); else this.registrations.delete(channel.remoteInstanceId);
@@ -50,14 +63,21 @@ export class EnrolledPeerChannels {
       return state.channels.find(c => c.remoteInstanceId === instanceId) ?? null;
     }); } catch (error) { this.generations.clear(); throw error; }
   }
-  /** Removes a channel only when it is exactly the given enrollment; a newer or foreign channel is left intact. */
+  /**
+   * Removes a channel only when it is exactly the given enrollment; a newer or foreign channel is left intact.
+   * Matching is by host id (fail-safe toward removal); an in-flight registration's newer generation is kept.
+   */
   async unregister(remoteInstanceId: string, hostId: string): Promise<boolean> {
     if (this.disposed) throw new Error('peer channels disposed');
     return this.storage.transaction(async (state, save) => {
       const index = state.channels.findIndex(c => c.remoteInstanceId === remoteInstanceId && c.hostId === hostId);
       if (index < 0) return false;
+      const keyHash = channelHash(state.channels[index]!);
       state.channels.splice(index, 1);
-      if (this.generations.get(remoteInstanceId)?.hostId === hostId) this.generations.delete(remoteInstanceId);
+      const generation = this.generations.get(remoteInstanceId);
+      if (generation?.hostId === hostId && (generation.keyHash === keyHash || !this.registrations.has(remoteInstanceId))) {
+        this.generations.delete(remoteInstanceId);
+      }
       await save();
       return true;
     });

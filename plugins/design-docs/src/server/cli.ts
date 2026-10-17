@@ -223,6 +223,11 @@ async function dispatch(deps: CliDeps, argv: string[], ctx: PluginCliContext): P
   const note = stringFlag(flags, 'note');
   const json = flags.json === true;
 
+  // Only the owner changes database sharing: an agent thread must not enable, remove or revoke peers, or start a sync.
+  if (caller.actor.kind === 'agent' && (verb === 'enable' || verb === 'remove-peer' || verb === 'revoke-peer' || verb === 'sync')) {
+    throw new DesignDocError('invalid', `${verb} is reserved for the owner and cannot be run by an agent`);
+  }
+
   switch (verb) {
     case 'peers':
     case 'enable':

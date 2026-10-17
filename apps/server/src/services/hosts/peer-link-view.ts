@@ -80,6 +80,11 @@ export type PeerLinkRemoval =
   | { status: 'not-found' }
   | { status: 'unavailable' };
 
+function unavailable(operation: string, hostId: string, error: unknown): { status: 'unavailable' } {
+  console.warn(`[zcc] peer link ${operation} failed for host ${hostId}: ${error instanceof Error ? error.message : String(error)}`);
+  return { status: 'unavailable' };
+}
+
 /** Only a live plugin link is addressable here; an execution host id is indistinguishable from a missing one. */
 function pluginLink(ctx: LinkCtx, hostId: string): HostRow | null {
   const host = getHost(ctx.db, hostId);
@@ -88,7 +93,7 @@ function pluginLink(ctx: LinkCtx, hostId: string): HostRow | null {
 
 async function teardownLink(ctx: LinkCtx, host: HostRow): Promise<PeerLinkRemoval> {
   // Cloud revocation precedes local deletion; a failure keeps the link visible for a retry.
-  try { await revokeConnectHost(ctx, host.id); } catch { return { status: 'unavailable' }; }
+  try { await revokeConnectHost(ctx, host.id); } catch (error) { return unavailable('revoke', host.id, error); }
   ctx.hostHub.getSession(host.id)?.socket.close(4003, 'host-removed');
   ctx.hostHub.detach(host.id, 'removed');
   ctx.joinCodes.invalidateHost(host.id);
@@ -110,7 +115,7 @@ export async function removePeerLinkUse(
   }
   const peer = ctx.peerLinkDirectory?.describe(hostId)?.peerInstanceId;
   let delegated: { linkRemoved: boolean } | undefined;
-  try { delegated = await ctx.peerLinkDirectory?.release?.(hostId, pluginId, scope); } catch { return { status: 'unavailable' }; }
+  try { delegated = await ctx.peerLinkDirectory?.release?.(hostId, pluginId, scope); } catch (error) { return unavailable('release', hostId, error); }
   if (peer) ctx.peerLinkNotes?.clearUse(pluginId, peer, scope);
   if (delegated) return { status: 'ok', linkRemoved: delegated.linkRemoved };
   if (removeHostLinkUse(ctx.db, hostId, pluginId, scope) > 0) return { status: 'ok', linkRemoved: false };
@@ -123,7 +128,7 @@ export async function removePeerLink(ctx: LinkCtx, hostId: string): Promise<Peer
   if (!host) return { status: 'not-found' };
   const peer = ctx.peerLinkDirectory?.describe(hostId)?.peerInstanceId;
   let delegated: { linkRemoved: true } | undefined;
-  try { delegated = await ctx.peerLinkDirectory?.remove?.(hostId); } catch { return { status: 'unavailable' }; }
+  try { delegated = await ctx.peerLinkDirectory?.remove?.(hostId); } catch (error) { return unavailable('remove', hostId, error); }
   if (peer) ctx.peerLinkNotes?.clearPeer(peer);
   if (delegated) return { status: 'ok', linkRemoved: true };
   return teardownLink(ctx, host);
@@ -140,7 +145,7 @@ export async function pausePeerLink(ctx: LinkCtx, hostId: string): Promise<PeerL
   try {
     const result = await ctx.peerLinkDirectory?.pause?.(hostId);
     return result ? { status: 'ok', paused: true } : { status: 'not-found' };
-  } catch { return { status: 'unavailable' }; }
+  } catch (error) { return unavailable('pause', hostId, error); }
 }
 
 /** Owner gesture: clear the pause and resume connecting. */
@@ -149,5 +154,5 @@ export async function resumePeerLink(ctx: LinkCtx, hostId: string): Promise<Peer
   try {
     const result = await ctx.peerLinkDirectory?.resume?.(hostId);
     return result ? { status: 'ok', paused: false } : { status: 'not-found' };
-  } catch { return { status: 'unavailable' }; }
+  } catch (error) { return unavailable('resume', hostId, error); }
 }
