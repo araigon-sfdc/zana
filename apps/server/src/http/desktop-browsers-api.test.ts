@@ -119,7 +119,7 @@ describe('handleDesktopBrowsersApi', () => {
     });
   });
 
-  it('creates a tab with a fresh automation profile UUID', async () => {
+  it('creates a tab on the thread-scoped automation profile', async () => {
     vi.mocked(getConversationThread).mockReturnValue({ id: SCOPE.threadId, projectId: 'p1' } as never);
     vi.mocked(getThreadTabs).mockReturnValue(null);
     vi.mocked(replaceThreadTabs).mockReturnValue({
@@ -154,13 +154,9 @@ describe('handleDesktopBrowsersApi', () => {
       command: expect.objectContaining({
         type: 'desktop.browser.create_tab',
         threadId: SCOPE.threadId,
-        profile: { kind: 'automation', id: expect.stringMatching(/^[0-9a-f-]{36}$/i) }
+        profile: { kind: 'automation', id: `thread:${SCOPE.threadId}` }
       })
     }));
-    const profileId = (callHostOnlineRpc.mock.calls[0]?.[0] as {
-      command: { profile: { id: string } };
-    }).command.profile.id;
-    expect(profileId).not.toBe(SCOPE.threadId);
   });
 
   it('lists import sources and imports cookies over HTTP', async () => {

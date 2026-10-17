@@ -57,7 +57,7 @@ import { resolveActivePlanTurn } from './conversation-timeline.js';
 import { emitDispatchOverrideAudit, emitPluginThreadEvent } from '../../plugins/thread-events.js';
 import { appendClientTurnRequested } from './client-turn-requested.js';
 import { recoverConversationProviderThreadId } from './conversation-provider-identity.js';
-import { destroyEnvironmentIfIdle } from '../environments/environment-cleanup.js';
+import { scheduleEnvironmentRetire } from '../environments/environment-cleanup.js';
 import { revokeThreadDesktopBrowserControl } from '../desktop-browsers.js';
 import {
   isUnknownThreadHostError,
@@ -685,7 +685,7 @@ async function archiveConversationInternal(
   });
   await archiveConversationOnHost(ctx, archived);
   if (!options.skipEnvironmentCleanup && thread.environmentId) {
-    await destroyEnvironmentIfIdle(ctx, thread.environmentId);
+    scheduleEnvironmentRetire(ctx, thread.environmentId);
   }
   return true;
 }

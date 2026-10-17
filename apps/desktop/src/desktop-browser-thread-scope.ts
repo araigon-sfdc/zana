@@ -57,11 +57,6 @@ export function pickLiveBrowserWindow<
   return live.find((win) => win.isFocused()) ?? live[0] ?? null;
 }
 
-export function browserPartitionForThread(threadId: string): string {
-  const safe = threadId.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 80) || 'thread';
-  return `persist:zcc-browser-${safe}`;
-}
-
 export function filterAutomationTargetsForThread(
   targets: readonly AutomationTargetRow[],
   threadByTarget: ReadonlyMap<string, string>,

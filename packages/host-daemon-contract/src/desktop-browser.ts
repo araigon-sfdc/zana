@@ -184,6 +184,16 @@ export type DesktopBrowserInstance = z.infer<
 export type DesktopBrowserTab = z.infer<typeof desktopBrowserTabSchema>;
 export type DesktopBrowserProfile = z.infer<typeof desktopBrowserProfileSchema>;
 
+/**
+ * Agent tabs in one thread share one persistent cookie jar, so a login
+ * survives app restarts and new tabs without leaking into other threads.
+ */
+export function automationProfileForThread(
+  threadId: string,
+): DesktopBrowserProfile {
+  return { kind: "automation", id: `thread:${threadId}`.slice(0, 256) };
+}
+
 export const DESKTOP_BROWSER_BROKER_DESCRIPTOR_FILE =
   "desktop-browser-broker.json";
 export const desktopBrowserBrokerDescriptorSchema = z

@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
   assertAutomationTargetThread,
-  browserPartitionForThread,
   filterAutomationTargetsForThread,
   forgetPendingAutomationTab,
   HIDDEN_AUTOMATION_VIEW_BOUNDS,
@@ -42,9 +41,7 @@ describe('desktop browser thread scope', () => {
     expect(() => assertAutomationTargetThread('browser-auto:a', owned, 'thr-1')).not.toThrow();
   });
 
-  it('mints a persist partition name for a later per-thread cookie jar', () => {
-    expect(browserPartitionForThread('thr/1')).toBe('persist:zcc-browser-thr_1');
-    expect(browserPartitionForThread('')).toBe('persist:zcc-browser-thread');
+  it('accepts any target when no thread scope is given', () => {
     expect(() =>
       assertAutomationTargetThread('browser-auto-missing', new Map(), undefined)
     ).not.toThrow();

@@ -155,7 +155,7 @@ describe('desktop browser leases', () => {
     }));
   });
 
-  it('mints a UUID automation profile instead of reusing the thread id', async () => {
+  it('reuses one namespaced automation profile per thread so agent logins persist', async () => {
     vi.mocked(getConversationThread).mockReturnValue({ id: SCOPE.threadId, projectId: 'p1' } as never);
     vi.mocked(getThreadTabs).mockReturnValue(null);
     vi.mocked(replaceThreadTabs).mockReturnValue({
@@ -169,13 +169,16 @@ describe('desktop browser leases', () => {
     }) => ({
       tab: tab({ tabId: input.command.tabId, profile: input.command.profile })
     }));
-    const result = await createDesktopBrowserTab(ctx(callHostOnlineRpc), {
+    const create = () => createDesktopBrowserTab(ctx(callHostOnlineRpc), {
       ...SCOPE,
       url: 'about:blank',
       presentation: 'hidden'
     });
-    expect(result.tab.profile.kind).toBe('automation');
-    expect(result.tab.profile.kind === 'automation' && result.tab.profile.id).not.toBe(SCOPE.threadId);
+    const first = await create();
+    const second = await create();
+    expect(first.tab.tabId).not.toBe(second.tab.tabId);
+    expect(first.tab.profile).toEqual({ kind: 'automation', id: `thread:${SCOPE.threadId}` });
+    expect(second.tab.profile).toEqual(first.tab.profile);
     expect(DESKTOP_BROWSER_MAX_LEASES).toBe(100);
   });
 

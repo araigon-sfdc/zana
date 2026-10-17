@@ -1,7 +1,7 @@
 import { assertDesktopPresentation, remoteInteractionSurface } from './threads/interaction-surface.js';
 import { randomUUID } from 'node:crypto';
 import { getConversationThread, getThreadTabs, replaceThreadTabs } from '@zana-ai/zcc-db';
-import type { DesktopBrowserTab } from '@zana-ai/zcc-host-daemon-contract';
+import { automationProfileForThread, type DesktopBrowserTab } from '@zana-ai/zcc-host-daemon-contract';
 import type { HostRpcCommand } from '@zana-ai/zcc-contracts/host-rpc';
 import {
   threadTabsSchema,
@@ -279,7 +279,7 @@ export async function createDesktopBrowserTab(
       tabId: `browser:${randomUUID()}`,
       url: input.url,
       presentation: input.presentation,
-      profile: { kind: 'automation', id: randomUUID() }
+      profile: automationProfileForThread(input.threadId)
     },
     15_000
   );

@@ -81,3 +81,22 @@ describe("desktop browser command boundaries", () => {
     ).toBe(true);
   });
 });
+
+describe("automationProfileForThread", () => {
+  it("namespaces one stable profile per thread within the id bound", async () => {
+    const { automationProfileForThread, desktopBrowserProfileSchema } =
+      await import("../src/desktop-browser.js");
+    expect(automationProfileForThread("thr-1")).toEqual({
+      kind: "automation",
+      id: "thread:thr-1",
+    });
+    expect(automationProfileForThread("thr-1")).toEqual(
+      automationProfileForThread("thr-1"),
+    );
+    expect(automationProfileForThread("thr-2")).not.toEqual(
+      automationProfileForThread("thr-1"),
+    );
+    const long = automationProfileForThread("x".repeat(256));
+    expect(desktopBrowserProfileSchema.safeParse(long).success).toBe(true);
+  });
+});
