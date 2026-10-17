@@ -6,6 +6,7 @@ import {
   updateThreadStatus,
   type ZccDatabase
 } from '@zana-ai/zcc-db';
+import type { WorkspaceStatus } from '@zana-ai/zcc-domain';
 import { isWithin } from '@zana-ai/zcc-path-confine';
 import type { ProductHttpContext } from '../../http/product-context.js';
 import { ThreadCreateError, threadView } from '../../http/thread-create.js';
@@ -35,6 +36,35 @@ async function closeDestroyedEnvironmentTerminals(
   }
 }
 
+/**
+ * Automatic cleanup must not discard work. A managed worktree is kept when it
+ * has uncommitted or untracked changes, or when the host cannot confirm it is
+ * clean (offline, or an untracked scan that is not fresh). An explicit
+ * destroy still removes it.
+ */
+async function worktreeMayHoldUnsavedWork(
+  ctx: ProductHttpContext,
+  environment: NonNullable<ReturnType<typeof getEnvironment>>
+): Promise<boolean> {
+  if (environment.workspaceProvisionType !== 'managed-worktree' || !environment.path) return false;
+  let status: WorkspaceStatus;
+  try {
+    status = await ctx.hostHub.callHostOnlineRpc<WorkspaceStatus>({
+      hostId: environment.hostId,
+      command: {
+        type: 'workspace.status',
+        workspacePath: environment.path,
+        workspaceProvisionType: environment.workspaceProvisionType
+      }
+    });
+  } catch {
+    return true;
+  }
+  if (!status.isGitRepo) return false;
+  if (status.dirty) return true;
+  return status.untracked !== undefined && status.untracked.state !== 'fresh';
+}
+
 export async function destroyEnvironmentIfIdle(ctx: ProductHttpContext, environmentId: string): Promise<void> {
   const environment = getEnvironment(ctx.db, environmentId);
   if (!environment) return;
@@ -42,10 +72,51 @@ export async function destroyEnvironmentIfIdle(ctx: ProductHttpContext, environm
   if (countLiveCliSessionsForEnvironment(ctx, environmentId) > 0) return;
   if (!environment.managed || environment.status === 'destroyed') return;
   try {
+    if (await worktreeMayHoldUnsavedWork(ctx, environment)) return;
     await destroyEnvironment(ctx, environmentId);
   } catch {
     // Last-session cleanup is best-effort; a host blip must not block archive/close.
   }
+}
+
+/**
+ * Same default as BB's retire grace: a thread resumed or un-archived within
+ * this window keeps its environment, because the idle check runs again when
+ * the timer fires.
+ */
+export const ENVIRONMENT_RETIRE_GRACE_MS = 5 * 60_000;
+
+// Keyed by the store, which is shared by every view of one server context.
+const retireTimers = new WeakMap<object, Map<string, ReturnType<typeof setTimeout>>>();
+
+export function scheduleEnvironmentRetire(
+  ctx: ProductHttpContext,
+  environmentId: string,
+  delayMs = ENVIRONMENT_RETIRE_GRACE_MS
+): void {
+  let timers = retireTimers.get(ctx.db);
+  if (!timers) {
+    timers = new Map();
+    retireTimers.set(ctx.db, timers);
+  }
+  clearTimeout(timers.get(environmentId));
+  const pending = timers;
+  const timer = setTimeout(() => {
+    pending.delete(environmentId);
+    destroyEnvironmentIfIdle(ctx, environmentId).catch(() => {
+      // The store may already be closed during shutdown; the worktree stays.
+    });
+  }, delayMs);
+  timer.unref?.();
+  timers.set(environmentId, timer);
+}
+
+/** Pending retires are dropped on shutdown; their worktrees stay on disk. */
+export function disposeEnvironmentRetireTimers(ctx: Pick<ProductHttpContext, 'db'>): void {
+  const timers = retireTimers.get(ctx.db);
+  if (!timers) return;
+  for (const timer of timers.values()) clearTimeout(timer);
+  retireTimers.delete(ctx.db);
 }
 
 function countLiveCliSessionsForEnvironment(ctx: ProductHttpContext, environmentId: string): number {
@@ -105,6 +176,6 @@ export async function archiveThread(ctx: ProductHttpContext, threadId: string): 
   } catch {
     // Host may already have dropped the PTY (exit, disconnect). Archive anyway.
   }
-  if (thread.environmentId) await destroyEnvironmentIfIdle(ctx, thread.environmentId);
+  if (thread.environmentId) scheduleEnvironmentRetire(ctx, thread.environmentId);
   return true;
 }

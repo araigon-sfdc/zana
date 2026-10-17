@@ -126,7 +126,7 @@ import {
   overlayCustomModels,
   type ThreadModelLoadErrorCode
 } from '../services/threads/thread-execution-options.js';
-import { archiveThread, destroyEnvironment, destroyEnvironmentIfIdle } from '../services/environments/environment-cleanup.js';
+import { archiveThread, destroyEnvironment, scheduleEnvironmentRetire } from '../services/environments/environment-cleanup.js';
 import { clearConversationGoal, renameConversationOnHost } from '../services/threads/thread-host-commands.js';
 import { editConversationMessage } from '../services/threads/conversation-edit-message.js';
 import {
@@ -3592,7 +3592,7 @@ export async function handleProductHttp(
         ctx.terminalSessions.set(session.id, session);
         ctx.hub.emit('terminals:updated', publicTerminal(session));
         if (session.workspaceEnvironmentId) {
-          await destroyEnvironmentIfIdle(ctx, session.workspaceEnvironmentId);
+          scheduleEnvironmentRetire(ctx, session.workspaceEnvironmentId);
         }
         sendJson(response, 200, { ok: true });
       } catch (error) {

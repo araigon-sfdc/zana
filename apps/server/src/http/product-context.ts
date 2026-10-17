@@ -49,6 +49,7 @@ import { HOST_ACTIVE_WORK_DISCONNECT_GRACE_MS } from '../services/threads/conver
 import { retryDueConversationSends, wakeLapsedEditHolds } from '../services/threads/conversation-deferred-messages.js';
 import { startDeferredRetryLoop } from '../services/threads/deferred-retry-loop.js';
 import { disposeLocalHostDaemon } from '../services/hosts/host-relaunch.js';
+import { disposeEnvironmentRetireTimers } from '../services/environments/environment-cleanup.js';
 import { createHostHubRemoteEnvironment, type RemoteEnvironmentService } from '../services/hosts/remote-environment.js';
 import { startConversationHistoryMaintenance } from '../services/threads/conversation-history-maintenance.js';
 import { PersistentTerminalSessions } from './persistent-terminal-sessions.js';
@@ -406,6 +407,7 @@ export function createProductHttpContext(
     dispose: () => {
       closeThreadReads(dataDir); closeQueuedMessages(dataDir);
       disposePreviews(ctx);
+      disposeEnvironmentRetireTimers(ctx);
       stopHistoryMaintenance();
       ctx.cliCallbacks?.dispose();
       stopRetries();

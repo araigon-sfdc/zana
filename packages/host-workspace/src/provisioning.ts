@@ -10,11 +10,16 @@ import { gitChildEnv } from './git-env.js';
 import {
   detectGitRepo,
   discoverWorkspace,
+  defaultBranchRelation,
+  getGitCommonDir,
   hasDeclaredSubmodules,
   pathExists,
+  readDefaultBranch,
+  readOriginDefaultBranch,
   revParse,
   runGit
 } from './git.js';
+import { withGitRefMutationLock } from './git-ref-mutation-lock.js';
 import { WorkspaceError } from './error.js';
 import { withCheckoutMutationLock } from './checkout-mutation-lock.js';
 import { withWorktreeMetadataLock } from './worktree-metadata-lock.js';
@@ -75,6 +80,79 @@ async function runSetupScript(
   emit(onProgress, { type: 'step', key: 'setup', text: `${ENV_SETUP_SCRIPT_NAME} completed`, status: 'completed' });
 }
 
+const BASE_FETCH_TIMEOUT_MS = 15_000;
+
+async function fetchRemoteBranch(
+  sourcePath: string,
+  remote: string,
+  branch: string,
+  onProgress: CreateWorktreeArgs['onProgress']
+): Promise<void> {
+  const ref = `${remote}/${branch}`;
+  emit(onProgress, { type: 'step', key: 'fetch', text: `Fetching ${ref}`, status: 'started' });
+  const commonDir = await getGitCommonDir(sourcePath);
+  const result = await withGitRefMutationLock(commonDir, () =>
+    runGit(sourcePath, ['fetch', '--quiet', remote, `+refs/heads/${branch}:refs/remotes/${ref}`], {
+      allowFail: true,
+      timeoutMs: BASE_FETCH_TIMEOUT_MS,
+      extraEnv: { GIT_TERMINAL_PROMPT: '0' }
+    })
+  );
+  // Offline or unauthenticated: continue from the last fetched remote ref.
+  emit(onProgress, {
+    type: 'step',
+    key: 'fetch',
+    text: result.code === 0 ? `Fetched ${ref}` : `Could not fetch ${ref}; using local refs`,
+    status: 'completed'
+  });
+}
+
+/** Splits `remote/branch` when it names a configured remote; local branches return null. */
+async function parseRemoteBranch(
+  sourcePath: string,
+  baseBranch: string
+): Promise<{ remote: string; branch: string } | null> {
+  const remotes = (await runGit(sourcePath, ['remote'], { allowFail: true })).stdout.split('\n').filter(Boolean);
+  // Longest match first so `team/fork` wins over `team` for `team/fork/main`.
+  const remote = remotes
+    .filter((name) => baseBranch.startsWith(`${name}/`) && baseBranch.length > name.length + 1)
+    .sort((a, b) => b.length - a.length)[0];
+  if (!remote) return null;
+  if (await revParse(sourcePath, `refs/heads/${baseBranch}`)) return null;
+  return { remote, branch: baseBranch.slice(remote.length + 1) };
+}
+
+/**
+ * Picks the commit a new managed worktree starts from. An explicit base that
+ * resolves wins; a remote-tracking base (`origin/feature`) is fetched first.
+ * Otherwise use the default branch, preferring a freshly
+ * fetched origin copy unless the local branch has commits origin lacks.
+ * HEAD is the last resort, e.g. a repository with no default branch.
+ */
+export async function resolveWorktreeStartPoint(
+  sourcePath: string,
+  baseBranch: string | null,
+  onProgress?: CreateWorktreeArgs['onProgress']
+): Promise<string> {
+  if (baseBranch) {
+    const remoteBase = await parseRemoteBranch(sourcePath, baseBranch);
+    if (remoteBase) await fetchRemoteBranch(sourcePath, remoteBase.remote, remoteBase.branch, onProgress);
+    if (await revParse(sourcePath, baseBranch)) return baseBranch;
+  }
+  const originDefault = await readOriginDefaultBranch(sourcePath);
+  if (originDefault) {
+    await fetchRemoteBranch(sourcePath, 'origin', originDefault, onProgress);
+    const originRef = `origin/${originDefault}`;
+    if (await revParse(sourcePath, `refs/remotes/${originRef}`)) {
+      const relation = await defaultBranchRelation(sourcePath, originDefault, originDefault);
+      if (relation !== 'local-ahead' && relation !== 'diverged') return originRef;
+    }
+  }
+  const localDefault = await readDefaultBranch(sourcePath);
+  if (localDefault && (await revParse(sourcePath, `refs/heads/${localDefault}`))) return localDefault;
+  return 'HEAD';
+}
+
 export async function createWorktree(args: CreateWorktreeArgs): Promise<{ path: string }> {
   const { sourcePath, targetPath, branchName, baseBranch } = args;
   if (!(await detectGitRepo(sourcePath))) {
@@ -95,7 +173,7 @@ export async function createWorktree(args: CreateWorktreeArgs): Promise<{ path: 
     throw new WorkspaceError('target_exists', `worktree target already exists: ${targetPath}`);
   }
 
-  const startPoint = baseBranch && (await revParse(sourcePath, baseBranch)) ? baseBranch : 'HEAD';
+  const startPoint = await resolveWorktreeStartPoint(sourcePath, baseBranch, args.onProgress);
   emit(args.onProgress, { type: 'step', key: 'worktree', text: `Creating worktree on ${branchName}`, status: 'started' });
   await mkdir(dirname(targetPath), { recursive: true, mode: 0o700 });
   // Lock order: checkout mutation, then worktree metadata.
