@@ -1,6 +1,6 @@
 # Plan: remove the legacy shared-token relays
 
-Status: step 1 desktop and build side done (2026-10-17); its Heroku front-door cleanup, step 2 and the remaining step 3 docs are pending. Opened 2026-10-17 for 2.3.6.
+Status: steps 1 and 2 desktop side done, with the step 3 phone docs (2026-10-17). The Heroku cleanup for both steps and the release note are pending. Opened 2026-10-17 for 2.3.6.
 
 Zana Connect now handles phone access, previews and machine enrollment, with a separate credential for each account and server. Two older relays are still in the tree. Both authenticate with **one shared token**:
 
@@ -39,16 +39,17 @@ Desktop and build side done. Without Zana Connect every remote now joins through
 
 ### 2. Phone relay (`MOBILE_RELAY_TOKEN`, `mode: 'relay'`)
 
-- Remove `mode: 'relay'` from `apps/server/src/mobile/connection.ts`, along with its migration of the previous token. Remove the relay branch in `manager.ts` and the related wiring in `apps/desktop/src/host.ts`. Saved relay connections should load as `unconfigured` and ask the user to sign in to Zana Connect.
-- Delete `scripts/mobile-serve.ts` and the `mobile:serve` script, `website/relay/mobile-routing.mjs` and its test, `services/mobile-relay/start.mjs`, `app.json` and `Procfile`, and the server-only parts of `services/mobile-relay/server.mjs` that Connect does not use.
-- Remove `e2e/phone-heroku-relay.live.spec.ts`. Check `e2e/fixtures/mobile-relay-service.ts` and `e2e/mobile-relay-upload.spec.ts` against what Connect still needs.
+Desktop side done. A saved `mode: 'relay'` connection loads as `unconfigured`, and `validateMobileConnection` rejects it with a Zana Connect sign-in message. `MobileGatewayManager.configure`, the `mobile.configure` IPC channel and its preload/contract entries are gone, since Connect enrollment uses enroll and redeem. The gateway always starts behind the Connect tunnel and pairs only through the account service. Deleted: `scripts/mobile-serve.ts` and the `mobile:serve` script, `services/mobile-relay/start.mjs`, `Procfile`, `app.json`, `Dockerfile`, `package.json`, `package-lock.json`, `e2e/phone-heroku-relay.live.spec.ts` and `e2e/fixtures/mobile-relay-service.ts`. `e2e/phone-network-connections.spec.ts` now checks the saved-relay fallback. `services/mobile-relay/server.mjs` stays: it is the in-process test peer for `client.mjs` (unit tests and `e2e/mobile-relay-upload.spec.ts`), and `website/scripts/sync-mobile-relay.mjs` still copies it into the front door. Still open: the Heroku bullets below, plus `website/README.md`'s reference to the deleted live spec.
+
+- Done: remove `mode: 'relay'` from `apps/server/src/mobile/connection.ts`, along with its migration of the previous token. Remove the relay branch in `manager.ts` and the related wiring in `apps/desktop/src/host.ts`. Saved relay connections should load as `unconfigured` and ask the user to sign in to Zana Connect.
+- **Heroku front door.** Delete `website/relay/mobile-routing.mjs` and its test, and stop syncing `server.mjs` into `website/relay/mobile/` once the front door no longer serves the one-computer relay.
 - Unset `MOBILE_RELAY_TOKEN` and `MOBILE_RELAY_PUBLIC_URL` on Heroku.
 
 ### 3. Docs
 
 - Done: `docs/multiple-devices.md`: delete "Legacy machine relay reachability". Make sure "Other ways to connect a machine" describes only Zana Connect, the SSH tunnel and copy-paste join. Mirror these changes in `website/content/docs/multiple-devices.md`.
-- `docs/mobile-app.md`: delete "Legacy relay development utility" and "Heroku relay". Shorten "Retired connection methods" and "Previously saved connections" to a one-line upgrade note.
-- `services/mobile-relay/README.md`: describe only what Connect uses.
+- Done: `docs/mobile-app.md`: delete "Legacy relay development utility" and "Heroku relay". Shorten "Retired connection methods" and "Previously saved connections" to a one-line upgrade note.
+- Done: `services/mobile-relay/README.md`: describe only what Connect uses.
 - Add release notes saying that saved phone relay connections need a Zana Connect sign-in.
 
 ## Order and verification

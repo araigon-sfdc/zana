@@ -7,9 +7,9 @@ import { MobileDeviceStore } from './device-store.js';
 import type { startMobileGateway } from './gateway.js';
 import { MobileConnectionStore } from './connection.js';
 
-const relayConfig = { mode: 'relay' as const, publicUrl: 'https://relay.example', relayToken: 'a'.repeat(43) };
+const connectConfig = { mode: 'connect' as const, publicUrl: 'https://computer.example', relayToken: 'a'.repeat(43), accountUrl: 'https://account.example', serverId: 'computer-1' };
 function remoteManager(deps: MobileGatewayManagerDeps) {
-  const store = new MobileConnectionStore(); void store.write(relayConfig);
+  const store = new MobileConnectionStore(); void store.write(connectConfig);
   return new MobileGatewayManager({ connectionStore: store, connectRelay: () => ({ state: () => 'connected', close: vi.fn() }), ...deps });
 }
 
@@ -49,14 +49,14 @@ describe('MobileGatewayManager', () => {
     const status = await manager.start();
     expect(status).toEqual({
       running: true,
-      publicUrl: 'https://relay.example',
+      publicUrl: 'https://computer.example',
       host: '127.0.0.1',
       port: 8785,
       boundLan: false,
       error: null,
       distribution: { testFlightUrl: null },
       readySessions: [],
-      connection: { mode: 'relay', publicUrl: 'https://relay.example', hasRelayToken: true },
+      connection: { mode: 'connect', publicUrl: 'https://computer.example', hasRelayToken: true, accountUrl: 'https://account.example' },
       relayState: 'connected'
     });
     await manager.start();
@@ -78,26 +78,27 @@ describe('MobileGatewayManager', () => {
       throw Object.assign(new Error('listen EADDRINUSE'), { code: 'EADDRINUSE' });
     }) as unknown as typeof startMobileGateway;
     const manager = make(start);
-    await expect(manager.start()).rejects.toThrow(/already in use.*mobile:serve/s);
+    await expect(manager.start()).rejects.toThrow(/already in use by another process/);
     expect(manager.status().running).toBe(false);
     expect(manager.status().error).toMatch(/already in use/);
   });
 
-  it('delegates pair/devices/revoke to the handle while running', async () => {
+  it('only pairs through Zana Connect, never the gateway handle', async () => {
     const handle = fakeHandle();
-    const manager = make((async () => handle) as unknown as typeof startMobileGateway);
+    const store = new MobileConnectionStore(); await store.write(connectConfig);
+    const manager = remoteManager({ devices: new MobileDeviceStore(), upstream: 'http://127.0.0.1:8780', connectionStore: store,
+      startGateway: (async () => handle) as unknown as typeof startMobileGateway });
     await manager.start();
-    expect(manager.pair().code).toBe('code');
-    expect(manager.devices()).toHaveLength(1);
-    expect(manager.revoke('d1')).toBe(true);
-    expect(handle.pair).toHaveBeenCalled();
-    expect(handle.revoke).toHaveBeenCalledWith('d1');
+    vi.spyOn(store, 'read').mockReturnValue({ mode: 'unconfigured' });
+    expect(() => manager.pair()).toThrow('before pairing a device');
+    expect(handle.pair).not.toHaveBeenCalled();
+    await manager.close();
   });
 
   it('rejects pairing while stopped but still reads/revokes devices from the store', async () => {
     const devices = new MobileDeviceStore();
     const added = devices.add('Phone');
-    const manager = remoteManager({
+    const manager = new MobileGatewayManager({
       devices,
       upstream: 'http://127.0.0.1:8780',
       startGateway: (async () => fakeHandle()) as unknown as typeof startMobileGateway
@@ -137,53 +138,49 @@ describe('remote phone connection lifecycle', () => {
       expect(startGateway).not.toHaveBeenCalled();
     } finally { await manager.close(); rmSync(dir, { recursive: true, force: true }); }
   });
-  it('allows replacing damaged configuration without preserving an unreadable secret', async () => {
-    const store = new MobileConnectionStore();
-    const read = vi.spyOn(store, 'read').mockImplementation(() => { throw new Error('damaged file'); });
-    const manager = remoteManager({ devices: new MobileDeviceStore(), upstream: 'http://127.0.0.1:8780', connectionStore: store });
-    expect(manager.status().error).toContain('Could not read');
-    await expect(manager.configure({ mode: 'relay', publicUrl: 'https://relay.example' }, false)).rejects.toThrow('relay secret');
-    await manager.configure(relayConfig, false);
-    read.mockRestore();
-    expect(manager.status().connection?.mode).toBe('relay');
+  it('loads a saved Heroku relay connection as unconfigured and stays offline until Connect sign-in', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'retired-relay-connection-'));
+    const file = join(dir, 'connection.json');
+    writeFileSync(file, JSON.stringify({ mode: 'relay', publicUrl: 'https://relay.example', relayToken: 'r'.repeat(43) }));
+    const startGateway = vi.fn(async () => fakeHandle());
+    const manager = new MobileGatewayManager({ devices: new MobileDeviceStore(), connectionStore: new MobileConnectionStore(file), upstream: 'http://127.0.0.1:8780',
+      startGateway: startGateway as unknown as typeof startMobileGateway });
+    try {
+      expect(manager.status()).toMatchObject({ running: false, error: null, connection: { mode: 'unconfigured', hasRelayToken: false } });
+      expect(JSON.stringify(manager.status())).not.toContain('r'.repeat(43));
+      await expect(manager.start()).rejects.toThrow('Remote access');
+      expect(startGateway).not.toHaveBeenCalled();
+    } finally { await manager.close(); rmSync(dir, { recursive: true, force: true }); }
   });
-  it('rejects switching an active tunnel to local access without disturbing it', async () => {
-    const handle = fakeHandle(); const start = vi.fn(async () => handle);
-    const manager = remoteManager({ devices: new MobileDeviceStore(), upstream: 'http://127.0.0.1:8780', startGateway: start });
-    await manager.start();
-    await expect(manager.configure({ mode: 'local' }, true)).rejects.toThrow('Local-network');
-    expect(handle.close).not.toHaveBeenCalled();
-    expect(start).toHaveBeenLastCalledWith(expect.objectContaining({ host: '127.0.0.1', publicUrl: 'https://relay.example' }));
-    await manager.close();
-  });
-  it('starts and stops the outbound relay and gates pairing on tunnel readiness', async () => {
+  it('starts and stops the outbound Connect tunnel and gates pairing on tunnel readiness', async () => {
     let state: 'connecting' | 'connected' = 'connecting';
     const close = vi.fn();
     const connect = vi.fn(() => ({ state: () => state, close }));
-    const manager = remoteManager({ devices: new MobileDeviceStore(), upstream: 'http://127.0.0.1:8780', startGateway: (async () => fakeHandle()) as unknown as typeof startMobileGateway, connectRelay: connect });
-    await manager.configure({ mode: 'relay', publicUrl: 'https://relay.example', relayToken: 'a'.repeat(43) }, true);
+    const code = { version: 1, serverUrl: 'https://computer.example', code: 'c'.repeat(22), expiresAt: Date.now() + 60_000 };
+    const manager = remoteManager({ devices: new MobileDeviceStore(), upstream: 'http://127.0.0.1:8780', startGateway: (async () => fakeHandle()) as unknown as typeof startMobileGateway,
+      connectRelay: connect, connectFetch: vi.fn(async () => Response.json(code)) });
+    await manager.start();
+    expect(connect).toHaveBeenCalledWith(expect.objectContaining({ publicUrl: 'https://computer.example', token: 'a'.repeat(43), gatewayCredential: expect.any(String) }));
     expect(manager.status().relayState).toBe('connecting');
-    expect(() => manager.pair()).toThrow(/Wait for the relay/);
-    state = 'connected'; expect(manager.pair().code).toBe('code');
+    expect(() => manager.pair()).toThrow(/Wait for the Zana Connect tunnel/);
+    state = 'connected'; await expect(manager.pair()).resolves.toEqual(code);
     expect(JSON.stringify(manager.status())).not.toContain('a'.repeat(43));
     await manager.stop(); expect(close).toHaveBeenCalledOnce();
   });
-  it('serializes configure/start/stop and validates before disturbing an active connection', async () => {
+  it('serializes start/stop', async () => {
     const handle = fakeHandle();
     const start = vi.fn(async () => handle);
     const manager = remoteManager({ devices: new MobileDeviceStore(), upstream: 'http://127.0.0.1:8780', startGateway: start as unknown as typeof startMobileGateway });
     await Promise.all([manager.start(), manager.start()]);
     expect(start).toHaveBeenCalledOnce();
-    await expect(manager.configure({ mode: 'relay', publicUrl: 'http://bad' }, true)).rejects.toThrow();
-    expect(manager.status().running).toBe(true); expect(handle.close).not.toHaveBeenCalled();
-    await Promise.all([manager.configure({ mode: 'relay', publicUrl: 'https://relay.example', relayToken: 'a'.repeat(43) }, false), manager.stop()]);
-    expect(manager.status().running).toBe(false); expect(handle.close).toHaveBeenCalledOnce();
+    await Promise.all([manager.stop(), manager.start(), manager.stop()]);
+    expect(manager.status().running).toBe(false); expect(handle.close).toHaveBeenCalledTimes(2);
   });
   it('closes the gateway if creating the tunnel fails', async () => {
     const handle = fakeHandle();
     const manager = remoteManager({ devices: new MobileDeviceStore(), upstream: 'http://127.0.0.1:8780', startGateway: (async () => handle) as unknown as typeof startMobileGateway,
       connectRelay: () => { throw new Error('Unable to start relay'); } });
-    await expect(manager.configure({ mode: 'relay', publicUrl: 'https://relay.example', relayToken: 'a'.repeat(43) }, true)).rejects.toThrow('Unable to start relay');
+    await expect(manager.start()).rejects.toThrow('Unable to start relay');
     expect(handle.close).toHaveBeenCalledOnce(); expect(manager.status().running).toBe(false);
   });
 });

@@ -21,7 +21,7 @@ it('keeps enrollment credentials private, retries pending approvals and validate
   await expect(enrollment.start('https://example.com/path')).rejects.toThrow('origin');
   const bad = new ConnectEnrollment(vi.fn(async () => reply({ ...start(), verificationUrl: 'https://evil.com/connect/' })));
   await expect(bad.start(origin)).rejects.toThrow('Invalid enrollment');
-  expect(() => validateMobileConnection({ mode: 'connect', publicUrl: serverUrl, relayToken: enrolled.credential })).toThrow('Unknown');
+  expect(() => validateMobileConnection({ mode: 'connect', publicUrl: serverUrl, relayToken: enrolled.credential })).toThrow('Invalid Connect enrollment');
 });
 it('rejects redirects, malformed responses, errors and unbounded bodies', async () => {
   for (const result of [new Response('no', { status: 403 }), new Response('no', { status: 503 }), new Response('text'), reply([]), reply({ data: 'x'.repeat(262_145) })]) {
@@ -59,7 +59,7 @@ it('wires enrollment, a local capability, cloud pairing, device revocation and d
 
 it.each([401, 403, 503, 0])('recovers an already revoked computer but preserves credentials on transient errors (%s)', async status => {
   const store = new MobileConnectionStore();
-  const connection = validateMobileConnection({ mode: 'connect', accountUrl: origin, publicUrl: serverUrl, serverId: enrolled.serverId, relayToken: enrolled.credential }, undefined, true);
+  const connection = validateMobileConnection({ mode: 'connect', accountUrl: origin, publicUrl: serverUrl, serverId: enrolled.serverId, relayToken: enrolled.credential });
   await store.write(connection);
   const manager = new MobileGatewayManager({ devices: new MobileDeviceStore(), connectionStore: store, upstream: 'http://127.0.0.1:123', connectFetch: vi.fn(async () => {
     if (!status) throw new Error('Network unavailable');
@@ -77,7 +77,7 @@ it.each([401, 403, 503, 0])('recovers an already revoked computer but preserves 
 
 it('resolves only the enrolled computer browser address without exposing its credential', async () => {
   const store = new MobileConnectionStore();
-  const connection = validateMobileConnection({ mode: 'connect', accountUrl: origin, publicUrl: serverUrl, serverId: enrolled.serverId, relayToken: enrolled.credential }, undefined, true);
+  const connection = validateMobileConnection({ mode: 'connect', accountUrl: origin, publicUrl: serverUrl, serverId: enrolled.serverId, relayToken: enrolled.credential });
   let value: unknown = { servers: [{ id: 'another', browserUrl: 'https://another.example.com' }, { id: enrolled.serverId, serverUrl, browserUrl: 'https://mine.example.com' }] };
   const fetcher = vi.fn(async () => reply(value));
   const manager = new MobileGatewayManager({ devices: new MobileDeviceStore(), connectionStore: store, upstream: 'http://127.0.0.1:123', connectFetch: fetcher });

@@ -46,7 +46,7 @@ export class ConnectEnrollment {
       throw error;
     }
     if (result.accountUrl !== url.origin) throw new Error('Invalid Connect account');
-    return validateMobileConnection({ mode: 'connect', accountUrl: url.origin, serverId: result.serverId, publicUrl: result.serverUrl, relayToken: result.credential }, undefined, true);
+    return validateMobileConnection({ mode: 'connect', accountUrl: url.origin, serverId: result.serverId, publicUrl: result.serverUrl, relayToken: result.credential });
   }
   async start(address: unknown): Promise<EnrollmentView> {
     if (typeof address !== 'string' || address.length > 2048) throw new Error('Enter the Connect HTTPS address');
@@ -65,7 +65,7 @@ export class ConnectEnrollment {
     if (this.pending !== pending) throw new Error('Sign-in cancelled');
     if (result.pending === true) return null;
     if (result.accountUrl !== pending.origin) throw new Error('Invalid Connect account');
-    const value = validateMobileConnection({ mode: 'connect', accountUrl: pending.origin, serverId: result.serverId, publicUrl: result.serverUrl, relayToken: result.credential }, undefined, true);
+    const value = validateMobileConnection({ mode: 'connect', accountUrl: pending.origin, serverId: result.serverId, publicUrl: result.serverUrl, relayToken: result.credential });
     return value;
   }
 }

@@ -462,7 +462,6 @@ export interface CcApi {
     disconnectAccount(): Promise<void>;
     browserAddress(): Promise<string | null>;
     redeemComputerCode(address: string, code: string): Promise<void>;
-    configure(input: { mode: 'relay'; publicUrl?: string; relayToken?: string }): Promise<void>;
     status(): Promise<{
       running: boolean;
       publicUrl: string | null;
@@ -472,7 +471,7 @@ export interface CcApi {
       boundLan: boolean;
       /** Last start failure (e.g. port in use), else null. */
       error: string | null;
-      connection?: { mode: 'unconfigured' | 'relay' | 'connect'; publicUrl?: string; hasRelayToken: boolean; accountUrl?: string };
+      connection?: { mode: 'unconfigured' | 'connect'; publicUrl?: string; hasRelayToken: boolean; accountUrl?: string };
       relayState?: 'connecting' | 'connected' | 'reconnecting' | 'stopped';
       distribution?: { testFlightUrl: string | null };
       readySessions?: Array<{ id: string; label: string; platform: 'ios' | 'android'; appVersion: string; lastSeenAt: number }>;
