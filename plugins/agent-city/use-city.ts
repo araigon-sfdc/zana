@@ -26,8 +26,13 @@ export function useCityCanvas(root: RefObject<HTMLElement | null>, canvas: RefOb
     const draw = () => renderer.draw(latest.current.buildings, latest.current.selected, elapsed, moving(), latest.current.interior, latest.current.theme);
     const tick = (now: number) => {
       frame = 0;
-      if (disposed || !moving())
+      if (disposed)
         return;
+      if (!moving()) {
+        // A deferred media event must not leave the motion control stale after the loop stops.
+        setReduced(media.matches);
+        return;
+      }
       // Cap city drawing at 20fps, regardless of a 60/120Hz display.
       if (now - last >= 50) {
         elapsed += last ? Math.min(.1, (now - last) / 1000) : 0;
