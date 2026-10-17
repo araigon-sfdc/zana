@@ -164,6 +164,21 @@ test('Agent City adds the fourth Agents view, opens real work, reloads and falls
   await expect(city.locator('.city-label')).toHaveCount(plots.length);
   await search.fill('');
   expect(await city.locator('.city-label').evaluateAll((labels) => labels.map((el) => [el.getAttribute('data-project-id'), el.getAttribute('style')]))).toEqual(plots);
+  // Themes change only artwork: the same buildings stay labeled, inside the map and reachable.
+  const themePicker = city.getByLabel('City theme');
+  const classicFrame = await frame();
+  for (const [value, tagline] of [['sf', 'one city by the Bay'], ['zh', 'one city on the lake']]) {
+    await themePicker.selectOption(value);
+    await expect(city).toHaveAttribute('data-city-theme', value);
+    await expect(city.getByText(tagline)).toBeVisible();
+    await expect(city.locator('.city-label')).toHaveCount(plots.length);
+    await expect.poll(frame).not.toBe(classicFrame);
+    await expectBuildingsInsideMap();
+    await app.window.screenshot({ path: testInfo.outputPath(`city-theme-${value}.png`) });
+  }
+  await themePicker.selectOption('classic');
+  await expect(city).toHaveAttribute('data-city-theme', 'classic');
+  expect(await city.locator('.city-label').evaluateAll((labels) => labels.map((el) => [el.getAttribute('data-project-id'), el.getAttribute('style')]))).toEqual(plots);
   await city.getByRole('button', { name: /city-neighbor-9,/ }).click();
   await expect(city.getByRole('button', { name: 'Schedule board: City scheduled arrival' })).toBeVisible();
   await expect(city.getByRole('group', { name: 'Agents on this floor' }).getByRole('button')).toHaveCount(1);
