@@ -137,7 +137,7 @@ import {
   getProjectSettingsRoutePath,
   getThreadRoutePath
 } from './lib/route-paths.js';
-import { inspectAgentSession, inspectRouteProjectId } from './lib/inspect-session.js';
+import { inspectAgentSession, inspectRouteProjectId, inspectThread } from './lib/inspect-session.js';
 import { resolveFocusedProject } from './lib/focusedProject.js';
 
 function stayOnAgentsBoard(
@@ -564,7 +564,9 @@ function AppShell() {
       if (event.type !== 'thread-open' || event.file || event.terminal) return;
       if (typeof event.threadId !== 'string' || typeof event.projectId !== 'string') return;
       useUi.getState().enterProjectFocus(event.projectId);
-      navigateRef.current(`/projects/${event.projectId}/threads/${event.threadId}`);
+      // Replace any existing inspector instead of navigating underneath it,
+      // where its overlay would keep this thread's native browser hidden.
+      inspectThread(event.threadId, event.projectId, navigateRef.current);
     });
     const offModelCatalogChanged = product.threads.onModelCatalogChanged(({ hostId, providerId }) => {
       refreshThreadProviderModelsFromPush(hostId, providerId);
