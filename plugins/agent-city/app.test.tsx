@@ -2,8 +2,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import type { PluginAgentsViewProps } from '@zana-ai/zcc-plugin-sdk/app';
-const canvasHooks = vi.hoisted(() => ({ select: (_key: string) => {}, hover: (_key?: string) => {} }));
-vi.mock('./use-city.js', () => ({ useCityCanvas: (...args: any[]) => { canvasHooks.select = args[5]; canvasHooks.hover = args[7]; return { available: true, reduced: false, viewport: { width: 1120, height: 775 } }; } }));
+const canvasHooks = vi.hoisted(() => ({ select: (_key: string) => {}, hover: (_key?: string) => {}, theme: undefined as string | undefined }));
+vi.mock('./use-city.js', () => ({ useCityCanvas: (...args: any[]) => { canvasHooks.select = args[5]; canvasHooks.hover = args[7]; canvasHooks.theme = args[8]; return { available: true, reduced: false, viewport: { width: 1120, height: 775 } }; } }));
 import definition from './app.tsx';
 import { AgentCity } from './city-app.js';
 import server from './server.ts';
@@ -14,6 +14,24 @@ function data(n = 3): PluginAgentsViewProps {
     schedules: [{ key: 'schedule:s', title: 'Nightly review', projectId: 'p0', enabled: true, running: false, nextRunAt: null }], executions: [{ key: 'execution:j', projectId: 'p0', title: 'Review team', state: 'RUNNING', needsAttention: true }], includeScheduled: true, searchQuery: '', onInspect: vi.fn() };
 }
 describe('Agent City interactions', () => {
+  it('switches the city theme, restyles the map and keeps labels on the taller landmarks, saved per tab', () => {
+    const props = data(6); props.members = props.members.map((m) => ({ ...m, live: true }));
+    const view = render(<AgentCity {...props}/>);
+    const city = screen.getByTestId('agent-city'), picker = screen.getByLabelText('City theme') as HTMLSelectElement;
+    expect(city.getAttribute('data-city-theme')).toBe('classic'); expect(canvasHooks.theme).toBe('classic');
+    expect([...picker.options].map((o) => o.textContent)).toEqual(['Green city', 'San Francisco', 'Zürich']);
+    const top = () => parseFloat(screen.getByRole('button', { name: /Project 0,/ }).style.top);
+    const classic = top();
+    fireEvent.change(picker, { target: { value: 'sf' } });
+    expect(city.getAttribute('data-city-theme')).toBe('sf'); expect(canvasHooks.theme).toBe('sf');
+    expect(screen.getByText(/one city by the Bay/)).toBeTruthy(); expect(top()).not.toBe(classic);
+    fireEvent.change(picker, { target: { value: 'tokyo' } }); expect(city.getAttribute('data-city-theme')).toBe('sf');
+    fireEvent.change(picker, { target: { value: 'zh' } }); expect(screen.getByText(/one city on the lake/)).toBeTruthy();
+    view.unmount(); render(<AgentCity {...props}/>);
+    expect((screen.getByLabelText('City theme') as HTMLSelectElement).value).toBe('zh');
+    cleanup(); render(<AgentCity {...props} projectId="p0"/>);
+    expect((screen.getByLabelText('City theme') as HTMLSelectElement).value).toBe('classic');
+  });
   it('keeps actual population, plots and an open interior stable through search, while filtering and highlighting matches', () => {
     const props = data(6); props.members = props.members.map((m) => ({ ...m, live: true })); props.schedules = []; props.executions = [];
     props.population = { members: props.members, schedules: [], executions: props.executions };

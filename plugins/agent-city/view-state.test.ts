@@ -18,7 +18,7 @@ it('rejects malformed state, tolerates unavailable storage and repairs corrupt J
   for (const value of ['not json', '{}', 'x'.repeat(65537), JSON.stringify([null, [], ['x', null]])]) {
     sessionStorage.setItem(key, value); expect(readViewState('global')).toEqual(DEFAULT_VIEW);
   }
-  for (const bad of [{ selected: null }, { search: 'x'.repeat(501) }, { page: -1 }, { deskPage: .5 }, { floor: -1 }, { focusedKey: 4 }, { inside: 'true' }, { filter: 'invalid' }, { camera: null }, { camera: { zoom: '2', x: 0, y: 0 } }]) {
+  for (const bad of [{ selected: null }, { search: 'x'.repeat(501) }, { page: -1 }, { deskPage: .5 }, { floor: -1 }, { focusedKey: 4 }, { inside: 'true' }, { filter: 'invalid' }, { camera: null }, { camera: { zoom: '2', x: 0, y: 0 } }, { theme: 'tokyo' }, { theme: 3 }]) {
     sessionStorage.setItem(key, JSON.stringify([['global', { ...DEFAULT_VIEW, ...bad }]]));
     expect(readViewState('global')).toEqual(DEFAULT_VIEW);
   }
@@ -27,4 +27,12 @@ it('rejects malformed state, tolerates unavailable storage and repairs corrupt J
   expect(readViewState('global')).toEqual(DEFAULT_VIEW);
   vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('disabled'); });
   expect(() => saveViewState('global', DEFAULT_VIEW)).not.toThrow();
+});
+it('restores the chosen city theme per scope and upgrades snapshots saved before themes', () => {
+  saveViewState('global', { ...DEFAULT_VIEW, theme: 'zh' });
+  saveViewState('p', { ...DEFAULT_VIEW, theme: 'sf' });
+  expect(readViewState('global').theme).toBe('zh'); expect(readViewState('p').theme).toBe('sf');
+  const { theme: _theme, ...legacy } = { ...DEFAULT_VIEW, selected: 'p1' };
+  sessionStorage.setItem(key, JSON.stringify([['global', legacy]]));
+  expect(readViewState('global')).toMatchObject({ selected: 'p1', theme: 'classic' });
 });

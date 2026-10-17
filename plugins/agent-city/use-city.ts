@@ -2,10 +2,11 @@ import { useEffect, useRef, useState, type RefObject } from 'react';
 import { createCityRenderer } from './scene.js';
 import type { CityBuilding } from './model.js';
 import type { InteriorModel } from './interior.js';
+import type { CityTheme } from './themes.js';
 /** One animation loop per mounted view. No work while hidden, offscreen or paused. */
-export function useCityCanvas(root: RefObject<HTMLElement | null>, canvas: RefObject<HTMLCanvasElement | null>, buildings: CityBuilding[], selected: string, paused: boolean, onSelect: (key: string) => void, interior?: InteriorModel, onHover?: (key?: string) => void) {
-  const latest = useRef({ buildings, selected, paused, onSelect, interior, onHover });
-  latest.current = { buildings, selected, paused, onSelect, interior, onHover };
+export function useCityCanvas(root: RefObject<HTMLElement | null>, canvas: RefObject<HTMLCanvasElement | null>, buildings: CityBuilding[], selected: string, paused: boolean, onSelect: (key: string) => void, interior?: InteriorModel, onHover?: (key?: string) => void, theme: CityTheme = 'classic') {
+  const latest = useRef({ buildings, selected, paused, onSelect, interior, onHover, theme });
+  latest.current = { buildings, selected, paused, onSelect, interior, onHover, theme };
   const redraw = useRef<() => void>(() => { });
   const [viewport, setViewport] = useState({ width: 1120, height: 775 });
   const [available, setAvailable] = useState(true);
@@ -22,7 +23,7 @@ export function useCityCanvas(root: RefObject<HTMLElement | null>, canvas: RefOb
     const media = window.matchMedia('(prefers-reduced-motion: reduce)');
     let visible = true, frame = 0, last = 0, elapsed = 0, disposed = false;
     const moving = () => !latest.current.paused && !media.matches && visible && !document.hidden;
-    const draw = () => renderer.draw(latest.current.buildings, latest.current.selected, elapsed, moving(), latest.current.interior);
+    const draw = () => renderer.draw(latest.current.buildings, latest.current.selected, elapsed, moving(), latest.current.interior, latest.current.theme);
     const tick = (now: number) => {
       frame = 0;
       if (disposed || !moving())
@@ -94,6 +95,6 @@ export function useCityCanvas(root: RefObject<HTMLElement | null>, canvas: RefOb
       el.removeEventListener('pointerleave', unhover);
     };
   }, [canvas, root]);
-  useEffect(() => { redraw.current(); }, [buildings, selected, paused, interior]);
+  useEffect(() => { redraw.current(); }, [buildings, selected, paused, interior, theme]);
   return { available, reduced, viewport };
 }

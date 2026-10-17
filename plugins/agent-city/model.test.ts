@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { floors, buildingHeight, buildingForm, projectCity, cityBuildings, reconcileLots, gridPlot, cityLayout, projectPoint, labelPosition, nextRunLabel } from './model.js';
+import { floors, buildingHeight, roofHeight, buildingForm, projectCity, cityBuildings, reconcileLots, gridPlot, cityLayout, projectPoint, labelPosition, nextRunLabel } from './model.js';
 import type { PluginFleetMember } from '@zana-ai/zcc-plugin-sdk/app';
 const member = (projectId: string, status: PluginFleetMember['status'], live = true): PluginFleetMember => ({ key: status, kind: 'agent', title: status, projectId, status, live, scheduled: false, detail: status });
 describe('City model', () => {
@@ -36,12 +36,12 @@ describe('City model', () => {
       const projects = Array.from({ length: n }, (_, i) => ({ id: String(i), name: String(i) }));
       const city = projectCity({ projects, members: projects.flatMap((p, i) => Array.from({ length: [1, 3, 5][i % 3] }, () => member(p.id, 'idle'))), schedules: [], executions: [], searchQuery: '' });
       const buildings = cityBuildings(city, new Map());
-      for (const [width, height] of [[1120, 500], [300, 280]]) {
-        const layout = cityLayout(buildings, width, height);
+      for (const [width, height, theme] of [[1120, 500, 'classic'], [300, 280, 'classic'], [1120, 500, 'sf'], [300, 280, 'zh']] as const) {
+        const layout = cityLayout(buildings, width, height, theme);
         expect(layout.scale).toBeGreaterThan(0);
         for (const p of buildings) {
-          // House, office and tower roofs fit the viewport.
-          for (const z of [0, buildingHeight(p.count) + 40]) {
+          // House, office and tower roofs, and each theme's taller landmarks, fit the viewport.
+          for (const z of [0, roofHeight(p, theme) + 40]) {
             const [x, y] = projectPoint(p.u + p.w / 2, p.v + p.d / 2, z);
             expect(layout.x + x * layout.scale).toBeGreaterThan(0);
             expect(layout.x + x * layout.scale).toBeLessThan(width);
@@ -51,6 +51,15 @@ describe('City model', () => {
         }
       }
     }
+  });
+  it('raises each theme roof line above the green city and grows themed towers with their teams', () => {
+    for (const form of ['house', 'office', 'tower'] as const) for (const theme of ['sf', 'zh'] as const) {
+      const count = form === 'house' ? 1 : form === 'office' ? 3 : 12;
+      expect(roofHeight({ count, form }, theme)).toBeGreaterThan(roofHeight({ count, form }));
+    }
+    expect(roofHeight({ count: 7, form: 'tower' })).toBe(buildingHeight(7));
+    expect(roofHeight({ count: 30, form: 'tower' }, 'sf')).toBeGreaterThan(roofHeight({ count: 7, form: 'tower' }, 'sf'));
+    expect(roofHeight({ count: 30, form: 'tower' }, 'zh')).toBeGreaterThan(roofHeight({ count: 7, form: 'tower' }, 'zh'));
   });
   it('never revives empty projects from a name match or an execution summary', () => {
     const city = projectCity({ projects: ['match','member','schedule','job','empty'].map((id) => ({ id, name: id })), members: [member('member', 'idle')], schedules: [{ key: 's', title: 'match', projectId: 'schedule', enabled: true, nextRunAt: null, running: false }], executions: [{ key: 'j', title: 'match', projectId: 'job', state: 'RUNNING', needsAttention: false }], searchQuery: 'match' });
