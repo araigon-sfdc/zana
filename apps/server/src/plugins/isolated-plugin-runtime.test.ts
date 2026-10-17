@@ -186,7 +186,8 @@ it('applies and rewrites supported 24MiB Design Docs through production worker f
   const entry = pathToFileURL(fileURLToPath(new URL('../../../../e2e/fixtures/peer-design-docs-worker.ts', import.meta.url))).href;
   const source = `export { default } from ${JSON.stringify(entry)};`;
   // Sender fixture generation is not the commit under test; coverage adds heavy hashing overhead.
-  const a = await fixture(source, { heartbeatTimeoutMs: 10_000 }), b = await fixture(source);
+  // V8 coverage instrumentation in CI inflates worker heap past the 256MB production cap on 24MiB payloads.
+  const a = await fixture(source, { heartbeatTimeoutMs: 10_000, maxOldGenerationSizeMb: 1024 }), b = await fixture(source, { maxOldGenerationSizeMb: 1024 });
   await Promise.all([a.runtime.started, b.runtime.started]);
   const members = ['a', 'b'].map(name => ({ replicaId: `replica-${name}`, machineId: `machine-${name}`, sponsorReplicaId: null, joinedAt: 1 }));
   for (const [f, replicaId] of [[a, 'replica-a'], [b, 'replica-b']] as const) await f.rpc.get('configure')!({ scope: 'repo', replicaId, members });

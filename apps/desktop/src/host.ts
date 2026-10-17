@@ -7504,13 +7504,17 @@ const deepLinkRegistration = registerDeepLinkScheme({
 if (deepLinkRegistration === 'failed') logMainError('deepLink.register', `could not register ${deepLinkChannel.scheme}://`);
 // Subscribed once at module init, never in createWindow(). macOS delivers
 // `open-url` (possibly before ready); Windows/Linux deliver argv to the first
-// process (cold start) or to `second-instance` (lock holder; never emitted without the lock).
+// process (cold start) or to `second-instance` (lock holder).
 app.on('open-url', (event, url) => {
   event.preventDefault();
   deepLinks.submitOsLink(url);
 });
 deepLinks.submitArgv(process.argv.slice(1));
 if (!wantsSingleInstanceLock({ isPackaged: app.isPackaged, env: process.env })) {
+  app.on('second-instance', (_event, argv) => {
+    deepLinks.submitArgv(argv);
+    showMainWindow();
+  });
   app.whenReady().then(bootstrap);
 } else if (!app.requestSingleInstanceLock()) {
   app.quit();

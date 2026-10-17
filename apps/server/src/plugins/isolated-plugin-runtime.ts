@@ -21,7 +21,7 @@ export function resolvePluginWorkerExecArgv(entry: string, requireFn = createReq
 
 export function createIsolatedPluginRuntime(options: {
   api: ZccPluginApi; entry: string; generation: number; databasePath: string;
-  onFailure(error: Error): void; startupTimeoutMs?: number; heartbeatTimeoutMs?: number;
+  onFailure(error: Error): void; startupTimeoutMs?: number; heartbeatTimeoutMs?: number; maxOldGenerationSizeMb?: number;
 }) {
   if (active >= 64) throw new Error('Plugin worker capacity exceeded');
   const entry = workerEntry();
@@ -29,7 +29,7 @@ export function createIsolatedPluginRuntime(options: {
   // Encode without exposing filesystem access or authority from a caller's free text.
   // The proxy binds each function to this already authenticated API instance.
   let bridge!: ReturnType<typeof createPluginWorkerBridge>;
-  const worker = new Worker(entry, { execArgv, workerData: {}, resourceLimits: { maxOldGenerationSizeMb: 256, stackSizeMb: 4 } });
+  const worker = new Worker(entry, { execArgv, workerData: {}, resourceLimits: { maxOldGenerationSizeMb: options.maxOldGenerationSizeMb ?? 256, stackSizeMb: 4 } });
   active++;
   let termination: Promise<number> | undefined;
   const terminate = () => termination ??= worker.terminate();
