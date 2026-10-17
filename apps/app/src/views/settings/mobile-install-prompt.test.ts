@@ -6,3 +6,9 @@ it('bounds diagnostics and excludes arbitrary strings and invalid step values', 
   expect(prompt).toContain('Connection method: unknown');
   expect(prompt).not.toContain('secret.example');
 });
+
+it('names a recognized connection method', () => {
+  const prompt = mobileRecoveryPrompt({ step: 3, enabled: true, running: true, connectionMode: 'connect', hasInvitation: true, hasLivePhone: false });
+  expect(prompt).toContain('Setup step: 3/4');
+  expect(prompt).toContain('Connection method: connect.');
+});
