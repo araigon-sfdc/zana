@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { OrgSyncService, agentVersion, bareVersions, componentName, localLocator, manifest, newestVersions, packageDirectories, renameBundle } from '../lib/org-sync.js';
+import { OrgSyncService, agentReferences, agentVersion, bareVersions, componentName, localLocator, manifest, newestVersions, packageDirectories, renameBundle } from '../lib/org-sync.js';
 import { registerOrgSync } from '../lib/org-sync-rpc.js';
 import type { ExecSfOptions, PublicOrgView } from '../lib/types.js';
 import type { SyncJob } from '../lib/org-sync-contract.js';
@@ -36,11 +36,14 @@ function fixture() {
     'lwc/card/card.js': 'export default 2;',
   };
   const dates: Record<string, string> = { 'ApexClass:Same': '2026-01-01T00:00:00.000+0000', 'ApexClass:Edited': '2026-01-01T00:00:00.000+0000', 'ApexClass:Fresh': '2026-01-01T00:00:00.000Z', 'AiAuthoringBundle:Support_2': '2026-01-01T00:00:00.000Z', 'AiAuthoringBundle:Support_3': '2026-02-01T00:00:00.000Z', 'LightningComponentBundle:card': '2026-01-01T00:00:00.000Z' };
-  const folders: Record<string, string> = { ApexClass: 'classes', AiAuthoringBundle: 'aiAuthoringBundles', LightningComponentBundle: 'lwc', ApexTrigger: 'triggers' };
+  const folders: Record<string, string> = { ApexClass: 'classes', AiAuthoringBundle: 'aiAuthoringBundles', LightningComponentBundle: 'lwc', ApexTrigger: 'triggers', Flow: 'flows', GenAiPromptTemplate: 'genAiPromptTemplates' };
   const names = (type: string) => Object.keys(dates).filter(key => key.startsWith(`${type}:`)).map(key => key.slice(type.length + 1));
   const manifests: string[] = [];
   const execSf = vi.fn(async (args: string[], options?: ExecSfOptions) => {
-    if (args[0] === 'org') return ok([...names('AiAuthoringBundle').map(fullName => ({ fullName, lastModifiedDate: dates[`AiAuthoringBundle:${fullName}`], lastModifiedByName: 'Ada' })), { fullName: 'Managed_1', namespacePrefix: 'ns' }]);
+    if (args[0] === 'org') {
+      const type = args[args.indexOf('--metadata-type') + 1]!;
+      return ok([...names(type).map(fullName => ({ fullName, lastModifiedDate: dates[`${type}:${fullName}`], lastModifiedByName: 'Ada' })), { fullName: 'Managed_1', namespacePrefix: 'ns' }]);
+    }
     const xml = readFileSync(join(options!.cwd!, 'package.xml'), 'utf8');
     manifests.push(xml);
     const fileProperties: unknown[] = [];
@@ -60,9 +63,11 @@ function fixture() {
     return ok({ success: true, done: true, fileProperties, files: retrieved });
   });
   const query = vi.fn(async (soql: string) => {
-    const type = soql.match(/FROM (\w+)/)![1]!;
-    const field = type === 'LightningComponentBundle' ? 'DeveloperName' : 'Name';
-    return { done: true, records: names(type).map(name => ({ [field]: name, LastModifiedDate: dates[`${type}:${name}`], LastModifiedBy: { Name: 'Ada' } })) } as { done: boolean; nextRecordsUrl?: string; records: Array<Record<string, unknown>> };
+    const from = soql.match(/FROM (\w+)/)![1]!;
+    const type = from === 'FlowDefinitionView' ? 'Flow' : from;
+    const field = type === 'LightningComponentBundle' ? 'DeveloperName' : type === 'Flow' ? 'ApiName' : 'Name';
+    const only = soql.match(/IN \(([^)]*)\)/)?.[1]!.split(', ').map(name => name.slice(1, -1));
+    return { done: true, records: names(type).filter(name => !only || only.includes(name)).map(name => ({ [field]: name, LastModifiedDate: dates[`${type}:${name}`], LastModifiedBy: type === 'Flow' ? 'Ada' : { Name: 'Ada' } })) } as { done: boolean; nextRecordsUrl?: string; records: Array<Record<string, unknown>> };
   });
   const queryMore = vi.fn(async (_url: string) => ({ done: true, records: [] as Array<Record<string, unknown>> }));
   const stored = new Map<string, unknown>();
@@ -90,6 +95,9 @@ describe('fetch latest helpers', () => {
     expect(componentName('ApexClass', '9x.cls')).toBeNull();
     expect(componentName('LightningComponentBundle', 'card/__tests__/card.test.js')).toBe('card');
     expect(componentName('LightningComponentBundle', 'card')).toBeNull();
+    expect(componentName('Flow', 'Route.flow-meta.xml')).toBe('Route');
+    expect(componentName('GenAiPromptTemplate', 'Summarize.genAiPromptTemplate-meta.xml')).toBe('Summarize');
+    expect(agentReferences('target: "apex://A"\ntarget: "flow://F_1"\ntarget: "generatePromptResponse://P"\ntarget: "standardInvocableAction://sendEmail"\napex://A apex://9bad x://y')).toEqual(['ApexClass:A', 'Flow:F_1', 'GenAiPromptTemplate:P']);
     expect(agentVersion('Btnet_Agent_180')).toEqual({ base: 'Btnet_Agent', version: 180 });
     expect(agentVersion('Btnet_Agent')).toEqual({ base: 'Btnet_Agent', version: 0 });
     expect(manifest(['ApexClass:A', 'ApexClass:B', 'ApexTrigger:T'], '67.0')).toMatch(/<members>A<\/members>\n {4}<members>B<\/members>\n {4}<name>ApexClass<\/name>[\s\S]*<name>ApexTrigger<\/name>[\s\S]*<version>67.0<\/version>/);
@@ -255,9 +263,44 @@ describe('fetch latest', () => {
     expect(stored.get(`sf:project:p:sync::ApexClass`)).toBeUndefined();
   });
 
+  it('checks one agent with its newest org version and the Apex, Flows and prompt templates it calls', async () => {
+    const { service, root, query, dates, files } = fixture();
+    put(root, `${D}/aiAuthoringBundles/Support/Support.agent`, ['apex://Same', 'apex://Fresh', 'flow://Route', 'generatePromptResponse://Summarize', 'apex://Ghost', 'standardInvocableAction://sendEmail', 'apex://Same'].map(target => `target: "${target}"`).join('\n'));
+    dates['Flow:Route'] = '2026-01-03T00:00:00.000+0000';
+    dates['GenAiPromptTemplate:Summarize'] = '2026-01-04T00:00:00.000Z';
+    files['flows/Route.flow-meta.xml'] = '<Flow/>';
+    files['genAiPromptTemplates/Summarize.genAiPromptTemplate-meta.xml'] = '<Template/>';
+    const check = await service.checkAgent(root, 'Support');
+    // Support_2 is another local version, so it stays out; Support_3 is the newest org version.
+    expect(check.components.map(component => [component.key, component.state])).toEqual([
+      ['AiAuthoringBundle:Support_3', 'new'], ['GenAiPromptTemplate:Summarize', 'new'], ['Flow:Route', 'new'], ['ApexClass:Fresh', 'new'], ['ApexClass:Same', 'unknown'],
+    ]);
+    expect(check.agent).toEqual({ name: 'Support', current: [], missing: ['ApexClass:Ghost'] });
+    expect(query).toHaveBeenCalledWith(expect.stringContaining("FROM ApexClass WHERE NamespacePrefix = null AND Name IN ('Same', 'Fresh', 'Ghost')"), expect.objectContaining({ tooling: false }));
+    expect(query).toHaveBeenCalledWith("SELECT ApiName, LastModifiedDate, LastModifiedBy FROM FlowDefinitionView WHERE NamespacePrefix = null AND ApiName IN ('Route') ORDER BY ApiName", expect.anything());
+    expect(check.components.find(component => component.key === 'Flow:Route')).toMatchObject({ modifiedBy: 'Ada', modifiedAt: '2026-01-03T00:00:00.000Z' });
+
+    const { jobId } = await service.start(root, { components: ['ApexClass:Same', 'Flow:Route'], orgId: org.orgId });
+    const plan = await settle(service, root, jobId);
+    expect(plan.state === 'ready' && plan.files.map(file => [file.path, file.action])).toEqual([
+      [`${D}/flows/Route.flow-meta.xml`, 'create'], [`${D}/classes/Same.cls`, 'same'], [`${D}/classes/Same.cls-meta.xml`, 'same'],
+    ]);
+    await service.apply(root, jobId, {});
+    expect(read(root, `${D}/flows/Route.flow-meta.xml`)).toBe('<Flow/>');
+    const again = await service.checkAgent(root, 'Support');
+    expect(again.agent!.current.map(row => row.key)).toEqual(['ApexClass:Same', 'Flow:Route']);
+    expect(again.counts.current).toBe(2);
+    expect((await service.check(root, 'all')).components.map(component => component.key)).toContain('GenAiPromptTemplate:Summarize');
+
+    put(root, `${D}/aiAuthoringBundles/Bare/Bare.agent`, 'no actions');
+    expect((await service.checkAgent(root, 'Bare')).agent).toEqual({ name: 'Bare', current: [], missing: [] });
+    await expect(service.checkAgent(root, '../x')).rejects.toThrow('Choose an agent');
+    await expect(service.checkAgent(root, 'Nope')).rejects.toThrow('not in this project');
+  });
+
   it('validates selections, the org, concurrency and project ownership', async () => {
     const { service, root, execSf, connect } = fixture();
-    for (const components of [[], ['Flow:Main'], ['ApexClass:../x'], ['ApexClass:A:B'], [7], 'ApexClass:A']) {
+    for (const components of [[], ['Dashboard:Main'], ['ApexClass:../x'], ['ApexClass:A:B'], [7], 'ApexClass:A']) {
       await expect(service.start(root, { components })).rejects.toThrow(/Choose/);
     }
     await expect(service.start(root, { components: Array.from({ length: 5001 }, (_, index) => `ApexClass:C${index}`) })).rejects.toThrow('at most 5,000');
@@ -348,6 +391,7 @@ describe('fetch latest RPCs', () => {
     const handlers = new Map<string, (args: unknown) => unknown>();
     const service = {
       check: vi.fn(async () => ({ components: [] })),
+      checkAgent: vi.fn(async () => ({ components: [], agent: { name: 'Support' } })),
       start: vi.fn(async () => ({ jobId: 'j' })),
       status: vi.fn(async () => ({ state: 'running' })),
       diff: vi.fn(async () => ({ path: 'p' })),
@@ -359,6 +403,8 @@ describe('fetch latest RPCs', () => {
     const call = (name: string, args: unknown) => handlers.get(name)!(args);
     expect(await call('sync.check', {})).toEqual({ ok: true, data: { components: [], truncated: false } });
     expect(service.check).toHaveBeenCalledWith('/project', 'all');
+    expect(await call('sync.check', { agent: 'Support' })).toEqual({ ok: true, data: { components: [], agent: { name: 'Support' }, truncated: false } });
+    expect(service.checkAgent).toHaveBeenCalledWith('/project', 'Support');
     await expect(call('sync.check', { scope: 'flows' })).rejects.toThrow('Choose agentforce');
     const rows = [{ key: 'a', state: 'new' }, { key: 'b', state: 'changed' }, { key: 'c', state: 'changed' }];
     service.check.mockResolvedValue({ components: rows, truncated: false } as never);

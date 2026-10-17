@@ -12,7 +12,7 @@ export const WORKBENCH_ACTIONS = {
   'source.retrieve': ['agents.retrieve.start', 'org', 'Retrieve exact source: fullName, orgId'],
   'source.status': ['agents.retrieve.status', 'local', 'Poll retrieval: jobId'],
   'source.cancel': ['agents.retrieve.cancel', 'local', 'Cancel retrieval: jobId'],
-  'sync.check': ['sync.check', 'org', 'Compare org metadata with local source (Fetch latest): scope agentforce|apex|all. Lists changed, conflict, new, unknown and deleted components with full counts; optional states [..] and limit (agents default to 1000 rows)'],
+  'sync.check': ['sync.check', 'org', 'Compare org metadata with local source (Fetch latest): scope agentforce|apex|all, or agent <BundleName> for one local agent plus the Apex, Flows and prompt templates its actions call (adds agent.current and agent.missing). Lists changed, conflict, new, unknown and deleted components with full counts; optional states [..] and limit (agents default to 1000 rows)'],
   'sync.fetch': ['sync.fetch.start', 'org', 'Retrieve components into a private plan without touching the project: components ["Type:fullName"], orgId'],
   'sync.status': ['sync.fetch.status', 'local', 'Poll a fetch and read its file plan (same/update/create/conflict): jobId'],
   'sync.diff': ['sync.diff', 'local', 'Local and org text of one planned file: jobId, path'],

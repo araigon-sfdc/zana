@@ -4,8 +4,8 @@ import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { diffStats, lineDiff } from './line-diff.js';
 import { cliResult, removeTemp, retrieveInto, sourceApiVersion, tempProject, type RetrievedFile } from './org-retrieve.js';
 import {
-  SCOPE_TYPES, SYNC_FETCH_MAX, SYNC_TYPES,
-  type SyncCheck, type SyncComponent, type SyncDiff, type SyncJob, type SyncPlanFile, type SyncScope, type SyncState, type SyncType,
+  SCOPE_TYPES, SYNC_FETCH_MAX, SYNC_TYPES, TARGET_TYPES,
+  type SyncAgent, type SyncCheck, type SyncComponent, type SyncDiff, type SyncJob, type SyncPlanFile, type SyncScope, type SyncState, type SyncType,
 } from './org-sync-contract.js';
 import type { PublicOrgView, SalesforceDeps } from './types.js';
 
@@ -30,7 +30,20 @@ const LAYOUT: Record<SyncType, { folder: string; bundle: boolean; ext?: string }
   ApexClass: { folder: 'classes', bundle: false, ext: '.cls' },
   ApexTrigger: { folder: 'triggers', bundle: false, ext: '.trigger' },
   LightningComponentBundle: { folder: 'lwc', bundle: true },
+  Flow: { folder: 'flows', bundle: false, ext: '.flow' },
+  GenAiPromptTemplate: { folder: 'genAiPromptTemplates', bundle: false, ext: '.genAiPromptTemplate' },
 };
+/** Types only the Metadata API lists; the rest come from SOQL. */
+const LISTED = new Set<SyncType>(['AiAuthoringBundle', 'GenAiPromptTemplate']);
+/** How SOQL lists a type: the object, its name field, and whether `LastModifiedBy` is already the name. */
+const SOQL: Partial<Record<SyncType, { from: string; field: string; tooling?: boolean; byText?: boolean }>> = {
+  ApexClass: { from: 'ApexClass', field: 'Name' },
+  ApexTrigger: { from: 'ApexTrigger', field: 'Name' },
+  LightningComponentBundle: { from: 'LightningComponentBundle', field: 'DeveloperName', tooling: true },
+  Flow: { from: 'FlowDefinitionView', field: 'ApiName', byText: true },
+};
+/** Most components one agent check names per type, so its SOQL `IN` lists stay short. */
+const AGENT_REFS = 500;
 const NAME = /^[A-Za-z][A-Za-z0-9_]{0,254}$/;
 const VERSIONED = /^(.*?)_([1-9][0-9]*)$/;
 const BATCH = 1000;
@@ -47,6 +60,7 @@ type Mark = { at: string | null; files: Record<string, string> };
 type Marks = Record<string, Mark>;
 type OrgRow = { name: string; at: string | null; by: string | null };
 type Local = { folder: string };
+type Only = Map<SyncType, Set<string>>;
 type PlanEntry = SyncPlanFile & { source: string; target: string; localSha: string | null; orgSha: string };
 type Job = {
   root: string;
@@ -103,6 +117,16 @@ export function componentName(type: SyncType, rest: string): string | null {
   return NAME.test(bare) ? bare : null;
 }
 
+/** `Type:Name` keys of the components an agent script's actions call, in first-seen order. */
+export function agentReferences(source: string): string[] {
+  const keys = new Set<string>();
+  for (const [, scheme, name] of source.matchAll(/\b([A-Za-z]+):\/\/([A-Za-z][A-Za-z0-9_]*)/g)) {
+    const type = TARGET_TYPES[scheme!];
+    if (type && NAME.test(name!)) keys.add(`${type}:${name}`);
+  }
+  return [...keys];
+}
+
 /** Agent bundle versions are `<Agent>_<n>`; the bare name is the local working copy. */
 export function agentVersion(name: string): { base: string; version: number } {
   const match = name.match(VERSIONED);
@@ -153,32 +177,66 @@ export class OrgSyncService {
 
   async check(projectRoot: string, scope: SyncScope, signal?: AbortSignal): Promise<SyncCheck> {
     const root = await this.root(projectRoot);
-    const types = SCOPE_TYPES[scope];
     const org = await this.deps.connect();
-    const [local, listed] = await Promise.all([this.localIndex(root, types), Promise.all(types.map(type => this.list(type, org, signal)))]);
+    return this.compare(root, org, scope, SCOPE_TYPES[scope], undefined, signal);
+  }
+
+  /**
+   * One agent and what it depends on: the bundle, the newest org version of it when that is newer than every
+   * local version, and the Apex, Flows and prompt templates its actions call. References come from the local file.
+   */
+  async checkAgent(projectRoot: string, agent: string, signal?: AbortSignal): Promise<SyncCheck> {
+    if (!NAME.test(agent)) throw Error('Choose an agent bundle name.');
+    const root = await this.root(projectRoot);
+    const bundles = (await this.localIndex(root, ['AiAuthoringBundle'])).get('AiAuthoringBundle')!;
+    const local = bundles.get(agent);
+    if (!local) throw Error(`${agent} is not in this project. Open a local agent to fetch what it uses.`);
+    const source = (await readOptional(join(local.folder, agent, `${agent}.agent`)))?.toString('utf8') ?? '';
+    const org = await this.deps.connect();
+    const only: Only = new Map();
+    for (const key of agentReferences(source)) {
+      const [type, name] = key.split(':') as [SyncType, string];
+      const names = only.get(type) ?? new Set<string>();
+      if (names.size < AGENT_REFS) only.set(type, names.add(name));
+    }
+    only.set('AiAuthoringBundle', new Set([agent]));
+    return this.compare(root, org, 'all', SYNC_TYPES.filter(type => only.has(type)), only, signal, agent);
+  }
+
+  /** Org rows against local files and the last fetch. `only` narrows each type to names; `agent` also keeps its newest org version. */
+  private async compare(root: string, org: PublicOrgView, scope: SyncScope, types: readonly SyncType[], only: Only | undefined, signal: AbortSignal | undefined, agent?: string): Promise<SyncCheck> {
+    const [local, listed] = await Promise.all([this.localIndex(root, types), Promise.all(types.map(type => this.list(type, org, signal, only?.get(type))))]);
     const components: SyncComponent[] = [];
+    const current: SyncAgent['current'] = [];
     const counts: SyncCheck['counts'] = { changed: 0, conflict: 0, unknown: 0, new: 0, deleted: 0, current: 0 };
     const dates = new Map<string, string | null>();
+    const seen = new Set<string>();
     const add = (type: SyncType, row: OrgRow, state: SyncState, latest = false) => {
       counts[state]++;
       components.push({ key: `${type}:${row.name}`, type, fullName: row.name, state, modifiedAt: row.at, modifiedBy: row.by, ...(latest ? { latest } : {}) });
     };
     for (const [index, type] of types.entries()) {
-      const rows = listed[index]!;
       const marks = await this.marks(org.orgId, type);
       const here = local.get(type)!;
       const inOrg = new Set<string>();
-      const newest = type === 'AiAuthoringBundle' ? newestVersions(rows, here) : new Set<string>();
+      const newest = type === 'AiAuthoringBundle' ? newestVersions(listed[index]!, here) : new Set<string>();
+      const wanted = only?.get(type);
+      const base = agent === undefined ? undefined : agentVersion(agent).base;
+      const rows = listed[index]!.filter(row => !wanted || wanted.has(row.name) || (newest.has(row.name) && agentVersion(row.name).base === base));
       for (const row of rows) {
         inOrg.add(row.name);
+        seen.add(`${type}:${row.name}`);
         dates.set(`${type}:${row.name}`, row.at);
         const mark = marks[row.name];
         if (!here.has(row.name)) add(type, row, 'new', newest.has(row.name));
         else if (!mark) add(type, row, 'unknown');
-        else if (mark.at && row.at && Date.parse(row.at) <= Date.parse(mark.at)) counts.current++;
+        else if (mark.at && row.at && Date.parse(row.at) <= Date.parse(mark.at)) {
+          counts.current++;
+          if (only) current.push({ key: `${type}:${row.name}`, type, fullName: row.name, modifiedAt: row.at, modifiedBy: row.by });
+        }
         else add(type, row, await locallyChanged(root, mark) ? 'conflict' : 'changed');
       }
-      for (const name of Object.keys(marks)) if (!inOrg.has(name) && here.has(name)) add(type, { name, at: null, by: null }, 'deleted');
+      for (const name of Object.keys(marks)) if (!inOrg.has(name) && here.has(name) && (!wanted || wanted.has(name))) add(type, { name, at: null, by: null }, 'deleted');
     }
     const key = `${root}\0${org.orgId}`;
     this.checks.delete(key);
@@ -186,7 +244,11 @@ export class OrgSyncService {
     while (this.checks.size > CHECK_CACHE) this.checks.delete(this.checks.keys().next().value!);
     const rank: Record<SyncState, number> = { conflict: 0, changed: 1, new: 2, unknown: 3, deleted: 4 };
     components.sort((a, b) => rank[a.state] - rank[b.state] || Number(b.latest ?? false) - Number(a.latest ?? false) || (b.modifiedAt ?? '').localeCompare(a.modifiedAt ?? '') || a.key.localeCompare(b.key));
-    return { org: { alias: org.alias, orgId: org.orgId }, scope, checkedAt: (this.deps.now ?? Date.now)(), components: components.slice(0, RESULT_ROWS), counts, truncated: components.length > RESULT_ROWS };
+    const result: SyncCheck = { org: { alias: org.alias, orgId: org.orgId }, scope, checkedAt: (this.deps.now ?? Date.now)(), components: components.slice(0, RESULT_ROWS), counts, truncated: components.length > RESULT_ROWS };
+    if (agent === undefined || !only) return result;
+    const missing = [...only].filter(([type]) => type !== 'AiAuthoringBundle')
+      .flatMap(([type, names]) => [...names].filter(name => !seen.has(`${type}:${name}`) && !local.get(type)!.has(name)).map(name => `${type}:${name}`));
+    return { ...result, agent: { name: agent, current, missing } };
   }
 
   async start(projectRoot: string, input: unknown): Promise<{ jobId: string }> {
@@ -388,24 +450,28 @@ export class OrgSyncService {
     return index;
   }
 
-  private async list(type: SyncType, org: PublicOrgView, signal?: AbortSignal): Promise<OrgRow[]> {
-    if (type === 'AiAuthoringBundle') {
-      const rows = cliResult(await this.deps.execSf(['org', 'list', 'metadata', '--metadata-type', type, '--target-org', org.alias, '--json'], { timeoutMs: 60_000, signal }), 'Salesforce could not list agents. Check your org access and retry.');
+  private async list(type: SyncType, org: PublicOrgView, signal?: AbortSignal, names?: Set<string>): Promise<OrgRow[]> {
+    if (names && !names.size) return [];
+    if (LISTED.has(type)) {
+      const rows = cliResult(await this.deps.execSf(['org', 'list', 'metadata', '--metadata-type', type, '--target-org', org.alias, '--json'], { timeoutMs: 60_000, signal }), `Salesforce could not list ${type === 'AiAuthoringBundle' ? 'agents' : 'prompt templates'}. Check your org access and retry.`);
       return (Array.isArray(rows) ? rows : []).slice(0, LIST_ROWS).map(record)
         .filter(row => !row.namespacePrefix && row.manageableState !== 'installed' && typeof row.fullName === 'string' && NAME.test(row.fullName))
         .map(row => ({ name: String(row.fullName), at: iso(row.lastModifiedDate), by: typeof row.lastModifiedByName === 'string' ? row.lastModifiedByName : null }));
     }
     // SOQL takes seconds where listMetadata takes a minute on orgs with many managed classes.
-    const field = type === 'LightningComponentBundle' ? 'DeveloperName' : 'Name';
-    let page = await this.deps.query(`SELECT ${field}, LastModifiedDate, LastModifiedBy.Name FROM ${type} WHERE NamespacePrefix = null ORDER BY ${field}`, { tooling: type === 'LightningComponentBundle', signal });
+    const { from, field, tooling = false, byText = false } = SOQL[type]!;
+    const by = byText ? 'LastModifiedBy' : 'LastModifiedBy.Name';
+    // Names passed NAME, so they are safe inside the quoted IN list.
+    const filter = names ? ` AND ${field} IN (${[...names].map(name => `'${name}'`).join(', ')})` : '';
+    let page = await this.deps.query(`SELECT ${field}, LastModifiedDate, ${by} FROM ${from} WHERE NamespacePrefix = null${filter} ORDER BY ${field}`, { tooling, signal });
     const rows = [...(page.records ?? [])];
     while (!page.done && page.nextRecordsUrl && rows.length < LIST_ROWS) {
       page = await this.deps.queryMore(page.nextRecordsUrl, { signal });
       rows.push(...(page.records ?? []));
     }
     return rows.slice(0, LIST_ROWS).filter(row => typeof row[field] === 'string' && NAME.test(row[field] as string)).map(row => {
-      const by = record(row.LastModifiedBy).Name;
-      return { name: row[field] as string, at: iso(row.LastModifiedDate), by: typeof by === 'string' ? by : null };
+      const name = byText ? row.LastModifiedBy : record(row.LastModifiedBy).Name;
+      return { name: row[field] as string, at: iso(row.LastModifiedDate), by: typeof name === 'string' ? name : null };
     });
   }
 

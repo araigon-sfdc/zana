@@ -18,6 +18,7 @@ import { takeQueuedAgentScriptOpen } from './agent-script-open.js';
 import { focusKey, parseAgentforcePanelFocus, type StudioFocus } from './agentforce-panel-params.js';
 import { OrgPicker } from './OrgPicker.js';
 import { AgentScriptDocumentBar } from './AgentScriptDocumentBar.js';
+import { OrgSyncDialog } from './OrgSyncDialog.js';
 import {
   PLAYGROUND_ASSET_SRC,
   readDocumentTheme,
@@ -171,6 +172,9 @@ type AgentScriptPanelProps = {
   /** The open agent file, then null once the panel goes away. Pass a stable function. */
   onActivePath?: (path: string | null) => void;
 };
+/** `…/aiAuthoringBundles/Name/Name.agent` → `Name`; other files have no bundle to fetch. */
+export const bundleName = (path: string | null) => path?.match(/(?:^|\/)([A-Za-z][A-Za-z0-9_]*)\/\1\.agent$/)?.[1] ?? null;
+
 export function AgentScriptPanel(props: AgentScriptPanelProps) {
   useContextChangeRelay();
   const context = useZccContext();
@@ -566,6 +570,9 @@ function AgentScriptWorkspace(props: AgentScriptPanelProps) {
     setCompileState(current => current?.status === 'running' && current.path === path ? parseCompileReply(path, sha, reply) : current);
   }, [patch, pluginId, rpcArgs, threadId]);
 
+  const [fetchAgent, setFetchAgent] = useState<string | null>(null);
+  const syncCall = useCallback((method: string, args?: Record<string, unknown>) => callPluginRpc(pluginId, method, rpcArgs(args)), [pluginId, rpcArgs]);
+
   const [openingBuilder, setOpeningBuilder] = useState(false);
   const openInBuilder = useCallback(async () => {
     const path = activePathRef.current;
@@ -842,6 +849,7 @@ function AgentScriptWorkspace(props: AgentScriptPanelProps) {
   const stripOwnsWorkspace = layout !== 'legacy' && studio.tabs.length > 0;
   const followChip = layout !== 'legacy' && (driver || threadId || followPaused) ? <FollowChip driver={driver ?? (threadId ? 'this thread' : undefined)} paused={followPaused} onToggle={() => setFollowPaused(paused => !paused)} /> : undefined;
   const orgPicker = props.orgPicker !== false && <OrgPicker pluginId={pluginId} projectId={projectId} compact appearance="toolbar" />;
+  const activeBundle = bundleName(activePath);
   const documentBar = (
       <AgentScriptDocumentBar path={activePath} dirty={dirty} busy={busy} issues={issues}
         saveDisabled={saveDisabled} saveAsDisabled={!saveEnabled || busy || !playgroundReady || !activePath} panelOpen={tools.state.open}
@@ -854,7 +862,8 @@ function AgentScriptWorkspace(props: AgentScriptPanelProps) {
           ...(stripOwnsWorkspace ? {} : { onQuickOpen: () => setQuickOpen(true) }),
           onCompile: () => void compile(), compiling: compiled?.status === 'running',
           onPublish: () => openTool('release'),
-          onOpenInBuilder: () => void openInBuilder(), openingBuilder
+          onOpenInBuilder: () => void openInBuilder(), openingBuilder,
+          ...(activeBundle ? { onFetch: () => setFetchAgent(activeBundle) } : {})
         })} />
   );
   const workspaceActions = stripOwnsWorkspace ? <>
@@ -940,6 +949,7 @@ function AgentScriptWorkspace(props: AgentScriptPanelProps) {
       <style>{AGENTFORCE_STUDIO_STYLES}</style>
       <style>{AGENT_ACTION_STYLES}</style>
       {newAgentOpen && <NewAgentDialog pluginId={pluginId} projectId={projectId} onClose={() => setNewAgentOpen(false)} onCreated={async file => { await refreshFiles(); await openFile(file.path); openTool('files'); }} />}
+      {fetchAgent && <OrgSyncDialog call={syncCall} scope="agentforce" agent={fetchAgent} onClose={() => setFetchAgent(null)} />}
       {saveAsOpen && <SaveAgentDialog busy={busy} error={error} onClose={() => setSaveAsOpen(false)} onSave={path => {
         setBusy(true); setError(null);
         send.flushSave({ path, create: true });
