@@ -100,8 +100,12 @@ export const UNREADABLE_REPLY = 'the other computer sent a reply this computer c
 /** Owner-facing form of a stored protocol error: sentences pass through, JSON-looking dumps never do. */
 export function ownerText(text: string | null | undefined): string | null {
   if (!text) return null;
-  return /^\s*[[{]/.test(text) ? UNREADABLE_REPLY : text;
+  if (/^\s*[[{]/.test(text)) return UNREADABLE_REPLY;
+  // Core's wording for "no link to that computer": say what it means instead of the enrollment jargon.
+  return /^mutual (?:execution )?enrollment (?:unavailable|missing)$/i.test(text.trim()) ? NOT_CONNECTED : text;
 }
+/** Core could not verify the other computer because there is no live connection to it right now. */
+export const NOT_CONNECTED = 'waiting for the other computer to connect; there is no link to it right now';
 
 export function syncedWith(status: Pick<GroupStatus, 'configured' | 'members' | 'replicaId'>, peerId: string): boolean {
   return status.configured && status.members.some((member) => member.replicaId === status.replicaId) &&

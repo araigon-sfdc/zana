@@ -439,6 +439,20 @@ export class DesignDocPeerGroup {
     if (this.consent()?.peerId === peerId) this.db.prepare('UPDATE sync_group_control SET consent_json = NULL WHERE singleton = 1').run();
   }
 
+  /**
+   * Drop a setup with `peerId` that never froze a join (no admission request, no capacity transfer): nothing was sent that
+   * could still be admitted, so it can be abandoned safely. A frozen one is left alone. True when a setup was dropped.
+   */
+  discardUnfrozenSetup(peerId: string): boolean {
+    id.parse(peerId);
+    return this.db.transaction(() => {
+      const consent = this.consent();
+      if (!consent || consent.peerId !== peerId || consent.request || consent.capacity) return false;
+      this.db.prepare('UPDATE sync_group_control SET consent_json = NULL WHERE singleton = 1').run();
+      return true;
+    });
+  }
+
   retryJobs(): void { this.db.prepare(`UPDATE sync_group_jobs SET next_at = 0 WHERE ${OPEN}`).run(); }
 
   /**

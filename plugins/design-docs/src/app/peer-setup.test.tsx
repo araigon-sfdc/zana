@@ -1080,3 +1080,42 @@ describe('invitation pairing UI robustness', () => {
     }
   });
 });
+
+describe('setup pending with no connection', () => {
+  const orphan = { ...EMPTY, setup: { peerId: 'app-b', repoId: 'database', state: 'pending' as const, error: 'mutual enrollment unavailable' } };
+
+  it('says there is no connection, offers Cancel setup behind a confirm, and cancels per computer', async () => {
+    const cancelled = vi.fn(async () => ({ discarded: 1, status: EMPTY }));
+    const priorConfirm = window.confirm; const confirm = vi.fn(() => false); window.confirm = confirm;
+    try {
+      mount({ groupStatus: async () => orphan, resetPeerSync: cancelled });
+      expect(await screen.findByText('Setup pending: Unnamed computer: No connection to Unnamed computer. Cancel setup, or pair again.')).toBeTruthy();
+      expect(document.body.textContent).not.toMatch(/mutual enrollment/);
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel setup with Unnamed computer' }));
+      expect(confirm).toHaveBeenCalledWith('Cancel the unfinished setup with Unnamed computer? Nothing is deleted: documents and their history stay. You can pair with Unnamed computer again afterwards.');
+      expect(cancelled).not.toHaveBeenCalled();
+      confirm.mockReturnValue(true);
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel setup with Unnamed computer' }));
+      await waitFor(() => expect(cancelled).toHaveBeenCalledExactlyOnceWith({ peerId: 'app-b' }));
+      await waitFor(() => expect(screen.queryByText(/Setup pending/)).toBeNull());
+      expect(screen.queryByRole('button', { name: /Cancel setup/ })).toBeNull();
+    } finally { window.confirm = priorConfirm; }
+  });
+
+  it('with a live link the wording is a plain wait, still cancellable; a failed cancel is reported', async () => {
+    const priorConfirm = window.confirm; window.confirm = vi.fn(() => true);
+    try {
+      mount({ groupStatus: async () => orphan, inviteState: async () => view({ links: [lnk({ peerName: 'Laptop' })] }),
+        resetPeerSync: async () => { throw new Error('database lifecycle action already running'); } });
+      expect(await screen.findByText('Setup pending: Laptop: waiting for Laptop to connect; no link to this computer right now')).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel setup with Laptop' }));
+      expect((await screen.findByRole('alert')).textContent).toBe('database lifecycle action already running');
+    } finally { window.confirm = priorConfirm; }
+  });
+
+  it('a joining setup has no Cancel, and an unrelated reason keeps its own wording', async () => {
+    mount({ groupStatus: async () => ({ ...EMPTY, setup: { ...orphan.setup, state: 'joining' as const, error: null } }) });
+    await screen.findByText('Setup joining: Unnamed computer');
+    expect(screen.queryByRole('button', { name: /Cancel setup/ })).toBeNull();
+  });
+});

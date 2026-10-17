@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MAX_PERMANENT_JOB_ATTEMPTS, ownerText, stuckJob, UNREADABLE_REPLY } from './peer-group.js';
+import { MAX_PERMANENT_JOB_ATTEMPTS, NOT_CONNECTED, ownerText, stuckJob, UNREADABLE_REPLY } from './peer-group.js';
 
 describe('owner-facing peer job text', () => {
   it('passes sentences through and replaces JSON-looking dumps', () => {
@@ -9,6 +9,12 @@ describe('owner-facing peer job text', () => {
     expect(ownerText('peer offline')).toBe('peer offline');
     expect(ownerText('[\n  { "code": "invalid_type", "path": [] }\n]')).toBe(UNREADABLE_REPLY);
     expect(ownerText('  {"roster":null}')).toBe(UNREADABLE_REPLY);
+  });
+
+  it('replaces core enrollment jargon with what it means', () => {
+    for (const text of ['mutual enrollment unavailable', 'mutual execution enrollment unavailable', 'mutual enrollment missing']) expect(ownerText(text)).toBe(NOT_CONNECTED);
+    expect(NOT_CONNECTED).not.toMatch(/enrollment/);
+    expect(ownerText('mutual enrollment proof mismatch')).toBe('mutual enrollment proof mismatch');
   });
 
   it('only failed work or work blocked at the attempt cap counts as stuck', () => {

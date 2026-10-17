@@ -37,6 +37,10 @@ export function lifecycleReasonOf(error: unknown): PeerLifecycleReason {
 const isTransient = (error: unknown): boolean => error instanceof Error && error.message === TRANSIENT_PEER_ERROR;
 /** Cap for the follower's backoff between failed probes of an unreachable initiator. */
 const FOLLOWER_PROBE_MAX_MS = 5 * 60 * 1000;
+/** An unfrozen setup with a computer that has no link and no pairing under way is dropped after this long (and two looks). */
+const ORPHAN_SETUP_GRACE_MS = 60_000;
+/** A finished (cancelled, denied, expired, failed) pairing attempt stops being listed this long after it could last expire. */
+const STALE_ATTEMPT_MS = 10 * 60 * 1000;
 /** Repair's re-link tears down that link's connector; core lists the peer as enrolled again once it is re-established. */
 const RELINK_WAIT = { timeoutMs: 20_000, intervalMs: 500 };
 const ENROLLMENT_UNAVAILABLE = 'mutually enrolled peer unavailable';
@@ -176,13 +180,15 @@ export class DesignDocPairing {
   /** Initiator side: earliest next grant restore per member peer (bounded like `following`). */
   private readonly restoring = new Map<string, number>();
   private readonly dismissedInvites = new Set<string>();
+  /** The unfrozen setup whose peer has no link and no pairing under way, and since when (see `discardOrphanSetup`). */
+  private orphan: { peerId: string; since: number; ticks: number } | null = null;
 
   /**
    * `stateDigest` is an opaque, convergence-stable hash of the local database state; drift checks compare it and never see
    * content. `stateChanged` fires when a peer says its state moved (e.g. after its Sync Now) so the UI can re-check.
    */
   constructor(readonly group: DesignDocPeerGroup, private readonly peers: PluginSdkPeers,
-    private readonly hooks: { stateDigest?: () => string | null; stateChanged?: () => void; relinkWait?: { timeoutMs: number; intervalMs: number } } = {}) {}
+    private readonly hooks: { stateDigest?: () => string | null; stateChanged?: () => void; relinkWait?: { timeoutMs: number; intervalMs: number }; orphanGraceMs?: number } = {}) {}
 
   register(zcc: Pick<ZccPluginApi, 'onDispose'>): void {
     this.peers.handle('group-hello', async (request) => {
@@ -312,7 +318,11 @@ export class DesignDocPairing {
       if (!this.lastSnapshot) throw error;
       snapshot = this.lastSnapshot; stale = this.message(error);
     }
-    return { available: true, reason: null, invitations: snapshot?.list.filter((item) => !this.dismissedInvites.has(item.invitationId)).map(inviteItem) ?? [], links: snapshot?.links ?? [],
+    const now = Date.now();
+    // A finished attempt with no live purpose (no link to it, nothing pending) is history after a while, even if never dismissed.
+    const history = (item: PluginInvitationStatus) => !ACTIVE_INVITATION.has(item.state) && item.state !== 'ready' &&
+      Math.max(item.expiresAt, item.consentExpiresAt ?? 0) + STALE_ATTEMPT_MS < now;
+    return { available: true, reason: null, invitations: snapshot?.list.filter((item) => !this.dismissedInvites.has(item.invitationId) && !history(item)).map(inviteItem) ?? [], links: snapshot?.links ?? [],
       enableError: this.enableError ?? this.setupError, ...(stale ? { stale } : {}) };
   }
 
@@ -328,7 +338,8 @@ export class DesignDocPairing {
     const listed = await peers.listInvitations({ limit: INVITATION_LIST_LIMIT, signal });
     const list = await Promise.all(listed.map((item) => item.role === 'redeemer' && ACTIVE_INVITATION.has(item.state)
       ? peers.invitationStatus({ invitationId: item.invitationId, refresh: true, signal }).catch(() => item) : item));
-    const links = await peers.peerLinks({ signal }).catch(() => [] as PluginPeerLink[]);
+    let linksKnown = true;
+    const links = await peers.peerLinks({ signal }).catch(() => { linksKnown = false; return [] as PluginPeerLink[]; });
     this.trackOpenInvite(list);
     this.pairingKeys = new Map();
     for (const peer of pairedPeers(list, links)) this.pairingKeys.set(peer.peerId, peer.keys);
@@ -336,7 +347,7 @@ export class DesignDocPairing {
     this.lastSnapshot = snapshot;
     // Best effort and independent: a failure of one step (e.g. a re-key in flight) must not fail the read or skip the other, and is retried next tick.
     let failure: unknown = null;
-    for (const step of [() => this.autoEnable(list, links), () => this.restoreGrants(list, links)]) {
+    for (const step of [() => this.discardOrphanSetup(list, links, linksKnown), () => this.autoEnable(list, links), () => this.restoreGrants(list, links)]) {
       try { await step(); } catch (error) { this.abort.signal.throwIfAborted(); if (!isTransient(error)) failure = error; }
     }
     this.setupError = failure ? this.message(failure) : null;
@@ -524,6 +535,32 @@ export class DesignDocPairing {
     this.prepareRejoin(self, consent.peerId);
   }
 
+  /**
+   * A setup with a computer that has no link and no pairing under way can never finish: enabling needs core's mutual
+   * enrollment, which only a link provides. Left alone it shows "Setup pending" forever with nothing to press, and blocks a
+   * fresh pairing with another computer ("another database setup is pending"). Dropped here after a grace period (looked at
+   * on two consecutive reads and for `orphanGraceMs`) so a link about to come up is never raced. Never touches a frozen join,
+   * a live sync group, or documents. An unreadable link list means "unknown", never "none".
+   */
+  private discardOrphanSetup(list: PluginInvitationStatus[], links: PluginPeerLink[], linksKnown: boolean): void {
+    const consent = this.group.consent();
+    const orphaned = !!consent && linksKnown && !this.enabling && !this.revoking && consent.state === 'pending' && !consent.request && !consent.capacity &&
+      !this.group.liveRoster() &&
+      !links.some((link) => link.peerInstanceId === consent.peerId && link.phase !== 'removed' && link.phase !== 'failed') &&
+      !list.some((item) => ACTIVE_INVITATION.has(item.state) && item.peer?.instanceId === consent.peerId);
+    if (!orphaned) { this.orphan = null; return; }
+    const now = Date.now();
+    if (this.orphan?.peerId !== consent.peerId) this.orphan = { peerId: consent.peerId, since: now, ticks: 0 };
+    this.orphan.ticks++;
+    if (this.orphan.ticks < 2 || now - this.orphan.since < (this.hooks.orphanGraceMs ?? ORPHAN_SETUP_GRACE_MS)) return;
+    const peerId = consent.peerId;
+    this.orphan = null;
+    if (!this.group.discardUnfrozenSetup(peerId)) return;
+    // Its undelivered work is moot too, unless a sync group's history still owes the other computer a delivery.
+    const jobs = this.group.roster() ? 0 : this.group.resetPeer(peerId);
+    this.logOnce(`orphan:${peerId}`, `discarded the unfinished database setup with ${peerId}: no connection to it and no pairing under way (${jobs} stuck job(s) cleared)`);
+  }
+
   private async hasGrant(peerId: string, scope: string): Promise<boolean> {
     return this.grant(peerId, scope).then(() => true, () => false);
   }
@@ -635,7 +672,9 @@ export class DesignDocPairing {
     if (!id.safeParse(peerId).success) throw new PeerProtocolError('invalid', 'peerId is not a valid computer id');
     if (this.enabling || this.revoking) throw new PeerProtocolError('conflict', 'database lifecycle action already running');
     await this.running?.catch(() => {});
-    const discarded = this.group.resetPeer(peerId);
+    // A setup that can no longer finish (no link, or stuck) is dropped too; a frozen join is left for its original sponsor.
+    const discarded = this.group.resetPeer(peerId) + (this.group.discardUnfrozenSetup(peerId) ? 1 : 0);
+    this.orphan = null;
     this.logOnce(`reset:${peerId}:${discarded}`, `reset sync with ${peerId}: discarded ${discarded} undelivered job(s)`);
     this.disabledPeers.delete(peerId);
     await this.retry(true);

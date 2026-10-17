@@ -1842,3 +1842,97 @@ describe('readableError', () => {
     expect(readableError('text')).toBe('peer setup failed');
   });
 });
+
+describe('DD orphan setup (no link, no pairing under way)', () => {
+  /** A pending setup with b, then the link to b is gone: what remains after both owners removed the link. */
+  async function orphaned(hooks: ConstructorParameters<typeof DesignDocPairing>[2] = { orphanGraceMs: 0 }) {
+    const net = network(), a = net.app('a', hooks), b = net.app('b'); net.link(a, b);
+    await a.pairing.enable('b');
+    expect(a.group.consent()).toMatchObject({ peerId: 'b', state: 'pending' });
+    a.enrollment.delete('b');
+    return { net, a, b, mocks: withInvites(a, { list: [], links: [] }) };
+  }
+  const tick = async (a: InviteApp, times = 2) => { for (let i = 0; i < times; i++) await a.pairing.inviteState(); };
+
+  it('drops the unfinished setup after two looks and the grace period, and logs once', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { a } = await orphaned();
+      expect((await a.pairing.status()).setup).toMatchObject({ peerId: 'b', state: 'pending' });
+      await tick(a, 1);
+      expect(a.group.consent()).not.toBeNull();
+      await tick(a, 3);
+      expect(a.group.consent()).toBeNull();
+      expect((await a.pairing.status()).setup).toBeNull();
+      expect(warn.mock.calls.filter(([text]) => String(text).includes('discarded the unfinished database setup with b'))).toHaveLength(1);
+    } finally { warn.mockRestore(); }
+  });
+
+  it('waits out the default grace period so a link about to come up is not raced', async () => {
+    const { a } = await orphaned({});
+    await tick(a, 4);
+    expect(a.group.consent()).not.toBeNull();
+    vi.useFakeTimers({ now: Date.now() + 61_000, toFake: ['Date'] });
+    try { await tick(a, 1); } finally { vi.useRealTimers(); }
+    expect(a.group.consent()).toBeNull();
+  });
+
+  it('keeps the setup while a link, an unreadable link list, an active pairing or a frozen join exists', async () => {
+    const { a, mocks } = await orphaned();
+    mocks.peerLinks.mockResolvedValue([link()]);
+    await tick(a, 3); expect(a.group.consent()).not.toBeNull();
+    mocks.peerLinks.mockResolvedValue([link({ phase: 'pending', state: 'reconnecting' })]);
+    await tick(a, 3); expect(a.group.consent()).not.toBeNull();
+    mocks.peerLinks.mockRejectedValue(new Error('links down'));
+    await tick(a, 3); expect(a.group.consent()).not.toBeNull();
+    mocks.peerLinks.mockResolvedValue([]);
+    mocks.listInvitations.mockResolvedValue([invitation({ state: 'connecting', peer: { instanceId: 'b', name: 'b', fingerprint: 'F' } })]);
+    await tick(a, 3); expect(a.group.consent()).not.toBeNull();
+    mocks.listInvitations.mockResolvedValue([]);
+    a.db.prepare("UPDATE sync_group_control SET consent_json = json_set(consent_json, '$.request', json('{}')) WHERE singleton = 1").run();
+    await tick(a, 3); expect(a.group.consent()).not.toBeNull();
+  });
+
+  it('a link that returns during the grace period resets it', async () => {
+    const { a, mocks } = await orphaned({ orphanGraceMs: 60_000 });
+    await tick(a, 3);
+    mocks.peerLinks.mockResolvedValue([link()]);
+    await tick(a, 1);
+    mocks.peerLinks.mockResolvedValue([]);
+    vi.useFakeTimers({ now: Date.now() + 61_000, toFake: ['Date'] });
+    try { await tick(a, 1); expect(a.group.consent()).not.toBeNull(); } finally { vi.useRealTimers(); }
+  });
+
+  it('Reset sync (Cancel setup) drops an unfrozen setup now, refuses a frozen one, and pairing can start again', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { a } = await orphaned({});
+      a.db.prepare("UPDATE sync_group_control SET consent_json = json_set(consent_json, '$.request', json('{}')) WHERE singleton = 1").run();
+      await expect(a.pairing.resetPeer('b')).resolves.toMatchObject({ discarded: 0, status: { setup: { peerId: 'b' } } });
+      a.db.prepare("UPDATE sync_group_control SET consent_json = json_remove(consent_json, '$.request') WHERE singleton = 1").run();
+      await expect(a.pairing.resetPeer('b')).resolves.toMatchObject({ discarded: 1, status: { setup: null } });
+      expect(a.group.consent()).toBeNull();
+    } finally { warn.mockRestore(); }
+  });
+
+  it('leaves a live sync group and its documents alone', async () => {
+    const net = network(), a = net.app('a', { orphanGraceMs: 0 }), b = net.app('b'); await net.found(a, b);
+    withInvites(a, { list: [], links: [] });
+    a.db.prepare("UPDATE sync_group_control SET consent_json = ? WHERE singleton = 1").run(JSON.stringify({ peerId: 'c', repoId: a.group.roster()!.repoId, replicaId: 'r', requestId: 'q', state: 'pending', error: null }));
+    await tick(a, 3);
+    expect(a.group.consent()).not.toBeNull();
+    expect(a.group.liveRoster()).not.toBeNull();
+  });
+
+  it('shows finished attempts for a while, then hides them without a Dismiss', async () => {
+    const net = network(), a = net.app('a');
+    const old = invitation({ invitationId: 'old', state: 'cancelled', reason: 'cancelled', expiresAt: Date.now() - 11 * 60_000 });
+    const fresh = invitation({ invitationId: 'fresh', state: 'cancelled', reason: 'cancelled', expiresAt: Date.now() });
+    const oldReady = invitation({ invitationId: 'ready-old', state: 'ready', expiresAt: 1_000 });
+    withInvites(a, { list: [old, fresh, oldReady], links: [] });
+    expect((await a.pairing.inviteState()).invitations.map((item) => item.invitationId)).toEqual(['fresh', 'ready-old']);
+    // Dismiss is kept on the server, so a reload (a new inviteState) does not bring the row back.
+    await a.pairing.dismissInvitation('fresh');
+    expect((await a.pairing.inviteState()).invitations.map((item) => item.invitationId)).toEqual(['ready-old']);
+  });
+});

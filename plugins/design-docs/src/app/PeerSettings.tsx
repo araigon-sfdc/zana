@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
 import type { GroupStatus, PeerLifecycleReason, RepairResult } from '../shared/peer-group.js';
-import { ownerText, stuckJob, syncedWith } from '../shared/peer-group.js';
+import { NOT_CONNECTED, ownerText, stuckJob, syncedWith } from '../shared/peer-group.js';
 import { experimental_requestApproval, useRealtime, useZccDeepLinks, type PluginApprovalResult } from '@zana-ai/zcc-plugin-sdk/app';
 import { PEER_STATE_CHANNEL, PLUGIN_ID } from '../shared/contract.js';
 import { errorMessage, toast, useApi, type InviteItem, type InviteView, type PeerLink, type PeerStatus } from './api.js';
@@ -659,17 +659,33 @@ export function PeerSettings({ requestApproval = experimental_requestApproval, j
   // Work for another computer that stopped making progress; local-revoke rows target this computer's own grants.
   const stuckPeers = [...new Set(pendingJobs.filter((job) => stuckJob(job) && job.kind !== 'local-revoke')
     .map((job) => job.peerId))];
+  // An unfinished setup can be abandoned whatever its state, so it never sits there with nothing to press.
+  const setupPeer = status?.setup?.state === 'pending' ? status.setup.peerId : null;
+  const setupOnly = (id: string) => id === setupPeer && !stuckPeers.includes(id);
+  const resettable = setupPeer && setupOnly(setupPeer) ? [...stuckPeers, setupPeer] : stuckPeers;
   const resetComputer = (id: string) => {
     const name = nameOf(id);
-    if (!window.confirm(`Reset sync with ${name}? This discards this computer's undelivered sync work for ${name} only. Documents and their history are not deleted. Afterwards, use Repair on ${name}.`)) return;
+    const message = setupOnly(id)
+      ? `Cancel the unfinished setup with ${name}? Nothing is deleted: documents and their history stay. You can pair with ${name} again afterwards.`
+      : `Reset sync with ${name}? This discards this computer's undelivered sync work for ${name} only. Documents and their history are not deleted. Afterwards, use Repair on ${name}.`;
+    if (!window.confirm(message)) return;
+    const cancelling = setupOnly(id);
     setBusy(true);
     setError(null);
     void api.resetPeerSync(id).then((result) => {
       if (!mounted.current) return;
       setStatus(result.status);
-      toast(result.discarded ? `Discarded ${result.discarded} stuck ${result.discarded === 1 ? 'item' : 'items'} for ${name}` : `Nothing stuck for ${name}`);
+      toast(result.discarded ? (cancelling ? `Cancelled the setup with ${name}` : `Discarded ${result.discarded} stuck ${result.discarded === 1 ? 'item' : 'items'} for ${name}`) : `Nothing stuck for ${name}`);
     }).catch((failure) => { if (mounted.current) setError(errorMessage(failure)); })
       .finally(() => { if (mounted.current) { setBusy(false); loadInvites(); } });
+  };
+  // Why the setup waits, in owner words. Core's "no enrollment" error only means there is no link to that computer.
+  const setupReason = (setup: NonNullable<GroupStatus['setup']>): string => {
+    const reason = ownerText(setup.error);
+    if (setup.state !== 'pending' || (reason && reason !== NOT_CONNECTED)) return reason ? `: ${reason}` : '';
+    const name = nameOf(setup.peerId);
+    if (invites?.available && !links.some((link) => link.peerInstanceId === setup.peerId && isLiveLink(link))) return `: No connection to ${name}. Cancel setup, or pair again.`;
+    return reason ? `: waiting for ${name} to connect; no link to this computer right now` : '';
   };
   const computers = computersOf(links, status, names, invites?.invitations ?? []);
   return (
@@ -694,7 +710,7 @@ export function PeerSettings({ requestApproval = experimental_requestApproval, j
           <div className="dd-peers-block">
             {!status.configured ? <p>No sync group configured.</p> : null}
             {status.setup ? (
-              <p role="status">Setup {status.setup.state}: {nameOf(status.setup.peerId)}{status.setup.error ? `: ${ownerText(status.setup.error)}` : ''}</p>
+              <p role="status">Setup {status.setup.state}: {nameOf(status.setup.peerId)}{setupReason(status.setup)}</p>
             ) : null}
           </div>
           {pendingJobs.length ? (
@@ -704,10 +720,10 @@ export function PeerSettings({ requestApproval = experimental_requestApproval, j
               ))}
             </ul>
           ) : null}
-          {stuckPeers.length ? (
+          {resettable.length ? (
             <div className="dd-actions">
-              {stuckPeers.map((id) => (
-                <button key={id} type="button" className="btn" disabled={busy} onClick={() => resetComputer(id)}>Reset sync with {nameOf(id)}</button>
+              {resettable.map((id) => (
+                <button key={id} type="button" className="btn" disabled={busy} onClick={() => resetComputer(id)}>{setupOnly(id) ? 'Cancel setup with' : 'Reset sync with'} {nameOf(id)}</button>
               ))}
             </div>
           ) : null}
