@@ -38,14 +38,15 @@ environment without code changes — the same posture as the app.
 
 ## Deploy
 
-The Dockerfile builds Next standalone **and** runs the pairing front door
+The Dockerfile builds Next standalone **and** runs the front door
 (`node relay/front-door.mjs`). Next listens on container loopback; the front
-door binds `0.0.0.0:$PORT`. Pairing paths (`/install.sh`, enroll, host ws) are
-relayed only while a laptop is connected to `/_zcc/relay`. Set `ZCC_RELAY_TOKEN`
-in the platform config (never in the image). Official desktop releases inline
-the same origin (`ZCC_APP_URL`) and token at `electron-vite build` time — set
-GitHub secrets `ZCC_APP_URL` and `ZCC_RELAY_TOKEN` (never commit them). Local
-`pnpm run release:mac` still reads those env vars but does not publish.
+door binds `0.0.0.0:$PORT`, routes Zana Connect laptop hosts, and answers the
+retired machine-relay paths (`/_zcc/relay`, `/t/<id>`, `/install.sh`,
+`/install/*`, `/internal/hosts/*`, `/internal/plugins/*`) with `410` so they
+never reach Next. Machines pair through Zana Connect or an SSH tunnel. Official
+desktop releases inline the public origin (`ZCC_APP_URL`) at `electron-vite
+build` time — set the GitHub secret `ZCC_APP_URL` (never commit it). Local
+`pnpm run release:mac` still reads that env var but does not publish.
 
 `NEXT_PUBLIC_*` values are inlined at **build time**, so pass feed URLs as Docker
 build arguments rather than runtime environment variables. Set `PUBLIC_BASE_URL`
@@ -72,10 +73,10 @@ Build and run locally:
 ```bash
 cd website
 docker build --build-arg PUBLIC_BASE_URL=http://localhost:4321 -t zcc-web .
-docker run --rm -p 4321:4321 -e PORT=4321 -e ZCC_RELAY_TOKEN=dev \
+docker run --rm -p 4321:4321 -e PORT=4321 \
   -e PUBLIC_BASE_URL=https://zcc-7808c5bc8f3d.herokuapp.com zcc-web
 curl -sI http://127.0.0.1:4321/ | head -n1          # Next
-curl -sI http://127.0.0.1:4321/install.sh | head -n1 # 503 until a laptop is connected, not 308
+curl -sI http://127.0.0.1:4321/install.sh | head -n1 # 410 (retired relay path), not 308
 ```
 
 To publish to Heroku app `zcc`:
@@ -83,7 +84,7 @@ To publish to Heroku app `zcc`:
 ```bash
 cd website
 heroku container:login
-# Preserve the existing PUBLIC_BASE_URL and ZCC_RELAY_TOKEN runtime values.
+# Preserve the existing PUBLIC_BASE_URL and Connect runtime values.
 # Docker 29+ defaults to OCI media types that Heroku's registry rejects
 # (`error from registry: unsupported`). Force Docker schema 2 + gzip:
 docker buildx build --platform linux/amd64 --provenance=false --sbom=false \
@@ -98,64 +99,19 @@ process must stay `node relay/front-door.mjs`, not `node server.js`. The live
 Heroku hostname is `https://zcc-7808c5bc8f3d.herokuapp.com` (not
 `zcc.herokuapp.com`); the website's canonical origin remains `https://zana-ide.com`.
 
-### Mobile relay in this Docker app
+### Connect relay modules in this Docker app
 
-The same image can serve the website, the existing host pairing relay, and the
-phone relay. In Heroku app `zcc`, set these **runtime** Config Vars:
+Zana Connect's tunnel runtime (`server.mjs`, `protocol.mjs`, `machine-routes.mjs`,
+`preview-policy.mjs`) is canonical in `services/mobile-relay`. Run
+`node website/scripts/sync-mobile-relay.mjs` after editing them (also a `predev`
+/ `prebuild` hook). The checked-in snapshot under `website/relay/mobile` permits
+the website-only Docker build context; `relay/mobile/snapshot.test.ts` verifies
+identical source. Next's tracing does not include the front door, so the
+Dockerfile explicitly includes its `ws` runtime.
 
-- `MOBILE_RELAY_PUBLIC_URL=https://zcc-7808c5bc8f3d.herokuapp.com`
-- `MOBILE_RELAY_TOKEN`: a new 43–128-character URL-safe secret (for example,
-  generate it with `openssl rand -hex 32`). Keep it out of commands/logs and
-  enter it through the Config Vars UI or a secret-safe API client.
-
-Keep `ZCC_RELAY_TOKEN` unchanged; it authenticates a separate host-enrollment
-service. No mobile configuration means the current website behavior continues.
-This is the legacy single-computer relay. For backend compatibility tests,
-supply the same secret through `MOBILE_RELAY_TOKEN` and run `pnpm mobile:serve
---connection relay --public-url https://zcc-7808c5bc8f3d.herokuapp.com`. The
-gateway binds only to loopback. Current phone onboarding uses the account-based
-Zana Connect service below; manual URLs and QR pairing are no longer offered.
-
-Ordinary visitors still see Next.js. `/_mobile/*`, `/_relay/*`, `/api/v1/*`,
-`/ws`, and requests carrying the exact `zcc_mobile_session` cookie route to
-the mobile gateway. A cookie selects a route but never grants authorization:
-the desktop gateway validates it. Its route confinement still blocks internal
-host and MCP endpoints. The mobile relay enforces HTTPS via Heroku's forwarded
-protocol and the configured Host/Origin, independent of Next middleware.
-
-The shared website origin is part of the trusted relay service. A separately
-configured HTTPS hostname pointing at this same app can isolate website and
-phone cookies if desired. The relay operator sees decrypted traffic. One
-computer, **one always-on web dyno**, no Preboot/horizontal scaling; the desktop
-must stay awake. Dyno restarts reconnect without replaying interrupted actions.
-
-Canonical runtime files live in `services/mobile-relay`. Run
-`node website/scripts/sync-mobile-relay.mjs` after editing them. The checked-in
-snapshot under `website/relay/mobile` permits the existing website-only Docker
-build context; a drift test verifies identical source. Next's tracing does not
-include the front door, so the Dockerfile explicitly includes its `ws` runtime.
-
-Container-backed regression from the repository root (isolated test app and
-containers, no installed desktop restart):
-
-```sh
-docker build --platform linux/amd64 -t zana-mobile-website-test website
-ZCC_MOBILE_DOCKER_IMAGE=zana-mobile-website-test pnpm test:e2e -- e2e/phone-network-connections.spec.ts
-```
-
-This checks the real Docker website alongside phone pairing, assets, session
-revocation and reconnect. Account-based internet access is covered separately
-by `e2e/phone-connect-account.spec.ts`, including personal browser addresses.
-
-For an actual deployed relay, supply `ZCC_LIVE_MOBILE_RELAY_URL` and
-`ZCC_LIVE_MOBILE_RELAY_TOKEN` through a private environment, then run
-`pnpm test:e2e -- e2e/phone-heroku-relay.live.spec.ts`. The test refuses to use
-an occupied relay and seeds only a private test desktop; it verifies pairing,
-renderer assets, live events, heartbeats across a 65-second idle period and
-revocation. Traces are disabled so credentials are not recorded. Setting
-`ZCC_LIVE_HEROKU_RESTART_APP=zcc` additionally opts into restarting the existing
-web dyno and verifying reconnection with the same phone session; this briefly
-interrupts the website too. No dynos are created or resized by the test.
+The older phone relay (`MOBILE_RELAY_TOKEN`, `MOBILE_RELAY_PUBLIC_URL`) and the
+shared-token machine relay (`ZCC_RELAY_TOKEN`) are removed. Once this image is
+deployed, unset those Heroku Config Vars.
 
 ## Adding a doc
 
@@ -189,7 +145,9 @@ server discovery in this same Docker app. It requires persistent Postgres, the
 website GitHub OAuth credentials, a stable session secret, and wildcard DNS/TLS
 for the laptop namespace. Keep one always-on web dyno. See
 [the Connect deployment and verification guide](../docs/mobile-connect.md).
-Leaving `CONNECT_DOMAIN` empty preserves the existing relay.
+Account-based internet access, including personal browser addresses, is
+covered by `e2e/phone-connect-account.spec.ts`.
+Leaving `CONNECT_DOMAIN` empty serves only the website.
 
 Set `CONNECT_BROWSER_DOMAIN=zana-ide.com` to offer personal addresses such as
 `your-name.zana-ide.com`. Add the matching `*.zana-ide.com` Heroku domain, DNS

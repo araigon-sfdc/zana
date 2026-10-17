@@ -1,20 +1,19 @@
 import { createServer } from 'node:http';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { normalizePairingPath } from './allowlist.mjs';
-import { createPairingHub } from './pairing-hub.mjs';
-import { bearerToken, relayTokenFromEnv, tokenMatches } from './token.mjs';
-import {
-  createWsConnection,
-  writeHttpError,
-  writeServerHandshake
-} from './ws-raw.mjs';
 import { nextOriginFromEnv, proxyToNext, shouldSpawnNext, spawnNextServer, waitForHttp } from './next-proxy.mjs';
-import { createMobileRouting } from './mobile-routing.mjs';
 import { createHostedConnect } from '../connect/runtime.mjs';
 
-function isWebSocketUpgrade(request) {
-  return String(request.headers.upgrade ?? '').toLowerCase() === 'websocket';
+/**
+ * Paths the retired shared-token machine relay used to forward to a laptop.
+ * They answer 410 here instead of reaching Next, whose `trailingSlash` would
+ * 308 `/install.sh`. Machines now pair through Zana Connect or an SSH tunnel.
+ */
+const RETIRED_RELAY_PATH = /^\/(?:_zcc\/relay|t\/[^/]+(?:\/.*)?|install\.sh|install\/.*|internal\/(?:hosts|plugins)\/.*)$/u;
+
+export function isRetiredRelayPath(pathname) {
+  const path = (pathname ?? '/').replace(/\/+$/u, '') || '/';
+  return RETIRED_RELAY_PATH.test(path);
 }
 
 function sendJson(response, status, body) {
@@ -22,46 +21,45 @@ function sendJson(response, status, body) {
   response.end(JSON.stringify(body));
 }
 
+function writeHttpError(socket, status, reason) {
+  const body = `${reason}\n`;
+  socket.write(
+    `HTTP/1.1 ${status} ${reason}\r\n` +
+      'Connection: close\r\n' +
+      'Content-Type: text/plain; charset=utf-8\r\n' +
+      `Content-Length: ${Buffer.byteLength(body)}\r\n` +
+      '\r\n' +
+      body
+  );
+  socket.destroy();
+}
+
 /**
  * @param {{
  *   port?: number,
  *   host?: string,
- *   token?: string,
  *   env?: NodeJS.ProcessEnv,
  *   cwd?: string,
  *   spawnNext?: boolean,
  *   nextOrigin?: string,
- *   now?: () => number,
- *   joinTtlMs?: number,
- *   maxSessions?: number
+ *   connect?: Awaited<ReturnType<typeof createHostedConnect>>
  * }} [options]
  */
 export async function startFrontDoor(options = {}) {
   const env = options.env ?? process.env;
-  const token = options.token ?? relayTokenFromEnv(env);
   const spawn = options.spawnNext ?? shouldSpawnNext(env);
   let nextOrigin = (options.nextOrigin ?? nextOriginFromEnv(env)).replace(/\/$/u, '');
   let spawned = null;
   // Bind $PORT before Next is ready — Heroku kills dynos that do not listen in time.
   let nextReady = !spawn;
-  const mobile = createMobileRouting(env);
-  const connect = await createHostedConnect(env);
+  const connect = options.connect !== undefined ? options.connect : await createHostedConnect(env);
 
-  const hub = createPairingHub({
-    env,
-    now: options.now,
-    joinTtlMs: options.joinTtlMs,
-    maxSessions: options.maxSessions
-  });
   const server = createServer((request, response) => {
     if (connect?.matches(request)) { void connect.handleHttp(request, response); return; }
-    if (mobile?.matches(request)) { mobile.handleHttp(request, response); return; }
-    const pathname = normalizePairingPath(new URL(request.url ?? '/', 'http://127.0.0.1').pathname);
-    if (pathname === '/_zcc/relay') {
-      sendJson(response, 400, { error: 'websocket_required' });
+    if (isRetiredRelayPath(new URL(request.url ?? '/', 'http://127.0.0.1').pathname)) {
+      sendJson(response, 410, { error: 'relay_removed' });
       return;
     }
-    if (hub.handleHttp(request, response)) return;
     if (!nextReady) {
       sendJson(response, 503, { error: 'site_starting' });
       return;
@@ -77,44 +75,7 @@ export async function startFrontDoor(options = {}) {
 
   server.on('upgrade', (request, socket, head) => {
     if (connect?.matches(request)) { void connect.handleUpgrade(request, socket, head); return; }
-    if (mobile?.matches(request)) { mobile.handleUpgrade(request, socket, head); return; }
-    const requestUrl = new URL(request.url ?? '/', 'http://127.0.0.1');
-    const pathname = normalizePairingPath(requestUrl.pathname);
-    if (!isWebSocketUpgrade(request)) {
-      writeHttpError(socket, 400, 'Bad Request');
-      return;
-    }
-    if (pathname === '/_zcc/relay') {
-      const expected = token;
-      const received = bearerToken(String(request.headers.authorization ?? ''));
-      if (!expected || !received || !tokenMatches(received, expected)) {
-        writeHttpError(socket, 401, 'Unauthorized');
-        return;
-      }
-      const reclaimId = String(request.headers['x-zcc-relay-session'] ?? '').trim() || undefined;
-      const allowed = hub.canAttach(reclaimId);
-      if (!allowed.ok) {
-        writeHttpError(socket, allowed.status, allowed.reason);
-        return;
-      }
-      const key = request.headers['sec-websocket-key'];
-      if (typeof key !== 'string' || key.length === 0) {
-        writeHttpError(socket, 400, 'Bad Request');
-        return;
-      }
-      writeServerHandshake(socket, key);
-      const leftover = Buffer.isBuffer(head) ? head : Buffer.alloc(0);
-      hub.attach(createWsConnection(socket, { leftover }), reclaimId);
-      return;
-    }
-    const routed = hub.handleUpgrade(request, socket, head);
-    if (routed === false) {
-      writeHttpError(socket, 404, 'Not Found');
-      return;
-    }
-    if (routed && routed.handled && !routed.entry && routed.status) {
-      writeHttpError(socket, routed.status, routed.reason ?? 'Service Unavailable');
-    }
+    writeHttpError(socket, 404, 'Not Found');
   });
 
   const port = options.port ?? Number(env.PORT ?? 4321);
@@ -129,7 +90,7 @@ export async function startFrontDoor(options = {}) {
   const address = server.address();
   if (!address || typeof address === 'string') {
     server.close();
-    throw new Error('pairing front door did not bind a TCP address');
+    throw new Error('front door did not bind a TCP address');
   }
 
   if (spawn) {
@@ -148,16 +109,8 @@ export async function startFrontDoor(options = {}) {
     port: address.port,
     url: `http://127.0.0.1:${address.port}/`,
     nextOrigin,
-    hasLaptop() {
-      return hub.hasLaptop();
-    },
-    sessionCount() {
-      return hub.sessionCount();
-    },
     close: async () => {
       await connect?.close();
-      mobile?.close();
-      hub.dispose();
       server.closeAllConnections();
       await new Promise((resolveClose, rejectClose) => {
         server.close((error) => (error ? rejectClose(error) : resolveClose()));

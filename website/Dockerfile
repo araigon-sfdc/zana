@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1
 # Multi-stage build for the Zana Command Center website (Next.js standalone)
-# plus the pairing-relay front door. Stage 1 builds `.next/standalone`;
-# stage 2 copies Next + website/relay and runs `node relay/front-door.mjs`.
-# The front door binds `0.0.0.0:$PORT` (Heroku), Next listens on container
-# loopback, and pairing paths never enter Next (`trailingSlash` would 308
-# `/install.sh`).
+# plus the front door that also serves Zana Connect. Stage 1 builds
+# `.next/standalone`; stage 2 copies Next + website/relay and runs
+# `node relay/front-door.mjs`. The front door binds `0.0.0.0:$PORT` (Heroku),
+# Next listens on container loopback, and retired relay paths never enter Next
+# (`trailingSlash` would 308 `/install.sh`).
 
 # ---- build ----
 FROM node:22-alpine AS build
@@ -60,7 +60,7 @@ ENV NODE_EXTRA_CA_CERTS=/app/certs/aws-rds-global-bundle.pem
 
 # Next's standalone output is self-contained (its own pruned node_modules), but
 # static assets and public/ are NOT copied into it automatically — copy them
-# alongside per Next's standalone docs. The pairing front door is vanilla Node
+# alongside per Next's standalone docs. The front door is vanilla Node
 # (ws is explicitly copied because Next's tracing cannot see the front door).
 COPY --from=build /app/.next/standalone ./
 COPY --from=build /app/.next/static ./.next/static
