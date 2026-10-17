@@ -32,7 +32,7 @@ describe('database peer settings UI', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Enable Database Sync' }));
     await screen.findByText(/Setup pending/);
     expect(enable).toHaveBeenCalledExactlyOnceWith({ peerId: 'app-b' });
-    expect(screen.getByText(/app-b: pending/)).toBeTruthy();
+    expect(screen.getByText(/Laptop: pending/)).toBeTruthy();
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 
@@ -59,8 +59,9 @@ describe('database peer settings UI', () => {
   it('typed API forwards lifecycle identifiers only', async () => {
     const call = vi.fn(async () => ({})); const api = createApi(call);
     await api.groupStatus(); await api.enablePeer('app'); await api.retryIntroductions(); await api.removePeer('replica'); await api.revokePeer('app');
+    await api.resetPeerSync('app');
     expect(call.mock.calls).toEqual([['groupStatus', undefined], ['enablePeer', { peerId: 'app' }],
-      ['retryIntroductions', undefined], ['removePeer', { replicaId: 'replica' }], ['revokePeer', { peerId: 'app' }]]);
+      ['retryIntroductions', undefined], ['removePeer', { replicaId: 'replica' }], ['revokePeer', { peerId: 'app' }], ['resetPeerSync', { peerId: 'app' }]]);
   });
 
   it('two computers: one card per computer, Remove ends the pairing (roster entry and link), and the group line disappears', async () => {
@@ -107,7 +108,7 @@ describe('database peer settings UI', () => {
     const priorConfirm = window.confirm; window.confirm = vi.fn(() => true);
     try {
       harness.render(<PeerSettings />);
-      await screen.findByText(/Setup pending: app-d: waiting for reserved capacity/);
+      await screen.findByText(/Setup pending: Unnamed computer: waiting for reserved capacity/);
       expect(screen.getAllByRole('button', { name: 'Remove' })).toHaveLength(2);
       fireEvent.click(screen.getByRole('button', { name: 'Leave Group' }));
       await waitFor(() => expect(remove).toHaveBeenCalledExactlyOnceWith({ replicaId: 'r-c' }));
@@ -142,7 +143,64 @@ describe('database peer settings UI', () => {
     await screen.findByText('Sync group: 3 of 8 computers');
     expect(screen.getByText('Waiting for committed frontier; data sync disabled')).toBeTruthy();
     expect(screen.getAllByRole('button', { name: 'Remove' })).toHaveLength(1);
-    expect(screen.getByText(/app-b: blocked: waiting for committed frontier/)).toBeTruthy();
+    expect(screen.getByText(/Unnamed computer: blocked: waiting for committed frontier/)).toBeTruthy();
+    // Waiting is not stuck: no Reset offered.
+    expect(screen.queryByRole('button', { name: /Reset sync/ })).toBeNull();
+  });
+
+  it('stuck work reads as a sentence (never a JSON dump) and Reset sync is confirmed, per computer, and keeps documents', async () => {
+    const harness = createHarness();
+    const zod = '[\n  {\n    "expected": "object",\n    "code": "invalid_type",\n    "path": [],\n    "message": "Invalid input: expected object, received null"\n  }\n]';
+    const jobs = [
+      { id: 'roster', kind: 'roster', peerId: 'app-y', state: 'blocked', attempts: 5, error: zod },
+      { id: 'revoke', kind: 'local-revoke', peerId: 'app-x', state: 'blocked', attempts: 2, error: 'waiting for removal roster delivery before link revocation' },
+      { id: 'other', kind: 'roster', peerId: 'app-z', state: 'blocked', attempts: 1, error: 'peer offline' },
+    ];
+    const status = { configured: false, repoId: 'database', replicaId: 'r-x', roster: null, members: [], jobs,
+      setup: { peerId: 'app-y', repoId: 'database', state: 'pending', error: zod }, peers: [], enrolled: [{ id: 'app-y', name: 'Desk' }],
+      lifecycleAvailable: true, introductionsAvailable: true, installerAvailable: false };
+    const reset = vi.fn(async () => ({ discarded: 2, status: { ...status, jobs: [jobs[2]], setup: null } }));
+    installTestPluginRuntime({ deepLinkBase: null, rpc: { groupStatus: async () => status, resetPeerSync: reset } });
+    const priorConfirm = window.confirm;
+    const confirm = vi.fn(() => false); window.confirm = confirm;
+    try {
+      harness.render(<PeerSettings />);
+      const list = await screen.findByRole('list', { name: 'Pending work' });
+      expect(document.body.textContent).not.toMatch(/invalid_type|"expected"|received null/);
+      expect(within(list).getAllByRole('listitem').map((row) => row.textContent)).toEqual([
+        'Desk: blocked: the other computer sent a reply this computer cannot read; make sure both run the same Design Docs version',
+        'This computer: blocked: waiting for removal roster delivery before link revocation',
+        'Unnamed computer: blocked: peer offline',
+      ]);
+      expect(screen.getByText(/Setup pending: Desk: the other computer sent a reply/)).toBeTruthy();
+      // Only the computer whose work stopped making progress gets a Reset.
+      expect(screen.getAllByRole('button', { name: /Reset sync/ }).map((button) => button.textContent)).toEqual(['Reset sync with Desk']);
+      fireEvent.click(screen.getByRole('button', { name: 'Reset sync with Desk' }));
+      expect(confirm).toHaveBeenCalledWith("Reset sync with Desk? This discards this computer's undelivered sync work for Desk only. Documents and their history are not deleted. Afterwards, use Repair on Desk.");
+      expect(reset).not.toHaveBeenCalled();
+      confirm.mockReturnValue(true);
+      fireEvent.click(screen.getByRole('button', { name: 'Reset sync with Desk' }));
+      await waitFor(() => expect(reset).toHaveBeenCalledExactlyOnceWith({ peerId: 'app-y' }));
+      await waitFor(() => expect(screen.queryByRole('button', { name: /Reset sync/ })).toBeNull());
+      expect(within(screen.getByRole('list', { name: 'Pending work' })).getAllByRole('listitem')).toHaveLength(1);
+    } finally { window.confirm = priorConfirm; }
+  });
+
+  it('a failed job shows as stopped and a Reset failure is reported without dropping the view', async () => {
+    const harness = createHarness();
+    const status = { configured: false, repoId: 'database', replicaId: 'r-x', roster: null, members: [], setup: null, peers: [{ id: 'app-y', name: 'Studio', scope: 's', connected: true, grantEpoch: 1 }], enrolled: [],
+      jobs: [{ id: 'roster', kind: 'roster', peerId: 'app-y', state: 'failed', attempts: 5, error: 'the other computer no longer keeps this sync group' }],
+      lifecycleAvailable: true, introductionsAvailable: true, installerAvailable: false };
+    const reset = vi.fn(async () => { throw new Error('Error: sync setup with this computer is in progress; try again in a moment'); });
+    installTestPluginRuntime({ deepLinkBase: null, rpc: { groupStatus: async () => status, resetPeerSync: reset } });
+    const priorConfirm = window.confirm; window.confirm = vi.fn(() => true);
+    try {
+      harness.render(<PeerSettings />);
+      expect(await screen.findByText('Studio: stopped: the other computer no longer keeps this sync group')).toBeTruthy();
+      fireEvent.click(screen.getByRole('button', { name: 'Reset sync with Studio' }));
+      expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'sync setup with this computer is in progress; try again in a moment');
+      expect(screen.getByRole('button', { name: 'Reset sync with Studio' })).toHaveProperty('disabled', false);
+    } finally { window.confirm = priorConfirm; }
   });
 
   it('leads with copy/paste pairing and never requires Settings or Machines', async () => {
@@ -172,7 +230,7 @@ describe('database peer settings UI', () => {
       enrolled: [{ id: 'app-b', name: 'Desk', connected: false }], lifecycleAvailable: true, introductionsAvailable: false, installerAvailable: false }) } });
     harness.render(<PeerSettings />);
     await screen.findByText(/Automatic introductions are unavailable on this app/);
-    expect(screen.getByRole('status').textContent).toBe('Setup joining: app-b');
+    expect(screen.getByRole('status').textContent).toBe('Setup joining: Desk');
     const option = screen.getByRole('option', { name: 'Desk - offline' }) as HTMLOptionElement;
     expect(option.disabled).toBe(true);
     expect(screen.queryByText(/No enrolled peer is online yet/)).toBeNull();

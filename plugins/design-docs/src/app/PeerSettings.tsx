@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
 import type { GroupStatus, PeerLifecycleReason, RepairResult } from '../shared/peer-group.js';
-import { syncedWith } from '../shared/peer-group.js';
+import { ownerText, stuckJob, syncedWith } from '../shared/peer-group.js';
 import { experimental_requestApproval, useRealtime, useZccDeepLinks, type PluginApprovalResult } from '@zana-ai/zcc-plugin-sdk/app';
 import { PEER_STATE_CHANNEL, PLUGIN_ID } from '../shared/contract.js';
 import { errorMessage, toast, useApi, type InviteItem, type InviteView, type PeerLink, type PeerStatus } from './api.js';
@@ -654,6 +654,23 @@ export function PeerSettings({ requestApproval = experimental_requestApproval, j
   // Invitation-founded peers enable themselves; the button is only for peers enrolled through the older Machines flow.
   const legacy = status?.enrolled.filter((peer) => !invited.has(peer.id)) ?? [];
   const names = new Map((status?.enrolled ?? []).map((peer) => [peer.id, peer.name]));
+  const nameOf = (id: string) => links.find((link) => link.peerInstanceId === id && link.peerName)?.peerName || names.get(id)
+    || status?.peers.find((peer) => peer.id === id)?.name || UNNAMED_COMPUTER;
+  // Work for another computer that stopped making progress; local-revoke rows target this computer's own grants.
+  const stuckPeers = [...new Set(pendingJobs.filter((job) => stuckJob(job) && job.kind !== 'local-revoke')
+    .map((job) => job.peerId))];
+  const resetComputer = (id: string) => {
+    const name = nameOf(id);
+    if (!window.confirm(`Reset sync with ${name}? This discards this computer's undelivered sync work for ${name} only. Documents and their history are not deleted. Afterwards, use Repair on ${name}.`)) return;
+    setBusy(true);
+    setError(null);
+    void api.resetPeerSync(id).then((result) => {
+      if (!mounted.current) return;
+      setStatus(result.status);
+      toast(result.discarded ? `Discarded ${result.discarded} stuck ${result.discarded === 1 ? 'item' : 'items'} for ${name}` : `Nothing stuck for ${name}`);
+    }).catch((failure) => { if (mounted.current) setError(errorMessage(failure)); })
+      .finally(() => { if (mounted.current) { setBusy(false); loadInvites(); } });
+  };
   const computers = computersOf(links, status, names, invites?.invitations ?? []);
   return (
     <section className="dd-peers" aria-label="Database sync peers">
@@ -677,13 +694,22 @@ export function PeerSettings({ requestApproval = experimental_requestApproval, j
           <div className="dd-peers-block">
             {!status.configured ? <p>No sync group configured.</p> : null}
             {status.setup ? (
-              <p role="status">Setup {status.setup.state}: {status.setup.peerId}{status.setup.error ? `: ${status.setup.error}` : ''}</p>
+              <p role="status">Setup {status.setup.state}: {nameOf(status.setup.peerId)}{status.setup.error ? `: ${ownerText(status.setup.error)}` : ''}</p>
             ) : null}
           </div>
           {pendingJobs.length ? (
             <ul className="dd-peers-list" aria-label="Pending work">
-              {pendingJobs.map((job) => <li key={job.id}>{job.peerId}: {job.state}{job.error ? `: ${job.error}` : ''}</li>)}
+              {pendingJobs.map((job) => (
+                <li key={job.id}>{job.kind === 'local-revoke' ? 'This computer' : nameOf(job.peerId)}: {job.state === 'failed' ? 'stopped' : job.state}{job.error ? `: ${ownerText(job.error)}` : ''}</li>
+              ))}
             </ul>
+          ) : null}
+          {stuckPeers.length ? (
+            <div className="dd-actions">
+              {stuckPeers.map((id) => (
+                <button key={id} type="button" className="btn" disabled={busy} onClick={() => resetComputer(id)}>Reset sync with {nameOf(id)}</button>
+              ))}
+            </div>
           ) : null}
           {legacy.length ? (
             <label className="dd-field-inline">

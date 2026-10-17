@@ -50,7 +50,8 @@ export interface GroupJob {
   peerId: string;
   kind: 'retire' | 'roster' | 'revoke' | 'introduce' | 'local-revoke';
   rosterEpoch: number;
-  state: 'pending' | 'blocked' | 'done';
+  /** `failed`: a permanent failure hit the retry cap. Terminal like `done`, but kept (with its reason) until Reset. */
+  state: 'pending' | 'blocked' | 'done' | 'failed';
   attempts: number;
   error: string | null;
 }
@@ -88,6 +89,20 @@ export interface GroupStatus {
  * the server: this computer is in a sync group (a roster it left is history), the peer is a current, non-retiring member
  * of it, and core holds exactly one database grant for it.
  */
+/** Attempts after which a job failing permanently stops retrying and no longer blocks other work (server `finishJob`). */
+export const MAX_PERMANENT_JOB_ATTEMPTS = 5;
+/** Work that stopped making progress: the owner may discard it with Reset sync. A merely waiting job is not stuck. */
+export function stuckJob(job: Pick<GroupJob, 'state' | 'attempts'>): boolean {
+  return job.state === 'failed' || (job.state === 'blocked' && job.attempts >= MAX_PERMANENT_JOB_ATTEMPTS);
+}
+/** Shown instead of a validator or JSON dump (older builds persisted those as job and setup errors). */
+export const UNREADABLE_REPLY = 'the other computer sent a reply this computer cannot read; make sure both run the same Design Docs version';
+/** Owner-facing form of a stored protocol error: sentences pass through, JSON-looking dumps never do. */
+export function ownerText(text: string | null | undefined): string | null {
+  if (!text) return null;
+  return /^\s*[[{]/.test(text) ? UNREADABLE_REPLY : text;
+}
+
 export function syncedWith(status: Pick<GroupStatus, 'configured' | 'members' | 'replicaId'>, peerId: string): boolean {
   return status.configured && status.members.some((member) => member.replicaId === status.replicaId) &&
     status.members.some((member) => member.machineId === peerId && member.replicaId !== status.replicaId && !member.retiring && member.authorized);

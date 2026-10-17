@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { PluginApprovalRequest, PluginInvitationDecision, PluginInvitationReason, PluginInvitationState, PluginInvitationStatus, PluginPeerLink, PluginPeerRequest, PluginSdkPeers, ZccPluginApi } from '@zana-ai/zcc-plugin-sdk/server';
 import { canonicalPeerHash, PeerProtocolError } from '../shared/peer-contract.js';
-import { syncedWith, type GroupRoster, type GroupStatus, type PeerLifecycleReason, type RepairResult } from '../shared/peer-group.js';
+import { ownerText, syncedWith, UNREADABLE_REPLY, type GroupRoster, type GroupStatus, type PeerLifecycleReason, type RepairResult } from '../shared/peer-group.js';
 import { PEER_CALL_TIMEOUT_MS, PEER_PENDING_TICK_MS } from '../shared/peer-limits.js';
 import { admissionSchema, capacityRequestId, capacitySchema, DesignDocPeerGroup, parseRoster, retirementJobSchema, rosterCovers, type Admission } from './peer-group.js';
 import { historicalMembers, isRetiring, ownedSeats, retirementEvidence } from './peer-slots.js';
@@ -55,6 +55,25 @@ const SETUP_GUIDANCE: Record<string, string> = {
     'This computer is waiting for the other computer to finish its half of the setup. Keep Zana open on both computers. ' +
     'If this does not clear within a minute, press Repair on this computer\'s card on the other computer; if that fails, remove this computer there and add the peer again.'
 };
+
+const NO_GROUP_ANYMORE = 'the other computer no longer keeps this sync group';
+/** Failures that cannot clear by retrying the same job: they stop at the retry cap instead of blocking forever. */
+const PERMANENT_ERRORS = new Set([NO_GROUP_ANYMORE, 'retirement target identity mismatch', 'retirement delivery peer identity mismatch']);
+function isPermanent(error: unknown): boolean {
+  return error instanceof z.ZodError || error instanceof SyntaxError || (error instanceof PeerProtocolError && PERMANENT_ERRORS.has(error.message));
+}
+/** Owner-facing text for a failure: protocol sentences pass through, validator and JSON dumps never do. */
+export function readableError(error: unknown): string {
+  if (error instanceof z.ZodError || error instanceof SyntaxError) return UNREADABLE_REPLY;
+  return ownerText(error instanceof Error ? error.message.trim() : '') ?? 'peer setup failed';
+}
+/** Log-only detail: validator issues without values (a reply may carry document metadata), else the message. */
+function technical(error: unknown): string {
+  if (error instanceof z.ZodError) {
+    return error.issues.slice(0, 4).map((issue) => `${issue.code} at ${issue.path.join('.') || '<root>'}: ${issue.message}`).join('; ').slice(0, 400);
+  }
+  return (error instanceof Error ? error.message : String(error)).slice(0, 400);
+}
 
 /** Invitation UX is gated apart from group sync: older hosts keep syncing an existing group and only lose the new action. */
 export function inviteCapability(peers: Pick<PluginSdkPeers, never> | undefined): { available: true } | { available: false; reason: typeof INVITE_UNSUPPORTED_REASON } {
@@ -576,7 +595,7 @@ export class DesignDocPairing {
       this.enableError = null;
       const joined = this.group.liveRoster(), consent = this.group.consent();
       if (joined?.members.some((entry) => entry.machineId === peerId && !isRetiring(joined, entry.replicaId))) return { outcome, detail: null, reason: null };
-      const error = consent?.peerId === peerId ? consent.error : null;
+      const error = consent?.peerId === peerId ? ownerText(consent.error) : null;
       return { outcome: 'pending', reason: null, detail: error ? SETUP_GUIDANCE[error] ?? `Sync setup started but has not finished: ${error}`
         : 'Sync setup started on this computer and is waiting for the other computer to join. If it does not finish in a minute, open Design Docs settings on the other computer and press Repair on this computer\'s card.' };
     };
@@ -605,6 +624,22 @@ export class DesignDocPairing {
         return { outcome: 'unavailable', detail: this.message(second), reason: lifecycleReasonOf(second) === 'unknown' ? null : lifecycleReasonOf(second) };
       }
     }
+  }
+
+  /**
+   * Owner action "Reset sync with this computer" (confirmed in the UI): discard undelivered sync work for that computer only
+   * which already failed (see `DesignDocPeerGroup.resetPeer`), then let setup run again. Never deletes documents or history
+   * and never touches other computers' work or the link itself.
+   */
+  async resetPeer(peerId: string): Promise<{ discarded: number; status: GroupStatus }> {
+    if (!id.safeParse(peerId).success) throw new PeerProtocolError('invalid', 'peerId is not a valid computer id');
+    if (this.enabling || this.revoking) throw new PeerProtocolError('conflict', 'database lifecycle action already running');
+    await this.running?.catch(() => {});
+    const discarded = this.group.resetPeer(peerId);
+    this.logOnce(`reset:${peerId}:${discarded}`, `reset sync with ${peerId}: discarded ${discarded} undelivered job(s)`);
+    this.disabledPeers.delete(peerId);
+    await this.retry(true);
+    return { discarded, status: await this.status() };
   }
 
   /** Bounded wait (abortable) until core lists `peerId` as enrolled and connected again. */
@@ -869,6 +904,7 @@ export class DesignDocPairing {
                 if (hello.peerId !== job.peerId || hello.scope !== roster.repoId || hello.repoId !== roster.repoId || hello.replicaId !== input.replicaId) {
                   throw new PeerProtocolError('invalid', 'retirement target identity mismatch');
                 }
+                if (hello.roster === null) throw new PeerProtocolError('invalid', NO_GROUP_ANYMORE);
                 delivered = retirementEvidence(roster, parseRoster(hello.roster), local.replicaId);
               }
               const result = z.object({ roster: z.unknown() }).strict().parse(
@@ -892,7 +928,7 @@ export class DesignDocPairing {
             throw new PeerProtocolError('invalid', 'waiting for removal roster delivery before link revocation');
           }
           if (!input.localOnly && roster && (roster.retirements.some((event) => !roster.removals.some((removal) => removal.replicaId === event.replicaId)) ||
-            (!local.groupId && this.group.jobs().some((pending) => pending.kind === 'roster' && pending.state !== 'done')))) {
+            (!local.groupId && this.group.jobs().some((pending) => pending.kind === 'roster' && pending.state !== 'done' && pending.state !== 'failed')))) {
             throw new PeerProtocolError('invalid', 'waiting for authorized retirement evidence delivery before link revocation');
           }
           await this.peers.revoke(input.peerId, { scope: input.scope });
@@ -917,12 +953,21 @@ export class DesignDocPairing {
           const self = local.replicaId;
           if (roster.closures.some((closure) => closure.replicaId === self)) {
             const hello = helloSchema.parse(await this.peers.call(job.peerId, 'group-hello', {}, this.options(next.repoId)));
-            const known = parseRoster(hello.roster);
-            if (hello.peerId !== job.peerId || hello.scope !== next.repoId || hello.repoId !== next.repoId ||
-              !historicalMembers(roster).some((member) => member.machineId === job.peerId && member.replicaId === hello.replicaId)) {
+            if (hello.peerId !== job.peerId || hello.scope !== next.repoId || hello.repoId !== next.repoId) {
               throw new PeerProtocolError('invalid', 'retirement delivery peer identity mismatch');
             }
-            delivered = retirementEvidence(next, known, self);
+            // The other computer already set this group aside: setting aside always starts a fresh replica, so it answers
+            // with a replica this group never admitted (or a roster of another group). Nobody is left to tell about this
+            // removal; waiting would block this computer's link revocation and pairing again forever. A member replica
+            // with no roster yet is a joiner whose admission reply was lost: it still gets the roster.
+            const known = hello.roster === null ? null : parseRoster(hello.roster);
+            if ((known && known.groupId !== roster.groupId) ||
+              !historicalMembers(roster).some((member) => member.machineId === job.peerId && member.replicaId === hello.replicaId)) {
+              this.logOnce(`superseded:${job.id}`, `removal delivery to ${job.peerId} superseded: it already set the sync group aside`);
+              this.group.supersedeJob(job.id, 'the other computer already set this sync group aside');
+              continue;
+            }
+            delivered = retirementEvidence(next, known ?? { ...next, closures: [] }, self);
           }
           const result = z.object({ roster: z.unknown() }).strict()
             .parse(await this.peers.call(job.peerId, 'group-roster', delivered, this.options(next.repoId)));
@@ -932,7 +977,11 @@ export class DesignDocPairing {
           if (!this.group.coveredHistoricalAck(acknowledged, job.peerId)) this.group.apply(acknowledged, job.peerId);
         }
         this.group.finishJob(job.id);
-      } catch (error) { this.group.finishJob(job.id, this.message(error)); }
+      } catch (error) {
+        const text = this.message(error), permanent = isPermanent(error);
+        if (permanent) this.logOnce(`job:${job.kind}:${job.peerId}`, `${job.kind} job for ${job.peerId} failed: ${technical(error)}`);
+        this.group.finishJob(job.id, text, permanent);
+      }
     }
   }
 
@@ -1023,5 +1072,8 @@ export class DesignDocPairing {
     }
   }
   private options(scope: string) { return { scope, signal: this.abort.signal, timeoutMs: PEER_CALL_TIMEOUT_MS }; }
-  private message(error: unknown): string { return error instanceof Error ? error.message : 'peer setup failed'; }
+  private message(error: unknown): string {
+    if (error instanceof z.ZodError) this.logOnce('unreadable-reply', `peer reply failed validation: ${technical(error)}`);
+    return readableError(error);
+  }
 }

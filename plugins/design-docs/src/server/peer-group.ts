@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { PluginDatabase } from '@zana-ai/zcc-plugin-sdk/server';
 import { canonicalJson, canonicalPeerHash, PeerProtocolError } from '../shared/peer-contract.js';
-import type { GroupJob, GroupReceipt, GroupRoster } from '../shared/peer-group.js';
+import { MAX_PERMANENT_JOB_ATTEMPTS, ownerText, type GroupJob, type GroupReceipt, type GroupRoster } from '../shared/peer-group.js';
 import { DesignDocSyncStore } from './sync-store.js';
 import { admissionReference, appendSeat, closeRetirement, completeRetirements, controlId as id, createRoster, finalizeRoster, genesisHash, historicalMembers, isRetiring, memberSchema,
   mergeRosters, ownedSeats, parseRoster, permitsRetirementCompletion, removeMember, requestRetirement, rosterCovers, transferSeat } from './peer-slots.js';
@@ -18,6 +18,9 @@ export function capacityRequestId(admissionRequestId: string, donorReplicaId: st
   return `capacity-${canonicalPeerHash({ admissionRequestId, donorReplicaId })}`;
 }
 const MAX_CONTROL_ROWS = 1024;
+export { MAX_PERMANENT_JOB_ATTEMPTS };
+/** Job states that still owe work; `done` and `failed` are terminal. */
+const OPEN = "state NOT IN ('done', 'failed')";
 const RESERVED_LIFECYCLE_ROWS = 176;
 export const retirementJobSchema = z.object({ replicaId: id, admission: z.string().regex(/^[a-f0-9]{64}$/), scope: id }).strict();
 const introductionSchema = z.object({ peerId: id, sponsorPeerId: id, scope: id }).strict();
@@ -85,11 +88,13 @@ export class DesignDocPeerGroup {
       return { kind: 'blocked', reason: 'That computer was removed from this sync group earlier, and a group cannot take a removed computer back. Remove the other computers from this group (or leave it), then pair again.' };
     }
     // Only this peer's teardown may be dropped: the leaver's own roster delivery must reach the others first.
-    const pending = this.jobs().filter((job) => job.state !== 'done' && !(job.kind === 'local-revoke' && (job.payload as { peerId?: string }).peerId === peerId) &&
+    const pending = this.jobs().filter((job) => job.state !== 'done' && job.state !== 'failed' && !(job.kind === 'local-revoke' && (job.payload as { peerId?: string }).peerId === peerId) &&
       !(live && job.kind === 'roster' && job.peerId === peerId));
     if (pending.length) {
       const job = pending[0]!;
-      return { kind: 'blocked', reason: `An earlier removal is still being delivered${job.peerId === this.localPeerId() ? '' : ` to ${job.peerId}`}${job.error ? ` (${job.error})` : ''}. Keep both computers open and online, then press Repair again.` };
+      const cause = ownerText(job.error);
+      return { kind: 'blocked', reason: `An earlier removal is still being delivered${job.peerId === this.localPeerId() ? '' : ` to ${job.peerId}`}${cause ? ` (${cause})` : ''}. ` +
+        'Keep both computers open and online, then press Repair again. If it stays stuck, use the Reset sync button for that computer.' };
     }
     return { kind: 'detach' };
   }
@@ -434,10 +439,35 @@ export class DesignDocPeerGroup {
     if (this.consent()?.peerId === peerId) this.db.prepare('UPDATE sync_group_control SET consent_json = NULL WHERE singleton = 1').run();
   }
 
-  retryJobs(): void { this.db.prepare("UPDATE sync_group_jobs SET next_at = 0 WHERE state <> 'done'").run(); }
+  retryJobs(): void { this.db.prepare(`UPDATE sync_group_jobs SET next_at = 0 WHERE ${OPEN}`).run(); }
+
+  /**
+   * Owner action "Reset sync with this computer": discard this computer's undelivered work for `peerId` that already failed
+   * at least once (blocked or failed). Only local control rows are deleted; documents, history and the link are untouched.
+   * While this computer is a current member, a removed peer's link revocation is kept: dropping it would leave a removed
+   * computer authorized. Once this computer has left, that revocation is superseded by pairing again (as `detachForRejoin`).
+   */
+  resetPeer(peerId: string): number {
+    id.parse(peerId);
+    return this.db.transaction(() => {
+      const live = !!this.liveRoster();
+      const rows = this.db.prepare(`SELECT id, kind, peer_id, payload_json FROM sync_group_jobs WHERE state IN ('blocked', 'failed')`)
+        .all() as Array<{ id: string; kind: GroupJob['kind']; peer_id: string; payload_json: string }>;
+      let discarded = 0;
+      for (const row of rows) {
+        const target = (JSON.parse(row.payload_json) as { peerId?: unknown } | null)?.peerId;
+        const owed = row.kind === 'local-revoke' ? target === peerId && !live
+          : row.kind === 'introduce' ? false : row.peer_id === peerId;
+        if (!owed) continue;
+        this.db.prepare('DELETE FROM sync_group_jobs WHERE id = ?').run(row.id);
+        discarded++;
+      }
+      return discarded;
+    });
+  }
 
   jobs(readyOnly = false): Array<GroupJob & { payload: unknown }> {
-    const rows = this.db.prepare(`SELECT * FROM sync_group_jobs ${readyOnly ? "WHERE state <> 'done' AND next_at <= ?" : ''}
+    const rows = this.db.prepare(`SELECT * FROM sync_group_jobs ${readyOnly ? `WHERE ${OPEN} AND next_at <= ?` : ''}
       ORDER BY CASE kind WHEN 'retire' THEN 0 WHEN 'roster' THEN 1 WHEN 'revoke' THEN 2 WHEN 'local-revoke' THEN 3 ELSE 4 END, roster_epoch, id LIMIT 64`)
       .all(...(readyOnly ? [this.now()] : [])) as Array<{ id: string; peer_id: string; kind: GroupJob['kind']; roster_epoch: number;
         state: GroupJob['state']; attempts: number; error: string | null; payload_json: string }>;
@@ -445,9 +475,21 @@ export class DesignDocPeerGroup {
       state: row.state, attempts: row.attempts, error: row.error, payload: JSON.parse(row.payload_json) }));
   }
 
-  finishJob(id: string, error?: string): void {
-    this.db.prepare(`UPDATE sync_group_jobs SET state = ?, attempts = attempts + 1, error = ?, next_at = ? WHERE id = ? AND state <> 'done'`)
-      .run(error ? 'blocked' : 'done', error?.slice(0, 240) ?? null, error ? this.now() + 30_000 : 0, id);
+  /**
+   * `error` blocks the job for a retry. A `permanent` error (malformed reply, identity that can never match) is retried
+   * only up to `MAX_PERMANENT_JOB_ATTEMPTS`, then the job is `failed`: it keeps its reason for the owner but no longer
+   * blocks link revocation or pairing again.
+   */
+  finishJob(id: string, error?: string, permanent = false): void {
+    this.db.prepare(`UPDATE sync_group_jobs SET state = CASE WHEN ? IS NULL THEN 'done' WHEN ? AND attempts + 1 >= ? THEN 'failed' ELSE 'blocked' END,
+      attempts = attempts + 1, error = ?, next_at = ? WHERE id = ? AND ${OPEN}`)
+      .run(error ?? null, permanent ? 1 : 0, MAX_PERMANENT_JOB_ATTEMPTS, error?.slice(0, 240) ?? null, error ? this.now() + 30_000 : 0, id);
+  }
+
+  /** The job's purpose no longer exists (its target set the group aside): it completes, with `note` kept as the reason. */
+  supersedeJob(id: string, note: string): void {
+    this.db.prepare(`UPDATE sync_group_jobs SET state = 'done', attempts = attempts + 1, error = ?, next_at = 0 WHERE id = ? AND ${OPEN}`)
+      .run(note.slice(0, 240), id);
   }
 
   private persistRoster(roster: GroupRoster): void {
@@ -554,7 +596,7 @@ export class DesignDocPeerGroup {
   }
 
   removalDeliveryPending(peerId: string): boolean {
-    return !!this.db.prepare("SELECT id FROM sync_group_jobs WHERE kind = 'roster' AND peer_id = ? AND state <> 'done' LIMIT 1").get(peerId);
+    return !!this.db.prepare(`SELECT id FROM sync_group_jobs WHERE kind = 'roster' AND peer_id = ? AND ${OPEN} LIMIT 1`).get(peerId);
   }
 
   acknowledgeRoster(input: GroupRoster, peerId: string): void {
@@ -564,7 +606,10 @@ export class DesignDocPeerGroup {
     }
     const jobs = this.db.prepare("SELECT id, payload_json FROM sync_group_jobs WHERE peer_id = ? AND kind = 'roster' AND state <> 'done' LIMIT 16")
       .all(peerId) as Array<{ id: string; payload_json: string }>;
-    for (const job of jobs) if (rosterCovers(input, parseRoster(JSON.parse(job.payload_json)))) this.finishJob(job.id);
+    // A later proof of delivery also completes a delivery that had failed.
+    for (const job of jobs) if (rosterCovers(input, parseRoster(JSON.parse(job.payload_json)))) {
+      this.db.prepare("UPDATE sync_group_jobs SET state = 'done', attempts = attempts + 1, error = NULL, next_at = 0 WHERE id = ?").run(job.id);
+    }
   }
 
   freezeCapacity(request: CapacityRequest): CapacityRequest {

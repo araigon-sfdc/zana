@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PluginInvitationStatus, PluginPeerLink, PluginPeerRequest, PluginSdkPeers } from '@zana-ai/zcc-plugin-sdk/server';
-import { bootstrapScope, DesignDocPairing, INVITE_UNSUPPORTED_REASON, inviteCapability, lifecycleReasonOf } from './pairing.js';
-import { capacityRequestId, DesignDocPeerGroup } from './peer-group.js';
+import { z } from 'zod';
+import { bootstrapScope, DesignDocPairing, INVITE_UNSUPPORTED_REASON, inviteCapability, lifecycleReasonOf, readableError } from './pairing.js';
+import { capacityRequestId, DesignDocPeerGroup, MAX_PERMANENT_JOB_ATTEMPTS } from './peer-group.js';
 import { DesignDocStore } from './store.js';
 import { createTestDatabase } from './test-db.js';
-import { admissionReference, appendSeat, ownedSeats, mergeRosters, transferSeat, requestRetirement, closeRetirement, completeRetirements } from './peer-slots.js';
+import { admissionReference, appendSeat, ownedSeats, mergeRosters, transferSeat, requestRetirement, closeRetirement, completeRetirements, historicalMembers } from './peer-slots.js';
 
 const disposals: Array<() => void> = [];
 afterEach(() => { disposals.splice(0).forEach((dispose) => dispose()); });
@@ -1493,6 +1494,104 @@ describe('DD invitation pairing', () => {
       } finally { warn.mockRestore(); }
     });
 
+    /**
+     * The real two-machine deadlock (2026-10-17): the leaver still owes the stayer its removal roster, but the stayer has
+     * already set its leftover group aside (fresh replica, no roster) to pair again. Its hello carries `roster: null`, the
+     * delivery parsed that as a roster and failed with a raw Zod dump forever, and the leaver's link revocation and new
+     * pairing both waited on it.
+     */
+    const historicalReplica = (side: InviteApp, machineId: string) =>
+      historicalMembers(side.group.roster()!).find((member) => member.machineId === machineId)!.replicaId;
+    const stayerSetAside = async (leaver: 'a' | 'b') => {
+      const setup = await dissolvedThenRelinked(leaver);
+      const { left, stayed } = setup;
+      const owed = left.db.prepare("UPDATE sync_group_jobs SET state = 'blocked', attempts = 3, error = 'peer offline' WHERE kind IN ('roster', 'local-revoke') AND (peer_id = ? OR json_extract(payload_json, '$.peerId') = ?)")
+        .run(stayed.peerId, stayed.peerId) as { changes: number };
+      if (!owed.changes) {
+        left.group.queueJob(stayed.peerId, 'roster', left.group.roster()!.rosterEpoch, left.group.roster());
+        left.group.queueJob(left.peerId, 'local-revoke', left.group.roster()!.rosterEpoch, { peerId: stayed.peerId, scope: left.group.roster()!.repoId });
+        left.db.prepare("UPDATE sync_group_jobs SET state = 'blocked', attempts = 3, error = 'peer offline'").run();
+      }
+      expect(left.group.removalDeliveryPending(stayed.peerId)).toBe(true);
+      stayed.group.quarantineRestoredWriter(stayed.peerId, { force: true });
+      expect(stayed.group.roster()).toBeNull();
+      return setup;
+    };
+
+    it.each(['a', 'b'] as const)('leaver %s: a removal roster owed to a peer that already set the group aside is superseded, not parsed as null', async (leaver) => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const { left, stayed } = await stayerSetAside(leaver);
+        await left.pairing.retry(true);
+        const owed = left.group.jobs().filter((job) => job.kind === 'roster' && job.peerId === stayed.peerId);
+        expect(owed.map((job) => job.error ?? '').join(' ')).not.toMatch(/expected object|invalid_type|\[/);
+        expect(left.group.removalDeliveryPending(stayed.peerId)).toBe(false);
+        expect(left.group.rejoinState(stayed.peerId).kind).not.toBe('blocked');
+      } finally { warn.mockRestore(); }
+    });
+
+    it.each(['a', 'b'] as const)('leaver %s: both sides converge after the stayer set its group aside first', async (leaver) => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const { a, b } = await stayerSetAside(leaver);
+        await poll(a, b);
+        await formed(a, b);
+        expect(a.group.jobs().concat(b.group.jobs()).filter((job) => job.state === 'blocked')).toEqual([]);
+      } finally { warn.mockRestore(); }
+    });
+
+    it('a joiner whose replica is in the group but has no roster yet still receives the removal roster', async () => {
+      const { left, stayed } = await stayerSetAside('b');
+      // Same machine, a replica this group admitted, roster not installed yet: not "set aside".
+      const admitted = historicalReplica(left, stayed.peerId);
+      stayed.handlers.set('group-hello', async (request) => ({ repoId: left.group.roster()!.repoId, replicaId: admitted, peerId: stayed.peerId, scope: request.scope, roster: null }));
+      let delivered = 0;
+      stayed.handlers.set('group-roster', async () => { delivered++; return { roster: left.group.roster() }; });
+      await left.pairing.retry(true);
+      expect(delivered).toBe(1);
+      expect(left.group.removalDeliveryPending(stayed.peerId)).toBe(false);
+    });
+
+    it('a removal roster for another group in the answer is superseded too', async () => {
+      const { net, left, stayed } = await stayerSetAside('b');
+      const c = net.app('c'), d = net.app('d'); await net.found(c, d);
+      const other = c.group.roster()!;
+      expect(other.groupId).not.toBe(left.group.roster()!.groupId);
+      const call = left.peers.call;
+      left.peers.call = vi.fn(async (...args: Parameters<typeof call>) => {
+        const result = await call(...args);
+        return args[1] === 'group-hello' ? { ...(result as object), replicaId: historicalReplica(left, stayed.peerId), roster: other } : result;
+      }) as typeof call;
+      await left.pairing.retry(true);
+      expect(left.group.removalDeliveryPending(stayed.peerId)).toBe(false);
+    });
+
+    it('Reset sync with this computer discards only that computer\'s failed work and lets pairing again proceed', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const { a, b, left, stayed } = await stayerSetAside('b');
+        // A build without the supersede rule: the owed delivery keeps failing.
+        const call = left.peers.call;
+        left.peers.call = vi.fn(async (...args: Parameters<typeof call>) => {
+          if (args[1] === 'group-hello') throw new Error('peer request was rejected');
+          return call(...args);
+        }) as typeof call;
+        left.group.queueJob('c', 'roster', left.group.roster()!.rosterEpoch, left.group.roster());
+        left.db.prepare("UPDATE sync_group_jobs SET state = 'blocked', error = 'peer offline' WHERE peer_id = 'c'").run();
+        await left.pairing.retry(true);
+        expect(left.group.rejoinState(stayed.peerId).kind).toBe('blocked');
+        left.peers.call = call;
+        const reset = await left.pairing.resetPeer(stayed.peerId);
+        expect(reset.discarded).toBeGreaterThanOrEqual(2);
+        // Another computer's owed work stays; documents and history are untouched.
+        expect(left.group.jobs().some((job) => job.peerId === 'c' && job.kind === 'roster')).toBe(true);
+        expect(left.group.jobs().some((job) => job.state !== 'done' && (job.peerId === stayed.peerId || (job.payload as { peerId?: string }).peerId === stayed.peerId))).toBe(false);
+        left.db.prepare("DELETE FROM sync_group_jobs WHERE peer_id = 'c'").run();
+        await poll(a, b);
+        await formed(a, b);
+      } finally { warn.mockRestore(); }
+    });
+
     it('a local Disable Link of the new link is not undone by the next tick', async () => {
       const { a, b } = await dissolvedThenRelinked('b');
       await a.pairing.revoke('b');
@@ -1672,5 +1771,74 @@ describe('DD link state notes for core Peers', () => {
     } finally { warn.mockRestore(); }
     const older = network(), c = older.app('c'); withInvites(c, { links: [link({ peerInstanceId: 'd' })] });
     await expect(c.pairing.inviteState()).resolves.toMatchObject({ available: true });
+  });
+});
+
+describe('DD lifecycle job failures', () => {
+  const owedRoster = async () => {
+    const net = network(), a = net.app('a'), b = net.app('b'); await net.found(a, b);
+    a.db.prepare("DELETE FROM sync_group_jobs WHERE kind = 'roster'").run();
+    a.group.queueJob('b', 'roster', a.group.roster()!.rosterEpoch, a.group.roster());
+    return { net, a, b };
+  };
+  const rosterJob = (a: InviteApp) => a.group.jobs().find((job) => job.kind === 'roster' && job.peerId === 'b')!;
+
+  it('a malformed reply fails after the retry cap with a readable reason and stops blocking link revocation', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { a, b } = await owedRoster();
+      let answered = 0;
+      b.handlers.set('group-roster', async () => { answered++; return { roster: null }; });
+      for (let round = 1; round < MAX_PERMANENT_JOB_ATTEMPTS; round++) await a.pairing.retry(true);
+      expect(rosterJob(a)).toMatchObject({ state: 'blocked', attempts: MAX_PERMANENT_JOB_ATTEMPTS - 1 });
+      expect(a.group.removalDeliveryPending('b')).toBe(true);
+      await a.pairing.retry(true);
+      const job = rosterJob(a);
+      expect(job).toMatchObject({ state: 'failed', attempts: MAX_PERMANENT_JOB_ATTEMPTS });
+      expect(job.error).toContain('cannot read');
+      expect(job.error).not.toMatch(/invalid_type|expected object|[[{]/);
+      expect(a.group.removalDeliveryPending('b')).toBe(false);
+      expect((await a.pairing.status()).jobs.find((item) => item.id === job.id)?.state).toBe('failed');
+      // The validator detail is logged (without values), once.
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('invalid_type at <root>'));
+      // A failed job is not retried; Repair's forced retry does not resurrect it.
+      await a.pairing.retry(true);
+      expect(answered).toBe(MAX_PERMANENT_JOB_ATTEMPTS);
+      // A later proof of delivery still completes it.
+      a.group.acknowledgeRoster(a.group.roster()!, 'b');
+      expect(rosterJob(a)).toMatchObject({ state: 'done', error: null });
+    } finally { warn.mockRestore(); }
+  });
+
+  it('a transient failure keeps retrying past the cap', async () => {
+    const { a, b } = await owedRoster();
+    b.handlers.set('group-roster', async () => { throw new Error('peer offline'); });
+    for (let round = 0; round < MAX_PERMANENT_JOB_ATTEMPTS + 2; round++) await a.pairing.retry(true);
+    expect(rosterJob(a)).toMatchObject({ state: 'blocked', attempts: MAX_PERMANENT_JOB_ATTEMPTS + 2 });
+    expect(a.group.removalDeliveryPending('b')).toBe(true);
+  });
+
+  it('Reset refuses while a lifecycle action runs and validates the peer id', async () => {
+    const { a } = await owedRoster();
+    await expect(a.pairing.resetPeer('../x')).rejects.toThrow('peerId is not a valid computer id');
+    const waiting: Array<() => void> = [], features = a.peers.features;
+    a.peers.features = vi.fn(() => new Promise((resolve) => { waiting.push(() => resolve({ lifecycle: true, introductions: true, installer: false })); })) as never;
+    const enabling = a.pairing.enable('b').catch(() => undefined);
+    await expect(a.pairing.resetPeer('b')).rejects.toThrow('already running');
+    a.peers.features = features; waiting.forEach((release) => release()); await enabling;
+    await expect(a.pairing.resetPeer('b')).resolves.toMatchObject({ discarded: 0 });
+  });
+});
+
+describe('readableError', () => {
+  it('never passes a validator or JSON dump to the owner', () => {
+    const zod = z.object({ roster: z.object({}) }).safeParse(null).error!;
+    expect(readableError(zod)).toMatch(/cannot read/);
+    expect(readableError(new SyntaxError('Unexpected token'))).toMatch(/cannot read/);
+    expect(readableError(new Error(zod.message))).toMatch(/cannot read/);
+    expect(readableError(new Error('{"a":1}'))).toMatch(/cannot read/);
+    expect(readableError(new Error('peer offline'))).toBe('peer offline');
+    expect(readableError(new Error(''))).toBe('peer setup failed');
+    expect(readableError('text')).toBe('peer setup failed');
   });
 });

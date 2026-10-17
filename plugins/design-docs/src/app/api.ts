@@ -100,6 +100,8 @@ export interface DesignDocsApi {
   reconnectPeer(peerId: string): Promise<PeerLink[]>;
   /** Re-try sync setup for one linked computer; re-links only that connection if needed. */
   repairPeer(peerId: string): Promise<RepairResult>;
+  /** Discard this computer's stuck sync work for one linked computer; documents and history are kept. */
+  resetPeerSync(peerId: string): Promise<{ discarded: number; status: GroupStatus }>;
   /** Only whether a connected peer's database differs; never names or counts. */
   peersOutOfSync(): Promise<{ outOfSync: boolean }>;
   removePeer(replicaId: string): Promise<GroupStatus>;
@@ -183,6 +185,7 @@ export function createApi(call: Call): DesignDocsApi {
     dismissInvitation: (invitationId) => done(typed('dismissInvitation', { invitationId })),
     reconnectPeer: (peerId) => typed('reconnectPeer', { peerId }),
     repairPeer: (peerId) => typed('repairPeer', { peerId }),
+    resetPeerSync: (peerId) => typed('resetPeerSync', { peerId }),
     peersOutOfSync: () => typed('peersOutOfSync'),
     removePeer: (replicaId) => typed('removePeer', { replicaId }),
     revokePeer: (peerId) => typed('revokePeer', { peerId }),

@@ -473,3 +473,44 @@ describe('copied-database writer quarantine', () => {
     expect(a.group.consent()).toMatchObject({ peerId: 'app-z' });
   });
 });
+
+describe('Reset sync with one computer', () => {
+  const states = (app: App) => app.group.jobs().map((job) => `${job.kind}:${job.peerId}:${(job.payload as { peerId?: string }).peerId ?? ''}:${job.state}`).sort();
+
+  it('discards only that peer\'s work that already failed; a current member keeps a removed peer\'s revocation', () => {
+    const a = fixture('a'), b = fixture('b'); found(a, b);
+    a.db.prepare('DELETE FROM sync_group_jobs').run();
+    const roster = a.group.roster()!;
+    a.group.queueJob(b.peer, 'roster', roster.rosterEpoch, roster);
+    a.group.queueJob('app-c', 'roster', roster.rosterEpoch, roster);
+    a.group.queueJob(a.peer, 'local-revoke', roster.rosterEpoch, { peerId: b.peer, scope: roster.repoId });
+    a.group.queueJob(b.peer, 'revoke', roster.rosterEpoch, { peerId: 'app-c', scope: roster.repoId });
+    a.db.prepare("UPDATE sync_group_jobs SET state = 'blocked', error = 'x' WHERE kind <> 'revoke'").run();
+    expect(a.group.resetPeer(b.peer)).toBe(1);
+    // Never-tried work, another computer's work and a member's revocation of a peer all stay.
+    expect(states(a)).toEqual([`local-revoke:${a.peer}:${b.peer}:blocked`, 'revoke:app-b:app-c:pending', 'roster:app-c::blocked']);
+    expect(() => a.group.resetPeer('../bad')).toThrow();
+  });
+
+  it('after this computer left, the revocation owed to that peer is superseded too; failed work is discarded', () => {
+    const a = fixture('a'), b = fixture('b'); found(a, b);
+    a.group.remove(a.replica);
+    expect(a.group.liveRoster()).toBeNull();
+    a.db.prepare("UPDATE sync_group_jobs SET state = 'failed', error = 'x' WHERE kind = 'roster'").run();
+    a.db.prepare("UPDATE sync_group_jobs SET state = 'blocked', error = 'x' WHERE kind = 'local-revoke'").run();
+    expect(a.group.resetPeer(b.peer)).toBeGreaterThanOrEqual(2);
+    expect(a.group.jobs().filter((job) => job.state !== 'done')).toEqual([]);
+    expect(a.group.rejoinState(b.peer)).toEqual({ kind: 'detach' });
+  });
+
+  it('a failed job is terminal: it never blocks rejoin and is not retried', () => {
+    const a = fixture('a'), b = fixture('b'); found(a, b);
+    a.group.remove(a.replica);
+    a.db.prepare("UPDATE sync_group_jobs SET state = 'failed' WHERE kind = 'roster'").run();
+    expect(a.group.removalDeliveryPending(b.peer)).toBe(false);
+    a.group.retryJobs();
+    expect(a.group.jobs(true).some((job) => job.state === 'failed')).toBe(false);
+    a.group.supersedeJob(a.group.jobs().find((job) => job.state === 'failed')!.id, 'n');
+    expect(a.group.jobs().some((job) => job.error === 'n')).toBe(false);
+  });
+});
