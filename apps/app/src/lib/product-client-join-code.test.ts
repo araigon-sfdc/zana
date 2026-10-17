@@ -28,6 +28,8 @@ describe('requestPreferredJoinCode', () => {
     await expect(requestPreferredJoinCode()).rejects.toMatchObject({ status: 409, code: 'relay_unavailable' });
     fetchMock.mockResolvedValueOnce(json(409, { error: 'other' }));
     await expect(requestPreferredJoinCode()).rejects.toMatchObject({ status: 409, code: 'other' });
+    fetchMock.mockResolvedValueOnce(new Response('not json', { status: 409 }));
+    await expect(requestPreferredJoinCode()).rejects.toMatchObject({ status: 409 });
     fetchMock.mockResolvedValueOnce(new Response('nope', { status: 500 }));
     await expect(requestPreferredJoinCode()).rejects.toMatchObject({ status: 500, message: '500' });
     fetchMock.mockResolvedValueOnce(json(400, { message: 'bad' }));
