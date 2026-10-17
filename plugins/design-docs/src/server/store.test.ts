@@ -424,6 +424,25 @@ describe('DesignDocStore — comments and threads', () => {
     for (let index = 0; index < MAX_COMMENTS_PER_DOC; index += 1) store.addComment(doc.id, { body: `c${index}` }, user);
   });
 
+  it('carries the newest message of the open threads in the summary', () => {
+    const store = makeStore({ frozenClock: true, ids: 'descending' });
+    const doc = store.create({ title: 'Doc', template: 'blank' }, user);
+    expect(store.summary(doc.id).lastComment).toBeNull();
+
+    const first = store.addComment(doc.id, { body: 'Why?' }, user);
+    const second = store.addComment(doc.id, { body: 'x'.repeat(400) }, agent);
+    // Same millisecond, ids counting down: the later write still wins.
+    expect(store.summary(doc.id).lastComment).toEqual({ body: 'x'.repeat(160), author: agent, createdAt: second.createdAt });
+    store.addReply(doc.id, first.id, 'Because.', agent);
+    expect(store.list()[0]!.lastComment).toMatchObject({ body: 'Because.', author: agent });
+
+    // A resolved thread's messages, replies included, no longer count.
+    store.setCommentStatus(doc.id, first.id, 'resolved', user);
+    expect(store.summary(doc.id).lastComment).toMatchObject({ body: 'x'.repeat(160) });
+    store.setCommentStatus(doc.id, second.id, 'resolved', user);
+    expect(store.summary(doc.id).lastComment).toBeNull();
+  });
+
   it('counts replies toward the comment cap', () => {
     const store = makeStore();
     const doc = store.create({ title: 'Doc', template: 'blank' }, user);
@@ -531,5 +550,53 @@ describe('DesignDocStore — pins and alternatives', () => {
     store.update(alternative.id, { alternativeTo: original.id }, user);
     store.remove(original.id);
     expect(store.summary(alternative.id).alternativeTo).toBeNull();
+  });
+});
+
+describe('DesignDocStore — summary lastComment', () => {
+  function makeSeededStore() {
+    const db = createTestDatabase();
+    let clock = 1_000;
+    let counter = 0;
+    const store = new DesignDocStore(db, {
+      now: () => (clock += 10),
+      randomId: (prefix) => `${prefix}${(counter += 1).toString().padStart(4, '0')}`
+    });
+    return { db, store };
+  }
+
+  it('is null without comments and when every thread is resolved', () => {
+    const { store } = makeSeededStore();
+    const doc = store.create({ title: 'Doc', template: 'blank' }, user);
+    expect(store.summary(doc.id).lastComment).toBeNull();
+    const root = store.addComment(doc.id, { body: 'Why?' }, user);
+    store.addReply(doc.id, root.id, 'Because', agent);
+    store.setCommentStatus(doc.id, root.id, 'resolved', user);
+    expect(store.summary(doc.id).lastComment).toBeNull();
+  });
+
+  it('carries the newest open comment or reply, truncated, with its author', () => {
+    const { store } = makeSeededStore();
+    const doc = store.create({ title: 'Doc', template: 'blank' }, user);
+    const root = store.addComment(doc.id, { body: 'First question' }, user);
+    expect(store.summary(doc.id).lastComment).toMatchObject({ body: 'First question', author: user });
+    store.addReply(doc.id, root.id, 'x'.repeat(400), agent);
+    const excerpt = store.summary(doc.id).lastComment!;
+    expect(excerpt.body).toBe('x'.repeat(160));
+    expect(excerpt.author).toEqual(agent);
+    expect(excerpt.createdAt).toBeGreaterThan(1_000);
+    expect(store.list().find((item) => item.id === doc.id)!.lastComment).toEqual(excerpt);
+    // A resolved thread no longer counts; the older open one is shown instead.
+    const other = store.addComment(doc.id, { body: 'Newer thread' }, user);
+    store.setCommentStatus(doc.id, other.id, 'resolved', user);
+    expect(store.summary(doc.id).lastComment).toMatchObject({ body: 'x'.repeat(160) });
+  });
+
+  it('tolerates a non-numeric timestamp', () => {
+    const { db, store } = makeSeededStore();
+    const doc = store.create({ title: 'Doc', template: 'blank' }, user);
+    const comment = store.addComment(doc.id, { body: 'hello' }, user);
+    db.prepare("UPDATE doc_comments SET created_at = 'later' WHERE id = ?").run(comment.id);
+    expect(store.summary(doc.id).lastComment).toMatchObject({ body: 'hello', author: user, createdAt: 0 });
   });
 });
