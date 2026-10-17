@@ -1,17 +1,21 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 import { X } from 'lucide-react';
 import type { EditorTab } from './studio-layout.js';
 
 const KIND_MARK: Record<EditorTab['kind'], string> = { agent: 'AGENT', apex: 'APEX', flow: 'FLOW', type: 'TYPE' };
 
 /** Open editor tabs: agent (editable), Apex (read-only), Flow (read-only map) and Lightning Type (read-only schema). */
-export function EditorTabs({ tabs, active, dirtyId, problems, onSelect, onClose }: {
+export function EditorTabs({ tabs, active, dirtyId, problems, problemsId, trailing, onSelect, onClose }: {
   tabs: EditorTab[];
   active: string | null;
   /** Tab id whose draft has unsaved edits. */
   dirtyId?: string | null;
-  /** Problem count shown on the active agent tab. */
+  /** Problem count of the loaded agent. */
   problems?: number;
+  /** Tab id the problems belong to: the loaded agent stays badged while a Flow or Apex tab is in front. Defaults to the active agent tab. */
+  problemsId?: string | null;
+  /** Project-wide controls pinned after the tabs, outside the scrolling strip. */
+  trailing?: ReactNode;
   onSelect(id: string): void;
   onClose(id: string): void;
 }) {
@@ -34,7 +38,8 @@ export function EditorTabs({ tabs, active, dirtyId, problems, onSelect, onClose 
     strip.current?.querySelector('.sf-etab.is-active')?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
   }, [active, tabs.length]);
   if (!hasTabs) return null;
-  return <div ref={strip} className="sf-etabs" role="tablist" aria-label="Open files">
+  const badged = problemsId === undefined ? active : problemsId;
+  const list = <div ref={strip} className="sf-etabs" role="tablist" aria-label="Open files">
     {tabs.map((tab, index) => {
       const selected = tab.id === active;
       return <span key={tab.id} className={`sf-etab${selected ? ' is-active' : ''}`} data-kind={tab.kind}>
@@ -50,10 +55,11 @@ export function EditorTabs({ tabs, active, dirtyId, problems, onSelect, onClose 
           <span className="sf-etab-name">{tab.label}</span>
           {tab.kind !== 'agent' && <span className="sf-etab-ro">read-only</span>}
           {dirtyId === tab.id && <span className="sf-etab-dirty" role="img" aria-label="Unsaved changes">●</span>}
-          {selected && tab.kind === 'agent' && problems ? <span className="sf-etab-problems" aria-label={`${problems} problems`}>{problems}</span> : null}
+          {tab.id === badged && tab.kind === 'agent' && problems ? <span className="sf-etab-problems" aria-label={`${problems} problems`}>{problems}</span> : null}
         </button>
         <button type="button" className="sf-etab-close" aria-label={`Close ${tab.label}`} onClick={() => onClose(tab.id)}><X size={11} aria-hidden="true" /></button>
       </span>;
     })}
   </div>;
+  return trailing ? <div className="sf-etabs-bar">{list}<div className="sf-etabs-actions">{trailing}</div></div> : list;
 }

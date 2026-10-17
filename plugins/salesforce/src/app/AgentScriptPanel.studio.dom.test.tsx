@@ -30,7 +30,7 @@ const baseRpc = async (_p: string, method: string, args?: any): Promise<unknown>
   if (method === 'orgs') return { ok: true, selectedAlias: 'dev', orgs: [] };
   if (method === 'agentFiles.read') return { ok: true, file: { path: args?.path, content: SOURCE, sha256: SHA } };
   if (method === 'agentFiles.write') return { ok: true, file: { path: args?.path, sha256: 'sha2' } };
-  if (method === 'studio.explorer') return { ok: true, nodes: [{ kind: 'agent', path: 'force-app/bots/QC.agent', apiName: 'QC' }, { kind: 'apex', apiName: 'Foo', path: 'force-app/classes/Foo.cls' }, { kind: 'scenario', path: 'tests/a.scenario.json', apiName: 'a' }, { kind: 'org-agent', apiName: 'OrgBot' }] };
+  if (method === 'studio.explorer') return { ok: true, nodes: [{ kind: 'agent', path: 'force-app/bots/QC.agent', apiName: 'QC' }, { kind: 'apex', apiName: 'Foo', path: 'force-app/classes/Foo.cls', usedBy: ['force-app/bots/QC.agent'] }, { kind: 'scenario', path: 'tests/a.scenario.json', apiName: 'a' }, { kind: 'org-agent', apiName: 'OrgBot' }] };
   if (method === 'studio.suites.list') return { ok: true, suites: [{ id: 's', path: 'tests/a.scenario.json', cases: [], lastResults: { x: { outcome: 'fail', runId: 'r', at: 1 } } }] };
   if (method === 'studio.comments.list') return { ok: true, comments: [] };
   if (method === 'studio.comments.add') return { ok: true };
@@ -258,6 +258,15 @@ describe('AgentScriptPanel studio layout', () => {
     expect(apex).toBeTruthy();
     await act(async () => { fireEvent.click(apex!); });
     expect(el.querySelector('[data-testid="studio-target-view"]')).toBeTruthy();
+    // The agent's document bar belongs to the agent tab; the strip keeps the workspace controls.
+    expect(el.querySelector('[data-testid="salesforce-agent-script-publish"]')).toBeNull();
+    expect(el.querySelector('.sf-etabs-actions [aria-label="Go to file"]')).toBeTruthy();
+    const back = el.querySelector<HTMLButtonElement>('.af-backlink');
+    expect(back?.textContent).toBe('← QC.agent');
+    await act(async () => { fireEvent.click(back!); });
+    expect(el.querySelector('[data-testid="studio-target-view"]')).toBeNull();
+    expect(el.querySelector('[data-testid="salesforce-agent-script-publish"]')).toBeTruthy();
+    await act(async () => { fireEvent.click(apex!); });
     const scenario = [...el.querySelectorAll('.sf-as-explorer button')].find(n => n.textContent?.includes('a.scenario') || n.textContent?.trim().startsWith('a'));
     if (scenario) await act(async () => { fireEvent.click(scenario); });
   });

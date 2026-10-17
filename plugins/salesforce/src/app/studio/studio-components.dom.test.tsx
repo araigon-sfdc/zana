@@ -77,6 +77,14 @@ describe('EditorTabs', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close Refund' }));
     expect(onClose).toHaveBeenCalledWith('flow:Refund');
   });
+  it('badges only the agent tab that owns the problems and renders trailing workspace controls', () => {
+    const { container, rerender } = render(<EditorTabs tabs={tabs} active="flow:Refund" problemsId="agent:a" problems={2} trailing={<button>Go to file</button>} onSelect={vi.fn()} onClose={vi.fn()} />);
+    expect(screen.getByLabelText('2 problems')).toBeTruthy();
+    expect(container.querySelector('.sf-etabs-bar .sf-etabs-actions')?.textContent).toBe('Go to file');
+    rerender(<EditorTabs tabs={tabs} active="agent:a" problemsId={null} problems={2} onSelect={vi.fn()} onClose={vi.fn()} />);
+    expect(screen.queryByLabelText('2 problems')).toBeNull();
+    expect(container.querySelector('.sf-etabs-bar')).toBeNull();
+  });
   it('turns a vertical wheel into sideways scrolling only when the strip overflows, and reveals the active tab', () => {
     const reveal = vi.fn();
     const original = HTMLElement.prototype.scrollIntoView;
