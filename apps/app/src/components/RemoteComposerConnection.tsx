@@ -29,10 +29,7 @@ export function RemoteComposerConnection({ project, hosts, onConnected, onError 
         kind: hostId ? 'fix' : 'install',
         target: project.remote!.host,
         startLogs: [hostId ? 'Reconnecting…' : 'Installing…'],
-        run: async (onEvent) => {
-          try { await product.relay.renewJoinWindow(); } catch { /* Bootstrap also renews pairing. */ }
-          return hostId ? product.hosts.repair(hostId, onEvent) : product.hosts.bootstrap(project.id, onEvent);
-        },
+        run: (onEvent) => hostId ? product.hosts.repair(hostId, onEvent) : product.hosts.bootstrap(project.id, onEvent),
         // Replayed by the drawer's Retry too.
         onSettled: async (events) => {
           const outcome = bootstrapOutcome(events);

@@ -1,5 +1,5 @@
 {
   "extends": "../../tsconfig.json",
-  "include": ["src/**/*.ts", "../server/src/bundled-relay-globals.d.ts"],
+  "include": ["src/**/*.ts", "../server/src/bundled-globals.d.ts"],
   "exclude": ["src/**/*.test.ts"]
 }

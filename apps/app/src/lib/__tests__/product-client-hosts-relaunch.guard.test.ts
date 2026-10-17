@@ -11,6 +11,6 @@ describe('product-client hosts.relaunchLocal', () => {
     const hostsBlock = source.slice(hostsStart, source.indexOf("if (name === 'marketplaces'", hostsStart));
     expect(hostsBlock).toContain('hasDesktopBridge()');
     expect(hostsBlock).toContain('desktop?.relaunchLocal');
-    expect(hostsBlock).toContain('desktop?.pairing');
+    expect(hostsBlock).not.toContain('pairing');
   });
 });

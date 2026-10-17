@@ -11,23 +11,25 @@ describe('requestPreferredJoinCode', () => {
   afterEach(() => fetchMock.mockReset());
 
   it('returns the issued code with its pairing URL', async () => {
-    fetchMock.mockResolvedValue(json(201, { joinCode: 'c', hostId: 'h', expiresAt: 1, pairingServerUrl: 'https://r/t/x' }));
+    fetchMock.mockResolvedValue(json(201, { joinCode: 'c', hostId: 'h', expiresAt: 1, pairingServerUrl: 'https://machine.example' }));
     await expect(requestPreferredJoinCode()).resolves.toEqual({
       ok: true,
-      join: { joinCode: 'c', hostId: 'h', expiresAt: 1, pairingServerUrl: 'https://r/t/x' }
+      join: { joinCode: 'c', hostId: 'h', expiresAt: 1, pairingServerUrl: 'https://machine.example' }
     });
   });
 
-  it('surfaces 409 relay refusals as typed results', async () => {
-    fetchMock.mockResolvedValueOnce(json(409, { error: 'relay_unavailable', reason: 'offline' }));
-    await expect(requestPreferredJoinCode()).resolves.toEqual({ ok: false, error: 'relay_unavailable', reason: 'offline' });
-    fetchMock.mockResolvedValueOnce(json(409, { error: 'relay_changed' }));
-    await expect(requestPreferredJoinCode()).resolves.toEqual({ ok: false, error: 'relay_changed' });
+  it('surfaces a 409 pairing refusal as a typed result', async () => {
+    fetchMock.mockResolvedValueOnce(json(409, { error: 'pairing_unavailable' }));
+    await expect(requestPreferredJoinCode()).resolves.toEqual({ ok: false, error: 'pairing_unavailable' });
   });
 
   it('throws for unknown 409 bodies and other failures', async () => {
+    fetchMock.mockResolvedValueOnce(json(409, { error: 'relay_unavailable' }));
+    await expect(requestPreferredJoinCode()).rejects.toMatchObject({ status: 409, code: 'relay_unavailable' });
     fetchMock.mockResolvedValueOnce(json(409, { error: 'other' }));
     await expect(requestPreferredJoinCode()).rejects.toMatchObject({ status: 409, code: 'other' });
+    fetchMock.mockResolvedValueOnce(new Response('not json', { status: 409 }));
+    await expect(requestPreferredJoinCode()).rejects.toMatchObject({ status: 409 });
     fetchMock.mockResolvedValueOnce(new Response('nope', { status: 500 }));
     await expect(requestPreferredJoinCode()).rejects.toMatchObject({ status: 500, message: '500' });
     fetchMock.mockResolvedValueOnce(json(400, { message: 'bad' }));

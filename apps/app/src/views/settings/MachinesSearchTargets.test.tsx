@@ -20,11 +20,6 @@ vi.mock('../../lib/product-client.js', () => ({
       retryUpdate: async () => undefined,
       remove: async () => undefined,
       relaunchLocal: async () => ({ ok: true as const })
-    },
-    relay: {
-      status: async () => ({ state: 'unconfigured' }),
-      renewJoinWindow: async () => ({ state: 'unconfigured' }),
-      onChanged: () => () => {}
     }
   }
 }));

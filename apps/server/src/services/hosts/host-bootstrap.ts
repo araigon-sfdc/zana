@@ -12,22 +12,11 @@ import type { ProductHttpContext } from '../../http/product-context.js';
 import { HostUnavailableError } from '../../http/host-hub.js';
 import { isDockerDesktopGatewayHost, resolvePublicAppUrl } from '../../http/public-app-url.js';
 import { resolveHostArtifact } from './host-artifact.js';
-import { resolvePairingTargetForContext, type PairingTarget } from './pairing-target.js';
 import type { ProjectRecord } from '../../project-store.js';
 import type { PeerDaemonStatusResult } from '@zana-ai/zcc-contracts/host-rpc';
 import { connectInstallCommand, issueConnectHostCode, usesConnect } from './connect-enrollment.js';
 import { ConnectRequestError } from '../../mobile/connect-account.js';
 import { randomInt } from 'node:crypto';
-
-const PEER_HOST_ID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-
-/** Reuse the id already on the machine so a retry does not mint a conflicting host. */
-export function reuseRemoteHostId(hostId: string | null | undefined): string | null {
-  if (typeof hostId !== 'string') return null;
-  const trimmed = hostId.trim();
-  return PEER_HOST_ID_RE.test(trimmed) ? trimmed : null;
-}
 
 const PEER_RPC_TIMEOUT_MS = 4 * 60_000;
 const CONNECT_WAIT_MS = 90_000;
@@ -188,19 +177,19 @@ function isDockerJoinOrigin(raw: string | undefined): boolean {
   }
 }
 
+export const NO_CONNECT_TUNNEL_LOG = 'Zana Connect is not set up; connecting through SSH…';
+
 /**
- * Where a remote daemon should join this server. A Docker Desktop gateway can
- * never enroll another computer; every other case is decided by the pairing
- * target selector, which falls back to an SSH tunnel instead of failing.
+ * A Docker Desktop gateway can never enroll another computer. Without Zana
+ * Connect, every remote joins through an SSH reverse tunnel to this server.
  */
-export async function resolveBootstrapTarget(ctx: ProductHttpContext): Promise<PairingTarget> {
+export function assertJoinOrigin(ctx: ProductHttpContext): void {
   const configUrl = ctx.config.getConfig().publicAppUrl;
   const url = resolvePublicAppUrl({ configUrl });
   // The resolver already drops Docker addresses; a Settings value that was dropped is reported.
   if (!url && isDockerJoinOrigin(configUrl)) {
     throw new HostBootstrapError('join_origin_invalid', DOCKER_JOIN_ORIGIN_ERROR);
   }
-  return resolvePairingTargetForContext(ctx);
 }
 
 function requirePrimaryHost(ctx: ProductHttpContext): HostRow {
@@ -215,19 +204,6 @@ function requirePrimaryHost(ctx: ProductHttpContext): HostRow {
     throw error;
   }
   return primary;
-}
-
-/** POSIX single-quote one shell word. */
-export function shQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
-}
-
-/** Every interpolated value is quoted: the server URL comes from configuration. */
-export function pairingCommand(server: string, joinCode: string, hostId: string): string {
-  return (
-    `curl -fL --progress-meter --connect-timeout 10 --max-time 60 --retry 2 ${shQuote(`${server}/install.sh`)}` +
-    ` | sh -s -- --join-code ${shQuote(joinCode)} --host-id ${shQuote(hostId)} --server ${shQuote(server)}`
-  );
 }
 
 export function sshFallbackPairingCommand(input: {
@@ -252,7 +228,6 @@ export function attachSshFallbackPairingCommand(
 ): HostBootstrapError {
   if (
     error.code !== 'join_expired'
-    && error.code !== 'relay_offline'
     && error.code !== 'daemon_unresponsive'
     && error.code !== 'join_origin_invalid'
     && error.code !== 'register_failed'
@@ -333,16 +308,6 @@ export function resolveHostBootstrapPlan(input: {
   if (!existing || existing.isPrimary) return { kind: 'install' };
   if (input.connected) return { kind: 'bind', hostId: existing.id };
   return { kind: 'repair', hostId: existing.id };
-}
-
-/**
- * Preserve an existing enrollment first. Restart also runs the daemon's
- * protocol updater; reinstall is a fallback when recovery actually fails.
- */
-export function resolveRepairPlan(
-  state: 'connected' | 'disconnected' | 'not_installed'
-): 'install' | 'restart' {
-  return state === 'not_installed' ? 'install' : 'restart';
 }
 
 function executionPath(remote: ProjectRemote, homeDir: string | null): string {
@@ -514,38 +479,6 @@ async function dumpPeerDaemonLogs(
     /* Best-effort: a missing primary or old daemon must not hide the wait error. */
     return '';
   }
-}
-
-async function issueJoinCodeForRemote(
-  ctx: ProductHttpContext,
-  remote: ProjectRemote,
-  serverUrl: string,
-  emit: HostBootstrapListener
-): Promise<{ joinCode: string; hostId: string }> {
-  try {
-    const serverHost = new URL(serverUrl).hostname;
-    const primary = requirePrimaryHost(ctx);
-    const status = await ctx.hostHub.callHostOnlineRpc<PeerDaemonStatusResult>({
-      hostId: primary.id,
-      command: {
-        type: 'peer_daemon.status',
-        remote: {
-          host: remote.host,
-          ...(remote.user ? { user: remote.user } : {}),
-          ...(remote.proxyJump ? { proxyJump: remote.proxyJump } : {})
-        },
-        serverHost
-      }
-    });
-    const reuse = reuseRemoteHostId(status.hostId);
-    if (reuse) {
-      emit({ type: 'log', text: 'Reusing the host id already on that machine…' });
-      return ctx.joinCodes.mintForHost(reuse);
-    }
-  } catch {
-    /* First install, or the identity probe failed — mint a new host id. */
-  }
-  return ctx.joinCodes.mint();
 }
 
 /** Mark the stage the install RPC failed in, from the primary's error code and output. */
@@ -851,10 +784,6 @@ async function installConnectPeer(
   return issued.hostId;
 }
 
-function pairingCommandForFailure(code: string, command: string): string | undefined {
-  return code === 'daemon_unresponsive' || code === 'register_failed' ? undefined : command;
-}
-
 function emitBootstrapError(
   emit: HostBootstrapListener,
   error: HostBootstrapError,
@@ -881,42 +810,9 @@ async function installNewRemote(
   stages: HostBootstrapStageTracker
 ): Promise<string> {
   if (usesConnect(ctx)) return installConnectPeer(ctx, remote, emit, stages);
-  const target = await resolveBootstrapTarget(ctx);
-  if (target.kind === 'tunnel') {
-    emit({ type: 'log', text: `Pairing relay unavailable (${target.reason}); connecting through SSH…` });
-    return (await installTunnelPeer(ctx, remote, emit, stages, ctx.joinCodes.mint())).hostId;
-  }
-  const serverUrl = target.serverUrl;
-  const issued = await issueJoinCodeForRemote(ctx, remote, serverUrl, emit);
-  const command = pairingCommand(serverUrl, issued.joinCode, issued.hostId);
-  try {
-    await installPeer(ctx, {
-      remote,
-      joinCode: issued.joinCode,
-      hostId: issued.hostId,
-      serverUrl,
-      serverHost: new URL(serverUrl).hostname,
-      emit,
-      stages
-    });
-  } catch (error) {
-    const classified = classifyInstallFailure(error);
-    throw new HostBootstrapError(
-      classified.code,
-      classified.message,
-      pairingCommandForFailure(classified.code, command)
-    );
-  }
-  const host = getHost(ctx.db, issued.hostId);
-  if (host) {
-    updateHostSshIdentity(ctx.db, host.id, {
-      host: remote.host,
-      user: remote.user,
-      proxyJump: remote.proxyJump
-    });
-  }
-  rememberTunnelRoute(ctx, issued.hostId, null);
-  return issued.hostId;
+  assertJoinOrigin(ctx);
+  emit({ type: 'log', text: NO_CONNECT_TUNNEL_LOG });
+  return (await installTunnelPeer(ctx, remote, emit, stages, ctx.joinCodes.mint())).hostId;
 }
 
 /**
@@ -1033,97 +929,9 @@ export async function repairHost(
       emit({ type: 'done', hostId });
       return events;
     }
-    const target = await resolveBootstrapTarget(ctx);
-    if (target.kind === 'tunnel') {
-      emit({ type: 'log', text: `Pairing relay unavailable (${target.reason}); connecting through SSH…` });
-      await installTunnelPeer(ctx, remote, emit, stages, ctx.joinCodes.mintForHost(hostId));
-      emit({ type: 'done', hostId });
-      return events;
-    }
-    const serverUrl = target.serverUrl;
-    const serverHost = new URL(serverUrl).hostname;
-    const primary = requirePrimaryHost(ctx);
-    emit({ type: 'log', text: 'Checking the remote host daemon…' });
-    stages.start('ssh', SSH_TIMEOUT_MS);
-    const status = await ctx.hostHub.callHostOnlineRpc<{
-      state: 'connected' | 'disconnected' | 'not_installed';
-      message?: string;
-    }>({
-      hostId: primary.id,
-      command: {
-        type: 'peer_daemon.status',
-        remote: {
-          host: remote.host,
-          ...(remote.user ? { user: remote.user } : {}),
-          ...(remote.proxyJump ? { proxyJump: remote.proxyJump } : {})
-        },
-        serverHost
-      }
-    });
-    stages.pass('ssh');
-    if (resolveRepairPlan(status.state) === 'restart') {
-      emit({ type: 'log', text: 'Restarting the remote host daemon…' });
-      stages.start('install', PEER_RPC_TIMEOUT_MS);
-      try {
-        const restarted = await ctx.hostHub.callHostOnlineRpc<{ ok: true; log: string }>({
-          hostId: primary.id,
-          timeoutMs: PEER_RPC_TIMEOUT_MS,
-          command: {
-            type: 'peer_daemon.restart',
-            remote: {
-              host: remote.host,
-              ...(remote.user ? { user: remote.user } : {}),
-              ...(remote.proxyJump ? { proxyJump: remote.proxyJump } : {})
-            },
-            serverHost
-          }
-        });
-        if (restarted.log.trim()) emitLogLines(emit, restarted.log.trim());
-        stages.pass('install');
-        const restartRemote = remote;
-        await awaitPeerRegistration(ctx, {
-          hostId,
-          emit,
-          stages,
-          dumpLogs: () => dumpPeerDaemonLogs(ctx, restartRemote, serverHost, emit)
-        });
-        rememberTunnelRoute(ctx, hostId, null);
-        emit({ type: 'done', hostId });
-        return events;
-      } catch {
-        stages.failRunning('Restart did not reconnect');
-        emit({ type: 'log', text: 'Restart did not reconnect; reinstalling…' });
-      }
-    } else {
-      emit({ type: 'log', text: 'Installing a fresh host-daemon artifact…' });
-    }
-    const issued = ctx.joinCodes.mintForHost(hostId);
-    const command = pairingCommand(serverUrl, issued.joinCode, issued.hostId);
-    try {
-      await installPeer(ctx, {
-        remote,
-        joinCode: issued.joinCode,
-        hostId: issued.hostId,
-        serverUrl,
-        serverHost,
-        emit,
-        stages
-      });
-    } catch (error) {
-      const classified = classifyInstallFailure(error);
-      throw new HostBootstrapError(
-        classified.code,
-        classified.message,
-        pairingCommandForFailure(classified.code, command)
-      );
-    }
-    updateHostSshIdentity(ctx.db, hostId, {
-      host: remote.host,
-      user: remote.user,
-      proxyJump: remote.proxyJump
-    });
-    rememberTunnelRoute(ctx, hostId, null);
-    ctx.hub.emit('hosts:changed', undefined);
+    assertJoinOrigin(ctx);
+    emit({ type: 'log', text: NO_CONNECT_TUNNEL_LOG });
+    await installTunnelPeer(ctx, remote, emit, stages, ctx.joinCodes.mintForHost(hostId));
     emit({ type: 'done', hostId });
     return events;
   } catch (error) {

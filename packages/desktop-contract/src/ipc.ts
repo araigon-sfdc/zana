@@ -52,14 +52,7 @@ export const IPC = {
     syncHosts: 'ssh:syncHosts'
   },
   hosts: {
-    relaunchLocal: 'hosts:relaunchLocal',
-    pairingStart: 'hosts:pairingStart',
-    pairingWrite: 'hosts:pairingWrite',
-    pairingResize: 'hosts:pairingResize',
-    pairingStop: 'hosts:pairingStop',
-    pairingStatus: 'hosts:pairingStatus',
-    pairingOnData: 'hosts:pairingOnData',
-    pairingOnExit: 'hosts:pairingOnExit'
+    relaunchLocal: 'hosts:relaunchLocal'
   },
   mobile: {
     enroll: 'mobile:enroll',

@@ -35,20 +35,6 @@ export function isLoopbackOrigin(url: string): boolean {
   }
 }
 
-/** http(s) origin (optional `/t/<session>` path) safe to interpolate into the installer. */
-export function sanitizePairingServerUrl(raw: string | null | undefined): string | null {
-  if (!raw) return null;
-  try {
-    const url = new URL(raw);
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
-    if (url.username || url.password || url.search || url.hash) return null;
-    if (!/^\/(?:t\/[A-Za-z0-9_-]+)?$/.test(url.pathname)) return null;
-    return `${url.origin}${url.pathname === '/' ? '' : url.pathname}`.replace(/\/$/, '');
-  } catch {
-    return null;
-  }
-}
-
 export function localListenPort(serverUrl: string | null | undefined): number | null {
   if (!serverUrl) return null;
   try {
@@ -84,31 +70,6 @@ export function sshPairingRemoteScript(input: {
     ` | sh -s -- --join-code ${input.joinCode} --host-id ${input.hostId} --server ${remoteServer}` +
     ` && echo Host daemon installed. Leave this SSH session open to keep the tunnel. && sleep infinity`
   );
-}
-
-export function pairingInstallScript(input: {
-  serverUrl: string;
-  joinCode: string;
-  hostId: string;
-}): string | null {
-  const server = sanitizePairingServerUrl(input.serverUrl);
-  if (!server || !isPairingJoinCode(input.joinCode) || !isPairingHostIdToken(input.hostId)) return null;
-  return (
-    `curl -fL --progress-meter --connect-timeout 10 --max-time 60 --retry 2 ${server}/install.sh` +
-    ` | sh -s -- --join-code ${input.joinCode} --host-id ${input.hostId} --server ${server}`
-  );
-}
-
-export function sshPublicPairingArgv(input: {
-  sshHost: string;
-  serverUrl: string;
-  joinCode: string;
-  hostId: string;
-}): SshPairingArgv | null {
-  const host = sanitizeSshHost(input.sshHost);
-  const remote = pairingInstallScript(input);
-  if (!host || !remote) return null;
-  return { command: 'ssh', args: [host, remote] };
 }
 
 export function sshPairingArgv(input: {

@@ -10,16 +10,7 @@ import { listHosts } from '@zana-ai/zcc-db';
 import { handleHostsApi } from './hosts-api.js';
 import { startProductServer, type ProductServer } from './product-server.js';
 
-const pairingMock = vi.hoisted(() => ({ resolve: null as null | (() => Promise<unknown>) }));
 const connectMock = vi.hoisted(() => ({ uses: false }));
-vi.mock('../services/hosts/pairing-target.js', async (importActual) => {
-  const actual = await importActual<typeof import('../services/hosts/pairing-target.js')>();
-  return {
-    ...actual,
-    resolvePairingTargetForContext: (ctx: never) =>
-      pairingMock.resolve ? pairingMock.resolve() : actual.resolvePairingTargetForContext(ctx)
-  };
-});
 vi.mock('../services/hosts/connect-enrollment.js', async (importActual) => {
   const actual = await importActual<typeof import('../services/hosts/connect-enrollment.js')>();
   return {
@@ -46,7 +37,6 @@ afterEach(async () => {
   server = null;
   delete process.env.ZCC_APP_URL;
   delete process.env.ZCC_HOST_ARTIFACT;
-  pairingMock.resolve = null;
   connectMock.uses = false;
   reconcileMock.active = false;
   reconcileMock.failure = undefined;
@@ -459,7 +449,7 @@ createServer((_req, res) => {
     });
     expect(missingUrl.status).toBe(200);
     const missingLines = (await missingUrl.text()).trim().split('\n').map((line) => JSON.parse(line));
-    expect(missingLines).toContainEqual({ type: 'log', text: 'Pairing relay unavailable (no_public_origin); connecting through SSH…' });
+    expect(missingLines).toContainEqual({ type: 'log', text: 'Zana Connect is not set up; connecting through SSH…' });
     expect(missingLines.at(-1)).toMatchObject({ type: 'error', code: 'primary_disconnected' });
 
     await server!.close();
@@ -745,55 +735,32 @@ describe('preferred join-code issuance', () => {
   }
   const preferred = '/api/v1/hosts/join-codes/preferred';
 
-  it.each(['no_public_origin', 'relay_unconfigured', 'relay_offline', 'no_session'])(
-    'returns 409 relay_unavailable without minting for tunnel reason %s',
-    async (reason) => {
-      pairingMock.resolve = async () => ({ kind: 'tunnel', reason });
-      const r = await call(preferred);
-      expect(r.status).toBe(409);
-      expect(r.body).toEqual({ error: 'relay_unavailable', reason });
-      expect(r.joinCodes.mint).not.toHaveBeenCalled();
-    }
-  );
-
-  it('issues a loopback-forwarder tunnel code when the relay is down and the forwarder is up', async () => {
-    pairingMock.resolve = async () => ({ kind: 'tunnel', reason: 'relay_offline' });
-    const r = await call(preferred, { pairingPort: 41234 });
-    expect(r.status).toBe(201);
-    expect(r.body).toEqual({ ...r.minted, pairingServerUrl: 'http://127.0.0.1:41234', pairingMode: 'tunnel' });
-    expect(r.joinCodes.mint).toHaveBeenCalledTimes(1);
+  it('returns 409 pairing_unavailable without minting when the forwarder is down', async () => {
+    const r = await call(preferred);
+    expect(r.status).toBe(409);
+    expect(r.body).toEqual({ error: 'pairing_unavailable' });
+    expect(r.joinCodes.mint).not.toHaveBeenCalled();
   });
 
-  it('binds the relay session url to the minted code', async () => {
-    pairingMock.resolve = async () => ({ kind: 'relay', serverUrl: 'https://relay.test/t/abc' });
-    const r = await call(preferred);
+  it('issues a loopback-forwarder tunnel code when the forwarder is up', async () => {
+    const r = await call(preferred, { pairingPort: 41234 });
     expect(r.status).toBe(201);
-    expect(r.body).toEqual({ ...r.minted, pairingServerUrl: 'https://relay.test/t/abc' });
+    expect(r.body).toEqual({ ...r.minted, pairingServerUrl: 'http://127.0.0.1:41234' });
+    expect(r.joinCodes.mint).toHaveBeenCalledTimes(1);
     expect(r.joinCodes.invalidateHost).not.toHaveBeenCalled();
   });
 
-  it('adds the direct url unchanged otherwise', async () => {
-    pairingMock.resolve = async () => ({ kind: 'direct', serverUrl: 'https://app.test' });
-    const r = await call(preferred);
-    expect(r.status).toBe(201);
-    expect(r.body).toEqual({ ...r.minted, pairingServerUrl: 'https://app.test' });
+  it('issues a tunnel code even when a public app URL is configured', async () => {
+    vi.stubEnv('ZCC_APP_URL', 'https://zcc.corp.example');
+    try {
+      const r = await call(preferred, { pairingPort: 41234 });
+      expect(r.body).toEqual({ ...r.minted, pairingServerUrl: 'http://127.0.0.1:41234' });
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
-  it.each([
-    ['session change', { kind: 'relay', serverUrl: 'https://relay.test/t/new' }],
-    ['kind change', { kind: 'direct', serverUrl: 'https://relay.test/t/abc' }],
-    ['tunnel', { kind: 'tunnel', reason: 'relay_offline' }]
-  ])('invalidates the code and returns relay_changed on %s mid-issue', async (_n, second) => {
-    const seq: unknown[] = [{ kind: 'relay', serverUrl: 'https://relay.test/t/abc' }, second];
-    pairingMock.resolve = async () => seq.shift();
-    const r = await call(preferred);
-    expect(r.status).toBe(409);
-    expect(r.body).toEqual({ error: 'relay_changed' });
-    expect(r.joinCodes.invalidateHost).toHaveBeenCalledWith('host-1');
-  });
-
-  it('leaves the raw route without target resolution', async () => {
-    pairingMock.resolve = async () => { throw new Error('should not resolve'); };
+  it('leaves the raw route without a pairing URL', async () => {
     const r = await call('/api/v1/hosts/join-codes');
     expect(r.status).toBe(201);
     expect(r.body).toEqual(r.minted);
@@ -801,7 +768,6 @@ describe('preferred join-code issuance', () => {
 
   it('leaves the Connect branch unchanged', async () => {
     connectMock.uses = true;
-    pairingMock.resolve = async () => { throw new Error('should not resolve'); };
     const r = await call(preferred);
     expect(r.status).toBe(201);
     expect(r.body).toMatchObject({ joinCode: 'c', enrollmentId: 'e', hostId: 'h' });

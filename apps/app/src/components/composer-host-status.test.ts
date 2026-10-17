@@ -297,10 +297,6 @@ describe('composer host status', () => {
       message: 'The pairing join window has closed. Reopen Add a machine so this laptop can renew the window, then try again.'
     })).toBe(PAIRING_DOOR_ERROR);
     expect(composerBootstrapErrorMessage({
-      code: 'relay_offline',
-      message: 'The pairing relay is offline.'
-    })).toBe(PAIRING_DOOR_ERROR);
-    expect(composerBootstrapErrorMessage({
       code: 'daemon_unresponsive',
       message: 'host abc did not connect'
     })).toBe(DAEMON_UNRESPONSIVE_ERROR);

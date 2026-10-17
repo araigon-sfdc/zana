@@ -160,7 +160,6 @@ jobs:
           # electron-vite build; raise it (matches the build job below).
           NODE_OPTIONS: --max-old-space-size=6144
           ZCC_APP_URL: ${{ secrets.ZCC_APP_URL }}
-          ZCC_RELAY_TOKEN: ${{ secrets.ZCC_RELAY_TOKEN }}
           ZCC_POSTHOG_API_KEY: ${{ secrets.ZCC_POSTHOG_API_KEY }}
           ZCC_GA4_MEASUREMENT_ID: ${{ secrets.ZCC_GA4_MEASUREMENT_ID }}
           ZCC_GA4_API_SECRET: ${{ secrets.ZCC_GA4_API_SECRET }}
@@ -279,9 +278,7 @@ jobs:
           # (FATAL: JavaScript heap out of memory). Raise the limit; macos
           # runners have >=7 GB RAM.
           NODE_OPTIONS: --max-old-space-size=6144
-          ZCC_RELEASE_BUILD: '1'
           ZCC_APP_URL: ${{ secrets.ZCC_APP_URL }}
-          ZCC_RELAY_TOKEN: ${{ secrets.ZCC_RELAY_TOKEN }}
           ZCC_POSTHOG_API_KEY: ${{ secrets.ZCC_POSTHOG_API_KEY }}
           ZCC_GA4_MEASUREMENT_ID: ${{ secrets.ZCC_GA4_MEASUREMENT_ID }}
           ZCC_GA4_API_SECRET: ${{ secrets.ZCC_GA4_API_SECRET }}
@@ -361,9 +358,7 @@ jobs:
         run: pnpm run build
         env:
           NODE_OPTIONS: --max-old-space-size=6144
-          ZCC_RELEASE_BUILD: '1'
           ZCC_APP_URL: ${{ secrets.ZCC_APP_URL }}
-          ZCC_RELAY_TOKEN: ${{ secrets.ZCC_RELAY_TOKEN }}
           ZCC_POSTHOG_API_KEY: ${{ secrets.ZCC_POSTHOG_API_KEY }}
           ZCC_GA4_MEASUREMENT_ID: ${{ secrets.ZCC_GA4_MEASUREMENT_ID }}
           ZCC_GA4_API_SECRET: ${{ secrets.ZCC_GA4_API_SECRET }}

@@ -21,7 +21,7 @@ export function composerBootstrapErrorMessage(outcome: {
   code: string;
   message: string;
 }): string {
-  if (outcome.code === 'join_expired' || outcome.code === 'relay_offline') {
+  if (outcome.code === 'join_expired') {
     return PAIRING_DOOR_ERROR;
   }
   if (outcome.code === 'daemon_unresponsive') {

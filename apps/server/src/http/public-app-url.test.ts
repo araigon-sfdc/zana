@@ -67,21 +67,19 @@ describe('public app URL', () => {
     expect(resolvePublicAppUrl({ env: {}, configUrl: undefined })).toBeUndefined();
   });
 
-  it('presents the resolved public origin and strips a stored relay token', () => {
+  it('presents the resolved public origin', () => {
     expect(presentAppConfig({ theme: 'dark' }, {
       env: {},
       bundledUrl: 'https://zcc-7808c5bc8f3d.herokuapp.com'
     })).toEqual({
       theme: 'dark',
-      publicAppUrl: 'https://zcc-7808c5bc8f3d.herokuapp.com',
-      relayToken: undefined
+      publicAppUrl: 'https://zcc-7808c5bc8f3d.herokuapp.com'
     });
     expect(presentAppConfig(
-      { publicAppUrl: 'https://machine.example.com', relayToken: 'secret' },
+      { publicAppUrl: 'https://machine.example.com' },
       { env: { ZCC_APP_URL: 'https://from-env.example' } }
     )).toEqual({
-      publicAppUrl: 'https://from-env.example',
-      relayToken: undefined
+      publicAppUrl: 'https://from-env.example'
     });
     const stored = { publicAppUrl: 'https://machine.example.com' };
     expect(presentAppConfig(stored, { env: {}, bundledUrl: '' })).toBe(stored);

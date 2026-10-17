@@ -1,8 +1,6 @@
 /**
- * Laptop-side copy of website/relay/allowlist.json.
- * The dyno reads the JSON; this module is what ships in the desktop app
- * (website/ is not in the Electron package). Keep them identical — see
- * pairing-relay-allowlist.guard.test.ts.
+ * The only routes a remote machine may reach through the SSH-tunnel pairing
+ * forwarder: the installer, enrollment and the enrolled daemon's callbacks.
  */
 export const PAIRING_ALLOWLIST = {
   http: [
@@ -40,7 +38,7 @@ export function isAllowedWs(pathname: string): boolean {
 }
 
 /**
- * Resolve a relayed request target against the fixed product origin.
+ * Resolve a forwarded request target against the fixed product origin.
  * Only origin-form targets (`/path?query`) are accepted: an authority-bearing
  * target such as `//evil:1/internal/hosts/enroll` (or its `/\` variant) would
  * pass a pathname check yet make `new URL(target, origin)` contact another

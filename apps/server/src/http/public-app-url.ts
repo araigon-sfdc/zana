@@ -70,7 +70,6 @@ function compileTimeAppUrl(): string | undefined {
  *
  * Precedence: runtime `ZCC_APP_URL` > compile-time bake (`electron-vite` main
  * define from the same env) > Settings `publicAppUrl` > repo `public-app-url`.
- * The pairing relay token stays env/bake only and never reaches the renderer.
  */
 export function resolvePublicAppUrl(input?: {
   env?: NodeJS.ProcessEnv;
@@ -88,8 +87,8 @@ export function resolvePublicAppUrl(input?: {
     ?? parseJoinPublicOrigin(readPublicAppUrlFile(input?.cwd));
 }
 
-/** Renderer-facing config: resolved public origin; never the relay token. */
-export function presentAppConfig<T extends { publicAppUrl?: string; relayToken?: string }>(
+/** Renderer-facing config with the resolved public origin. */
+export function presentAppConfig<T extends { publicAppUrl?: string }>(
   config: T,
   input?: { env?: NodeJS.ProcessEnv; bundledUrl?: string | null }
 ): T {
@@ -98,8 +97,8 @@ export function presentAppConfig<T extends { publicAppUrl?: string; relayToken?:
     ...(input && 'bundledUrl' in input ? { bundledUrl: input.bundledUrl } : {}),
     configUrl: config.publicAppUrl
   });
-  if (publicAppUrl === config.publicAppUrl && config.relayToken === undefined) return config;
-  return { ...config, publicAppUrl, relayToken: undefined };
+  if (publicAppUrl === config.publicAppUrl) return config;
+  return { ...config, publicAppUrl };
 }
 
 export function publicOriginHost(publicAppUrl: string | undefined): string | undefined {
@@ -113,9 +112,8 @@ export function publicOriginHost(publicAppUrl: string | undefined): string | und
 
 /**
  * Host-internal enroll/WS accept loopback Host headers (local daemon), Docker
- * Desktop's host.docker.internal gateway, or the configured public origin
- * (the configured HTTPS pairing relay). DNS-rebinding Host headers that match none of
- * those are refused.
+ * Desktop's host.docker.internal gateway, or the configured public origin.
+ * DNS-rebinding Host headers that match none of those are refused.
  */
 export function isAllowedHostInternalHost(
   hostHeader: string | undefined,

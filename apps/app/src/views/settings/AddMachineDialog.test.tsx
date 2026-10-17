@@ -10,29 +10,17 @@ import { AddMachineDialog, AddMachineDialogView } from './AddMachineDialog.js';
 const api = vi.hoisted(() => ({
   bridge: true,
   liveHosts: [] as Array<{ id: string; name: string; status: string }>,
-  relay: {
-    status: vi.fn(),
-    onChanged: vi.fn(() => () => {}),
-    renewJoinWindow: vi.fn()
-  },
   ssh: { syncHosts: vi.fn(), listHosts: vi.fn() },
   hosts: {
     createJoinCode: vi.fn(),
     list: vi.fn(),
     onChanged: vi.fn(() => () => {}),
     bootstrapBySsh: vi.fn(),
-    updateSshIdentity: vi.fn(),
-    pairing: {
-      start: vi.fn(),
-      stop: vi.fn(),
-      status: vi.fn(),
-      onExit: vi.fn(() => () => {}),
-      onData: vi.fn(() => () => {})
-    }
+    updateSshIdentity: vi.fn()
   }
 }));
 vi.mock('../../lib/product-client.js', () => ({
-  product: { relay: api.relay, ssh: api.ssh, hosts: api.hosts },
+  product: { ssh: api.ssh, hosts: api.hosts },
   requestPreferredJoinCode: async () => {
     const issued = await api.hosts.createJoinCode();
     return issued && issued.ok === false ? issued : { ok: true, join: issued };
@@ -45,7 +33,6 @@ vi.mock('../../components/Modal.js', () => ({
     <div role="dialog" aria-label={title}><h2>{title}</h2>{children}{footer}</div>
   )
 }));
-vi.mock('./PairingTerminal.js', () => ({ PairingTerminal: () => <div data-testid="add-machine-pairing-terminal" /> }));
 
 const command = 'curl -fL --progress-meter --connect-timeout 10 --max-time 60 --retry 2 https://machine.example.com/install.sh | sh -s -- --join-code zcde_abc --host-id host-1 --server https://machine.example.com';
 const loopbackCommand = 'curl -fL --progress-meter --connect-timeout 10 --max-time 60 --retry 2 http://127.0.0.1:8780/install.sh | sh -s -- --join-code zcde_abc --host-id host-1 --server http://127.0.0.1:8780';
@@ -101,7 +88,6 @@ describe('AddMachineDialogView', () => {
     expect(html).toContain('only reachable on this computer');
     expect(html).toContain('data-testid="add-machine-ssh-host"');
     expect(html).toContain('No remote projects or SSH hosts found.');
-    expect(html).not.toContain('Configure the machine-pairing relay before pairing');
   });
 
   it('copies an SSH reverse-tunnel command for a workspace host', () => {
@@ -121,7 +107,7 @@ describe('AddMachineDialogView', () => {
     }));
     expect(html).toContain('ssh -o ExitOnForwardFailure=yes -R 18782:127.0.0.1:8780 limited-pony');
     expect(html).toContain('Run this on this computer');
-    expect(html).toContain('copy and paste it locally');
+    expect(html).toContain('Paste it in a terminal on this computer');
     expect(html).toContain('educational-roadrunner');
     expect(html).toContain('kit-kat');
     expect(html).toContain('limited-pony');
@@ -152,17 +138,6 @@ describe('AddMachineDialogView', () => {
     }));
     expect(html).toContain('Code expired');
     expect(html).toContain('Generate a new code');
-    expect(html).toContain('disabled=""');
-  });
-
-  it('offers renew when the relay join window has closed', () => {
-    const html = renderToStaticMarkup(view({
-      remainingMs: 0,
-      expired: true,
-      joinWindowClosed: true
-    }));
-    expect(html).toContain('Join window closed');
-    expect(html).toContain('Renew join window');
     expect(html).toContain('disabled=""');
   });
 
@@ -197,39 +172,26 @@ describe('AddMachineDialogView', () => {
     expect(html).toContain('Waiting for the machine to connect…');
   });
 
-  it('does not offer Run for the remote curl installer', () => {
-    const html = renderToStaticMarkup(view());
+  it('never offers a Run or Stop control', () => {
+    const html = renderToStaticMarkup(view({ command: sshCommand, viaSsh: true, pairingMethod: 'ssh', sshHost: 'limited-pony' }));
     expect(html).toContain('Copy');
     expect(html).not.toContain('data-testid="add-machine-run"');
-    expect(html).not.toContain('Stop tunnel');
+    expect(html).not.toContain('data-testid="add-machine-stop-tunnel"');
   });
 
-  it('offers Run and a mini terminal for SSH pairing on this computer', () => {
+  it('tells the user to paste the ssh -R command on this computer and keep the tunnel open', () => {
     const html = renderToStaticMarkup(view({
       command: sshCommand,
       remainingMs: 60_000,
       loopbackWarning: true,
       viaSsh: true,
       pairingMethod: 'ssh',
-      canRun: true,
-      pairingRunning: true,
-      pairingVisible: true,
-      pairingSlot: <div data-testid="add-machine-pairing-terminal" />,
       sshHost: 'limited-pony',
       sshHosts: [{ host: 'limited-pony', label: 'limited-pony', group: 'project' }]
     }));
-    expect(html).toContain('Copy');
-    expect(html).toContain('data-testid="add-machine-run"');
-    expect(html).toContain('Stop tunnel');
-    expect(html).toContain('data-testid="add-machine-pairing-terminal"');
-    expect(html).toContain('Run it here');
-  });
-
-  it('shows an alert for a nonzero pairing exit and none otherwise', () => {
-    const html = renderToStaticMarkup(view({ pairingMethod: 'ssh', pairingExitCode: 255 }));
-    expect(html).toContain('role="alert"');
-    expect(html).toContain('Pairing exited with code 255 — see output above.');
-    expect(renderToStaticMarkup(view({ pairingMethod: 'ssh', pairingExitCode: null }))).not.toContain('Pairing exited');
+    expect(html).toContain('Paste it in a terminal on this computer (not on the remote)');
+    expect(html).toContain('Leave the tunnel open');
+    expect(html).not.toContain('This address is only reachable on this computer');
   });
 
   it('lets the user choose SSH or the installer command', () => {
@@ -241,17 +203,14 @@ describe('AddMachineDialogView', () => {
     expect(html).toContain('data-testid="add-machine-method-command"');
     expect(html).toContain('Installer command');
     expect(html).not.toContain('data-testid="add-machine-ssh-host"');
-    expect(html).not.toContain('data-testid="add-machine-run"');
 
     const ssh = renderToStaticMarkup(view({
       showMethodToggle: true,
       pairingMethod: 'ssh',
-      canRun: true,
       sshHost: 'limited-pony',
       sshHosts: [{ host: 'limited-pony', label: 'limited-pony', group: 'project' }]
     }));
     expect(ssh).toContain('data-testid="add-machine-ssh-host"');
-    expect(ssh).toContain('data-testid="add-machine-run"');
   });
 
   it('copies through the desktop clipboard bridge', () => {
@@ -262,18 +221,14 @@ describe('AddMachineDialogView', () => {
 });
 
 describe('AddMachineDialog Connect', () => {
-  const join = { joinCode: 'zcde_abc', hostId: 'host-1', expiresAt: Date.now() + 10 * 60_000, pairingServerUrl: 'https://relay.example.com/t/zcrs_abcdefghijklmnopqr1234' };
+  const join = { joinCode: 'zcde_abc', hostId: 'host-1', expiresAt: Date.now() + 10 * 60_000, pairingServerUrl: 'http://127.0.0.1:8780' };
 
   beforeEach(() => {
     api.bridge = true;
     api.liveHosts = [];
-    api.relay.status.mockResolvedValue({ state: 'unconfigured' });
-    api.relay.renewJoinWindow.mockResolvedValue({ state: 'unconfigured' });
     api.hosts.createJoinCode.mockResolvedValue(join);
     api.hosts.updateSshIdentity.mockResolvedValue({});
     api.hosts.list.mockResolvedValue([{ id: 'host-9', name: 'Pony box', status: 'connected' }]);
-    api.hosts.pairing.status.mockResolvedValue({ running: false, sshHost: null, backlog: '', exitCode: null });
-    api.hosts.pairing.start.mockResolvedValue({ ok: true, handoff: 'tunnel', reason: 'relay_offline' });
     api.ssh.syncHosts.mockResolvedValue({ hosts: [{ alias: 'limited-pony', hostname: 'pony.example', user: 'geoff' }] });
   });
   afterEach(() => { cleanup(); vi.clearAllMocks(); });
@@ -318,7 +273,7 @@ describe('AddMachineDialog Connect', () => {
     expect(await screen.findByText('Could not read SSH hosts.')).toBeTruthy();
   });
 
-  it('hands off to the host-scoped bootstrap stream and renders stages through Connected', async () => {
+  it('connects through the host-scoped bootstrap stream and renders stages through Connected', async () => {
     api.hosts.bootstrapBySsh.mockImplementation(async (_ssh: unknown, onEvent: (event: HostBootstrapEvent) => void) => {
       const events: HostBootstrapEvent[] = [
         { type: 'stage', stage: 'ssh', status: 'running' },
@@ -336,7 +291,6 @@ describe('AddMachineDialog Connect', () => {
     expect(screen.getByTestId('add-machine-other-ways').tagName).toBe('DETAILS');
     fireEvent.click(screen.getByTestId('add-machine-connect'));
     expect(await screen.findByText('Pony box connected')).toBeTruthy();
-    expect(api.hosts.pairing.start).toHaveBeenCalledWith(expect.objectContaining({ sshHost: 'limited-pony', joinCode: 'zcde_abc' }));
     expect(api.hosts.bootstrapBySsh).toHaveBeenCalledWith({ host: 'limited-pony', user: 'geoff' }, expect.any(Function));
     expect(screen.getByTestId('host-install-stage-ssh').getAttribute('data-status')).toBe('passed');
     expect(screen.getByTestId('host-install-stage-connected').getAttribute('data-status')).toBe('passed');
@@ -384,27 +338,6 @@ describe('AddMachineDialog Connect', () => {
     expect(api.hosts.bootstrapBySsh).toHaveBeenCalledTimes(3);
   });
 
-  it('keeps the relay/direct PTY path: no bootstrap, terminal shown, Stop ends it', async () => {
-    api.hosts.pairing.start.mockResolvedValue({ ok: true, handoff: 'pty' });
-    open();
-    await chooseSsh();
-    fireEvent.click(screen.getByTestId('add-machine-connect'));
-    expect(await screen.findByTestId('add-machine-pairing-terminal')).toBeTruthy();
-    expect(api.hosts.bootstrapBySsh).not.toHaveBeenCalled();
-    expect(screen.getAllByTestId('add-machine-stop-tunnel')).toHaveLength(1);
-    await act(async () => { fireEvent.click(screen.getByTestId('add-machine-stop-tunnel')); });
-    expect(api.hosts.pairing.stop).toHaveBeenCalled();
-  });
-
-  it('surfaces a pairing-start refusal', async () => {
-    api.hosts.pairing.start.mockResolvedValue({ ok: false, message: 'Choose a valid SSH host' });
-    open();
-    await chooseSsh();
-    fireEvent.click(screen.getByTestId('add-machine-connect'));
-    expect(await screen.findByText('Choose a valid SSH host')).toBeTruthy();
-    expect(api.hosts.bootstrapBySsh).not.toHaveBeenCalled();
-  });
-
   it('goes straight to bootstrap when no join code could be minted', async () => {
     api.hosts.createJoinCode.mockRejectedValue(new Error('offline'));
     api.hosts.bootstrapBySsh.mockResolvedValue([{ type: 'done', hostId: 'host-9' }]);
@@ -413,7 +346,6 @@ describe('AddMachineDialog Connect', () => {
     await chooseSsh();
     fireEvent.click(screen.getByTestId('add-machine-connect'));
     expect(await screen.findByText('Pony box connected')).toBeTruthy();
-    expect(api.hosts.pairing.start).not.toHaveBeenCalled();
     expect(api.hosts.bootstrapBySsh).toHaveBeenCalledWith({ host: 'limited-pony' }, expect.any(Function));
   });
 
@@ -426,40 +358,39 @@ describe('AddMachineDialog Connect', () => {
     expect(api.ssh.syncHosts).not.toHaveBeenCalled();
   });
 
-  it('uses the issued pairing URL for the copy command, never the bare relay origin', async () => {
+  it('tunnels the copy command to the issued loopback forwarder', async () => {
     api.bridge = false;
     open();
     const text = (await screen.findByTestId('machines-join-command')).textContent ?? '';
-    expect(text).toContain('--server https://relay.example.com/t/zcrs_abcdefghijklmnopqr1234');
-    expect(text).toContain('https://relay.example.com/t/zcrs_abcdefghijklmnopqr1234/install.sh');
-    expect(text).not.toMatch(/https:\/\/relay\.example\.com(?!\/t\/)/);
+    expect(text).toContain('-R 18782:127.0.0.1:8780 limited-pony');
+    expect(text).toContain('--server http://127.0.0.1:18782');
   });
 
-  it('on relay_unavailable disables Copy with the message while Connect stays enabled', async () => {
-    api.hosts.createJoinCode.mockResolvedValue({ ok: false, error: 'relay_unavailable', reason: 'offline' });
+  it('on pairing_unavailable disables Copy with the message while Connect stays enabled', async () => {
+    api.hosts.createJoinCode.mockResolvedValue({ ok: false, error: 'pairing_unavailable' });
     open();
     await chooseSsh();
-    const box = await screen.findByTestId('add-machine-relay-unavailable');
-    expect(box.textContent).toContain('Relay unavailable — use Connect via SSH');
+    const box = await screen.findByTestId('add-machine-pairing-unavailable');
+    expect(box.textContent).toContain('The pairing listener is not running — use Connect via SSH');
     expect((screen.getByRole('button', { name: 'Copy' }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.queryByTestId('machines-join-command')).toBeNull();
     expect((screen.getByTestId('add-machine-connect') as HTMLButtonElement).disabled).toBe(false);
   });
 
-  it('offers a copyable ssh -R command on the Installer tab when the relay is offline', async () => {
-    api.hosts.createJoinCode.mockResolvedValue({ ...join, pairingServerUrl: 'http://127.0.0.1:8780', pairingMode: 'tunnel' });
+  it('offers a copyable ssh -R command on the Installer tab with a tunnel-issued code', async () => {
+    api.hosts.createJoinCode.mockResolvedValue(join);
     open();
     fireEvent.click(await screen.findByTestId('add-machine-method-command'));
     const text = (await screen.findByTestId('machines-join-command')).textContent ?? '';
     expect(text).toContain('ssh -o ExitOnForwardFailure=yes -R');
     expect(text).toContain('limited-pony');
     expect(text).toContain('--join-code zcde_abc');
-    expect(screen.queryByTestId('add-machine-relay-unavailable')).toBeNull();
+    expect(screen.queryByTestId('add-machine-pairing-unavailable')).toBeNull();
     expect((screen.getByRole('button', { name: 'Copy' }) as HTMLButtonElement).disabled).toBe(false);
   });
 
   it('records the SSH identity once a machine paired by the ssh -R command connects', async () => {
-    api.hosts.createJoinCode.mockResolvedValue({ ...join, pairingServerUrl: 'http://127.0.0.1:8780', pairingMode: 'tunnel' });
+    api.hosts.createJoinCode.mockResolvedValue(join);
     api.liveHosts = [{ id: 'host-1', name: 'Pony box', status: 'connected' }];
     open();
     fireEvent.click(await screen.findByTestId('add-machine-method-command'));
@@ -469,7 +400,7 @@ describe('AddMachineDialog Connect', () => {
   });
 
   it('keeps Connect available on the SSH tab with a tunnel-issued code', async () => {
-    api.hosts.createJoinCode.mockResolvedValue({ ...join, pairingServerUrl: 'http://127.0.0.1:8780', pairingMode: 'tunnel' });
+    api.hosts.createJoinCode.mockResolvedValue(join);
     open();
     await chooseSsh();
     expect((screen.getByTestId('add-machine-connect') as HTMLButtonElement).disabled).toBe(false);
@@ -479,17 +410,17 @@ describe('AddMachineDialog Connect', () => {
     const html = renderToStaticMarkup(view({ command: null, tunnelIssued: true, pairingMethod: 'command', showMethodToggle: true }));
     expect(html).toContain('add-machine-tunnel-pick-host');
     expect(html).toContain('data-testid="add-machine-ssh-host"');
-    expect(html).toContain('relay is offline');
+    expect(html).toContain('Pick an SSH host above');
   });
 
-  it('hides the waiting spinner when relay is unavailable and nothing was issued', async () => {
+  it('hides the waiting spinner when pairing is unavailable and nothing was issued', async () => {
     api.bridge = false;
-    api.hosts.createJoinCode.mockResolvedValue({ ok: false, error: 'relay_unavailable', reason: 'offline' });
+    api.hosts.createJoinCode.mockResolvedValue({ ok: false, error: 'pairing_unavailable' });
     open();
-    const box = await screen.findByTestId('add-machine-relay-unavailable');
+    const box = await screen.findByTestId('add-machine-pairing-unavailable');
     expect(box.textContent).not.toContain('Connect via SSH');
-    expect(box.textContent).toContain('public URL');
-    expect(box.textContent).toContain('relay');
+    expect(box.textContent).toContain('The pairing listener is not running');
+    expect(box.textContent).toContain('Zana Connect');
     expect(screen.queryByText('Waiting for the machine to connect…')).toBeNull();
   });
 
@@ -500,14 +431,15 @@ describe('AddMachineDialog Connect', () => {
     expect(screen.queryByText('Waiting for the machine to connect…')).toBeNull();
   });
 
-  it('shows a retryable error on relay_changed and rejects an issuance with no pairing URL', async () => {
+  it('rejects an issuance with no pairing URL and retries', async () => {
     api.bridge = false;
-    api.hosts.createJoinCode.mockResolvedValueOnce({ ok: false, error: 'relay_changed' });
+    api.hosts.createJoinCode
+      .mockResolvedValueOnce({ joinCode: 'zcde_x', hostId: 'host-1', expiresAt: Date.now() + 60_000 })
+      .mockResolvedValueOnce(join);
     open();
-    expect(await screen.findByText('The relay changed while creating the code.')).toBeTruthy();
-    api.hosts.createJoinCode.mockResolvedValueOnce({ joinCode: 'zcde_x', hostId: 'host-1', expiresAt: Date.now() + 60_000 });
-    fireEvent.click(screen.getByText('Try again'));
     expect(await screen.findByText('The server did not return a pairing address.')).toBeTruthy();
+    fireEvent.click(screen.getByText('Try again'));
+    expect((await screen.findByTestId('machines-join-command')).textContent).toContain('zcde_abc');
   });
 
   it('ignores a stale issuance reply after close/reopen and keeps code and URL from one issuance', async () => {
@@ -515,7 +447,7 @@ describe('AddMachineDialog Connect', () => {
     let resolveOld: (value: unknown) => void = () => {};
     api.hosts.createJoinCode
       .mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve; }))
-      .mockResolvedValueOnce({ ...join, joinCode: 'zcde_new', pairingServerUrl: 'https://relay.example.com/t/zcrs_newnewnewnewnewnew1234' });
+      .mockResolvedValueOnce({ ...join, joinCode: 'zcde_new', pairingServerUrl: 'http://127.0.0.1:8790' });
     const props = { onClose: vi.fn(), publicAppUrl: null, defaultSshHost: 'limited-pony' };
     const view = render(<AddMachineDialog open {...props} />);
     view.rerender(<AddMachineDialog open={false} {...props} />);
@@ -525,7 +457,7 @@ describe('AddMachineDialog Connect', () => {
     await act(async () => { resolveOld(join); });
     const after = screen.getByTestId('machines-join-command').textContent ?? '';
     expect(after).toContain('--join-code zcde_new');
-    expect(after).toContain('zcrs_newnewnewnewnewnew1234');
+    expect(after).toContain('127.0.0.1:8790');
     expect(after).not.toContain('zcde_abc');
   });
 
@@ -533,12 +465,12 @@ describe('AddMachineDialog Connect', () => {
     api.bridge = false;
     api.hosts.createJoinCode
       .mockResolvedValueOnce({ ...join, expiresAt: Date.now() - 1000 })
-      .mockResolvedValueOnce({ ...join, joinCode: 'zcde_two', pairingServerUrl: 'https://relay.example.com/t/zcrs_twotwotwotwotwotwo1234' });
+      .mockResolvedValueOnce({ ...join, joinCode: 'zcde_two', pairingServerUrl: 'http://127.0.0.1:8791' });
     open();
     expect((await screen.findByTestId('machines-join-command')).textContent).toContain('zcde_abc');
     fireEvent.click(screen.getByText('Generate a new code'));
     await waitFor(() => expect(screen.getByTestId('machines-join-command').textContent).toContain('zcde_two'));
-    expect(screen.getByTestId('machines-join-command').textContent).toContain('zcrs_twotwotwotwotwotwo1234');
+    expect(screen.getByTestId('machines-join-command').textContent).toContain('127.0.0.1:8791');
   });
 });
 
@@ -549,7 +481,6 @@ describe('AddMachineDialogView connect mode', () => {
       pairingMethod: 'ssh',
       connectMode: true,
       canConnect: true,
-      canRun: true,
       sshHost: 'limited-pony',
       sshHosts: [{ host: 'limited-pony', label: 'limited-pony', group: 'project' }],
       onConnect: vi.fn(),

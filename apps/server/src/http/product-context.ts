@@ -96,7 +96,6 @@ export interface ProductHttpContext {
   terminalSessions: Map<string, ProductTerminalRecord>;
   plugins?: PluginService;
   pluginHostArtifacts: PluginHostArtifactRegistry;
-  pairingRelay?: import('./pairing-relay-controller.js').PairingRelayHandle;
   /**
    * Optional host-injected Team verbs. Product HTTP validates bounded wire
    * shape; Electron main authorizes team/project/persona and mutations.
