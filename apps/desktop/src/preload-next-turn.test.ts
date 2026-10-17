@@ -158,3 +158,12 @@ it('serves host bootstrapBySsh over product HTTP with an empty local result', as
   const api = electron.exposeInMainWorld.mock.calls.find(([name]) => name === 'cc')?.[1];
   await expect(api.hosts.bootstrapBySsh()).resolves.toEqual([]);
 });
+
+it('relaunches the local host through the host-utility IPC channel', async () => {
+  await import('./preload.js');
+  const api = electron.exposeInMainWorld.mock.calls.find(([name]) => name === 'cc')?.[1];
+  electron.invoke.mockClear();
+  electron.invoke.mockResolvedValueOnce({ ok: true });
+  await expect(api.hosts.relaunchLocal()).resolves.toEqual({ ok: true });
+  expect(electron.invoke).toHaveBeenCalledExactlyOnceWith(IPC.hosts.relaunchLocal);
+});
