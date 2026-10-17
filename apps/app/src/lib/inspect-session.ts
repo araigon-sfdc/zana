@@ -55,3 +55,20 @@ export function inspectThread(
   }
   useUi.getState().openThreadModal(threadId);
 }
+
+/**
+ * Listener for main's `thread-open` push (menu bar, notifications). File and
+ * terminal opens are handled by the thread's own panels. The thread replaces any
+ * existing inspector instead of opening underneath it, where the overlay would
+ * keep the thread's native browser hidden.
+ */
+export function threadOpenListener(navigate: { current: InspectNavigate }): (payload: unknown) => void {
+  return (payload) => {
+    if (!payload || typeof payload !== 'object') return;
+    const event = payload as { type?: unknown; threadId?: unknown; projectId?: unknown; file?: unknown; terminal?: unknown };
+    if (event.type !== 'thread-open' || event.file || event.terminal) return;
+    if (typeof event.threadId !== 'string' || typeof event.projectId !== 'string') return;
+    useUi.getState().enterProjectFocus(event.projectId);
+    inspectThread(event.threadId, event.projectId, navigate.current);
+  };
+}

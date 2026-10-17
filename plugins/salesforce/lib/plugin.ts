@@ -80,7 +80,7 @@ import { RELEASE_RPC } from './release-contract.js';
 import { parseAgentScriptSource } from './agent-script-parse.js';
 import { readProjectAction } from './action-source.js';
 import { OrgSourceReader } from './org-source.js';
-import { sourceApiVersion } from './org-retrieve.js';
+import { projectSourceApiVersion } from './org-retrieve.js';
 import { visualizeFlowSnapshot } from './flow-visualizer.js';
 import { isAgentScriptLspQuery, queryAgentScriptLsp } from './agent-script-lsp.js';
 import { AGENT_SCRIPT_EXAMPLES } from './agent-script-model.js';
@@ -490,15 +490,8 @@ export async function createSalesforcePlugin(zcc: ZccPluginApi, deps: Salesforce
         if (!registered) sourceRoot = '';
       }
       // The org copy is retrieved at the project's source API version, so both sides serialize alike.
-      const projectVersion = () => {
-        if (!sourceRoot) return undefined;
-        try {
-          const config = resolveUnderRoot(deps.realpath(sourceRoot), 'sfdx-project.json', deps.realpath);
-          return config ? sourceApiVersion(deps.readFileBounded ? deps.readFileBounded(config, 64_000) : deps.readFile(config)) : undefined;
-        } catch { return undefined; }
-      };
       const data = origin === 'org'
-        ? await orgSources.read(await connections.connect(), target, projectVersion())
+        ? await orgSources.read(await connections.connect(), target, projectSourceApiVersion(sourceRoot, deps))
         : readProjectAction(sourceRoot, target, deps, rpcString(args, 'candidate') || undefined);
       if (args && typeof args === 'object' && 'visualize' in args && args.visualize === true && target.startsWith('flow://') && data.status === 'ready') {
         try { data.visualization = await visualizeFlowSnapshot(data); }

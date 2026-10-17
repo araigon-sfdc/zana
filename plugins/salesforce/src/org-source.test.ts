@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ACTION_SOURCE_CAP } from '../lib/action-source.js';
-import { readRetrieved, retrieveInto, sourceApiVersion, tempProject } from '../lib/org-retrieve.js';
+import { projectSourceApiVersion, readRetrieved, retrieveInto, sourceApiVersion, tempProject } from '../lib/org-retrieve.js';
 import { OrgSourceReader } from '../lib/org-source.js';
 import { createNodeDeps } from '../lib/node-deps.js';
 import type { ExecSfOptions, ResolvedOrg, SalesforceDeps, SalesforceRequest } from '../lib/types.js';
@@ -169,6 +169,20 @@ describe('retrieve primitive', () => {
   it('reads a plain source API version only', () => {
     expect(sourceApiVersion(JSON.stringify({ sourceApiVersion: '66.0' }))).toBe('66.0');
     for (const text of [JSON.stringify({ sourceApiVersion: '66' }), JSON.stringify({ sourceApiVersion: 66 }), '{', null, undefined]) expect(sourceApiVersion(text)).toBeUndefined();
+  });
+
+  it('reads the project source API version from its sfdx-project.json', () => {
+    const root = mkdtempSync(join(tmpdir(), 'zcc-sf-version-'));
+    dirs.push(root);
+    const deps = createNodeDeps();
+    expect(projectSourceApiVersion('', deps)).toBeUndefined();
+    expect(projectSourceApiVersion(root, deps)).toBeUndefined();
+    writeFileSync(join(root, 'sfdx-project.json'), JSON.stringify({ sourceApiVersion: '65.0' }));
+    expect(projectSourceApiVersion(root, deps)).toBe('65.0');
+    const unbounded = { realpath: deps.realpath, readFile: vi.fn(() => JSON.stringify({ sourceApiVersion: '64.0' })) };
+    expect(projectSourceApiVersion(root, unbounded)).toBe('64.0');
+    expect(projectSourceApiVersion(join(root, 'missing'), deps)).toBeUndefined();
+    expect(projectSourceApiVersion(root, { ...unbounded, readFile: () => { throw Error('EACCES'); } })).toBeUndefined();
   });
 
   it('caps oversized org source at the preview limit', async () => {

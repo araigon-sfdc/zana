@@ -1,6 +1,7 @@
 import { lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, relative, sep } from 'node:path';
+import { resolveUnderRoot } from './dx-project.js';
 import type { SalesforceDeps } from './types.js';
 
 /** One file the CLI wrote, as the CLI reported it. `rest` is relative to the package's `main/default`. */
@@ -35,6 +36,15 @@ export function sourceApiVersion(text: string | null | undefined): string | unde
   try {
     const version = record(JSON.parse(text ?? '')).sourceApiVersion;
     return typeof version === 'string' && /^[0-9]{2,3}\.0$/.test(version) ? version : undefined;
+  } catch { return undefined; }
+}
+
+/** The project's `sourceApiVersion`, read from its `sfdx-project.json`; undefined when there is no readable one. */
+export function projectSourceApiVersion(root: string, deps: Pick<SalesforceDeps, 'realpath' | 'readFile' | 'readFileBounded'>): string | undefined {
+  if (!root) return undefined;
+  try {
+    const config = resolveUnderRoot(deps.realpath(root), 'sfdx-project.json', deps.realpath);
+    return config ? sourceApiVersion(deps.readFileBounded ? deps.readFileBounded(config, 64_000) : deps.readFile(config)) : undefined;
   } catch { return undefined; }
 }
 

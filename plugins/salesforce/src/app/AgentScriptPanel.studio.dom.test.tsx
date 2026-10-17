@@ -260,12 +260,17 @@ describe('AgentScriptPanel studio layout', () => {
     expect(el.querySelector('[data-testid="studio-target-view"]')).toBeTruthy();
     // The agent's document bar belongs to the agent tab; the strip keeps the workspace controls.
     expect(el.querySelector('[data-testid="salesforce-agent-script-publish"]')).toBeNull();
-    expect(el.querySelector('.sf-etabs-actions [aria-label="Go to file"]')).toBeTruthy();
+    const goTo = el.querySelector<HTMLButtonElement>('.sf-etabs-actions [aria-label="Go to file"]');
+    expect(goTo).toBeTruthy();
+    await act(async () => { fireEvent.click(goTo!); });
+    expect(document.querySelector('[role="dialog"], [role="listbox"], [role="option"]')).toBeTruthy();
+    await act(async () => { fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' }); });
     const back = el.querySelector<HTMLButtonElement>('.af-backlink');
     expect(back?.textContent).toBe('← QC.agent');
     await act(async () => { fireEvent.click(back!); });
     expect(el.querySelector('[data-testid="studio-target-view"]')).toBeNull();
     expect(el.querySelector('[data-testid="salesforce-agent-script-publish"]')).toBeTruthy();
+    await act(async () => { fireEvent.click(el.querySelector('[aria-label="Browse org agents"]')!); });
     await act(async () => { fireEvent.click(apex!); });
     const scenario = [...el.querySelectorAll('.sf-as-explorer button')].find(n => n.textContent?.includes('a.scenario') || n.textContent?.trim().startsWith('a'));
     if (scenario) await act(async () => { fireEvent.click(scenario); });
