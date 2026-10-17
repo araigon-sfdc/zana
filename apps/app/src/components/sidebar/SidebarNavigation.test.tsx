@@ -83,6 +83,34 @@ describe('sidebar visibility and customization', () => {
     expect(disconnect).toHaveBeenCalled();
   });
 
+  it('places More beside Settings and opens its menu upward from the utility bar', () => {
+    vi.stubGlobal('innerHeight', 600);
+    vi.stubGlobal('innerWidth', 800);
+    const getRect = HTMLElement.prototype.getBoundingClientRect;
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      if (this.classList.contains('sidebar-navigation-popup')) return DOMRect.fromRect({ width: 280, height: 120 });
+      if (this.classList.contains('sidebar-utility-button--more')) return DOMRect.fromRect({ x: 96, y: 560, width: 28, height: 28 });
+      return getRect.call(this);
+    });
+    useUi.setState({ sidebarNavHidden: ['feed'] });
+    render(<MemoryRouter initialEntries={['/feed']}><SidebarRail className="sidebar sidebar--global" navAriaLabel="Navigation"
+      storageKey={GLOBAL_NAV_ORDER_KEY} pinnedIds={['home', 'inbox']}
+      items={items.map((item) => item.id === 'feed' ? { ...item, active: true } as SidebarRailItem : item)} /></MemoryRouter>);
+    const button = screen.getByRole('button', { name: 'More', exact: true });
+    const bar = screen.getByLabelText('Sidebar utilities');
+    expect(bar.contains(button)).toBe(true);
+    expect(screen.getByRole('link', { name: 'Settings' }).nextElementSibling).toBe(button);
+    expect(button.classList.contains('has-active')).toBe(true);
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+    more();
+    const menu = screen.getByRole('menu');
+    expect(button.getAttribute('aria-expanded')).toBe('true');
+    expect(menu.style.left).toBe('96px');
+    expect(menu.style.top).toBe('436px');
+    more();
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
   it('hides a destination by right-click and keeps it reachable through More', async () => {
     render(<Rail />);
     fireEvent.contextMenu(screen.getByTestId('nav-feed'), { clientX: 130, clientY: 240 });

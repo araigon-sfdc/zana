@@ -22,7 +22,11 @@ test('sidebar hides, opens, restores, and reorders destinations with persisted p
 
   await win.reload();
   await expect(scheduler).toHaveCount(0);
+  await expect(rail.getByLabel('Sidebar utilities').getByRole('button', { name: 'More', exact: true })).toBeVisible();
   await more.click();
+  const menuBox = await win.getByRole('menu', { name: 'Sidebar navigation options' }).boundingBox();
+  const moreBox = await more.boundingBox();
+  expect(menuBox!.y + menuBox!.height).toBeLessThanOrEqual(moreBox!.y);
   await win.getByRole('menuitem', { name: 'Scheduler', exact: true }).click();
   await expect(win).toHaveURL(/\/scheduler$/);
   await expect(scheduler).toHaveCount(0);

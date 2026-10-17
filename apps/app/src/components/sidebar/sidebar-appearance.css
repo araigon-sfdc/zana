@@ -147,8 +147,30 @@
   gap: 7px;
   width: auto;
   padding: 0 8px;
-  margin-right: auto;
   font-size: 12px;
+}
+
+/* More follows Settings; its auto margin keeps the remaining utilities right-aligned. */
+.sidebar .sidebar-utility-button--more {
+  position: relative;
+  margin-right: auto;
+}
+
+.sidebar .sidebar-utility-button--more[aria-expanded='true'] {
+  color: var(--text-primary);
+  background: var(--sidebar-active);
+}
+
+/* The current page is one of the hidden destinations. */
+.sidebar .sidebar-utility-button--more.has-active::after {
+  content: '';
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
 }
 
 @media (hover: none) {
@@ -157,19 +179,10 @@
   }
 }
 
-.sidebar-navigation-tools {
-  flex: 0 0 auto;
-  padding: 4px 8px;
-}
-
-.sidebar-navigation-more {
-  width: 100%;
-  text-align: left;
-}
-
 .sidebar-navigation-error {
   display: block;
-  padding: 4px;
+  flex: 0 0 auto;
+  padding: 4px 8px;
   color: var(--text-primary);
   font-size: 12px;
 }

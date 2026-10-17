@@ -11,6 +11,8 @@ export interface SidebarNavigationPopupState {
   x: number;
   y: number;
   itemId?: string;
+  /** `above` anchors the popup's bottom edge at `y`. */
+  placement?: 'above';
 }
 
 /** Portal keeps the menu clear of the rail's scrolling and clipping containers. */
@@ -38,7 +40,8 @@ export function SidebarNavigationPopup({
     const position = () => {
       const rect = el.getBoundingClientRect();
       el.style.left = `${Math.max(8, Math.min(popup.x, window.innerWidth - rect.width - 8))}px`;
-      el.style.top = `${Math.max(8, Math.min(popup.y, window.innerHeight - rect.height - 8))}px`;
+      const top = popup.placement === 'above' ? popup.y - rect.height : popup.y;
+      el.style.top = `${Math.max(8, Math.min(top, window.innerHeight - rect.height - 8))}px`;
     };
     position();
     el.querySelector<HTMLElement>('button:not(:disabled), a:not([aria-disabled="true"]), input:not(:disabled)')?.focus();
@@ -51,7 +54,7 @@ export function SidebarNavigationPopup({
       observer.disconnect();
       window.removeEventListener('resize', position);
     };
-  }, [popup.kind, popup.x, popup.y]);
+  }, [popup.kind, popup.x, popup.y, popup.placement]);
   useEffect(() => {
     const dismiss = (event: PointerEvent) => {
       if (!ref.current?.contains(event.target as Node) && !returnFocus.current?.contains(event.target as Node)) onClose();

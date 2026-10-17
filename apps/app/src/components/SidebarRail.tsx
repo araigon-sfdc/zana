@@ -257,19 +257,7 @@ export function SidebarRail({
           </nav>
         </div>
       </DndContext>}
-      <div className="sidebar-navigation-tools">
-        <button ref={moreButton} type="button" className={`nav-item sidebar-navigation-more${hiddenRows.some((row) => row.active) ? ' active' : ''}`}
-          aria-label="More" title="More" aria-haspopup="menu" aria-expanded={popup !== null}
-          onClick={() => {
-            if (popup) { closePopup(); return; }
-            const rect = moreButton.current!.getBoundingClientRect();
-            setPopup({ kind: 'more', x: rect.right + 4, y: rect.top });
-          }}>
-          <span className="nav-item-icon"><Ellipsis size={16} aria-hidden="true" /></span>
-          <span className="nav-item-label">More</span>
-        </button>
-        {saveError && <span role="alert" className="sidebar-navigation-error">Couldn’t save sidebar visibility. Try again.</span>}
-      </div>
+      {saveError && <span role="alert" className="sidebar-navigation-error">Couldn’t save sidebar visibility. Try again.</span>}
       {popup && <SidebarNavigationPopup popup={popup} rows={rows} hidden={hidden} pinnedIds={pinnedIds} drag={drag}
         returnFocus={moreButton} onClose={closePopup}
         onCustomize={() => setPopup({ ...popup, kind: 'customize' })}
@@ -289,6 +277,23 @@ export function SidebarRail({
           <Settings size={16} strokeWidth={1.7} aria-hidden="true" />
           {!collapsed && <span>Settings</span>}
         </Link>
+        <button
+          ref={moreButton}
+          type="button"
+          className={`sidebar-utility-button sidebar-utility-button--more${hiddenRows.some((row) => row.active) ? ' has-active' : ''}`}
+          aria-label="More"
+          title="More"
+          aria-haspopup="menu"
+          aria-expanded={popup !== null}
+          onClick={() => {
+            if (popup) { closePopup(); return; }
+            // The utility bar sits at the bottom of the rail, so the menu opens upward.
+            const rect = moreButton.current!.getBoundingClientRect();
+            setPopup({ kind: 'more', x: rect.left, y: rect.top - 4, placement: 'above' });
+          }}
+        >
+          <Ellipsis size={18} aria-hidden="true" />
+        </button>
         <button
           type="button"
           className="sidebar-utility-button"
