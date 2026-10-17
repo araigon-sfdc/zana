@@ -1,6 +1,6 @@
 # Plan: remove the legacy shared-token relays
 
-Status: steps 1 and 2 desktop side done, with the step 3 phone docs (2026-10-17). The Heroku cleanup for both steps and the release note are pending. Opened 2026-10-17 for 2.3.6.
+Status: steps 1 and 2 desktop side done, with the step 3 phone docs (2026-10-17). The Heroku code removal for both steps is drafted (2026-10-17); merge it only after a desktop release without the relay clients has shipped. Still pending: the release note and unsetting the Heroku config vars after that deploy. Opened 2026-10-17 for 2.3.6.
 
 Zana Connect now handles phone access, previews and machine enrollment, with a separate credential for each account and server. Two older relays are still in the tree. Both authenticate with **one shared token**:
 
@@ -28,7 +28,7 @@ These pieces are shared with Zana Connect. Removing the relays must not break th
 
 ### 1. Machine pairing relay (`ZCC_RELAY_TOKEN`)
 
-Desktop and build side done. Without Zana Connect every remote now joins through an SSH reverse tunnel to the loopback pairing forwarder. The public app URL is the shared website door (`/install.sh` and the Host allowlist), never a join target. The `direct` install path went with it: `pairing-target.ts`, the `pairing-target` utility-runtime operation, the `PairingTarget` contract, `pairingMode` on preferred join codes, the desktop PTY pairing handoff (`hosts-pairing.ts`, `ssh-pairing-pty.ts`, `PairingTerminal`, `hosts.pairing` IPC) and the direct install, restart-first repair and curl `pairingCommand` in `host-bootstrap.ts`. `pairing-allowlist.ts` stays (renamed tests in `pairing-allowlist.test.ts`) because the SSH-tunnel pairing forwarder uses it. Saved `relayToken` / `relaySessionId` config fields are dropped by `normalizeConfig` on the next read and write. The Heroku front-door bullet below is still open.
+Desktop and build side done. Without Zana Connect every remote now joins through an SSH reverse tunnel to the loopback pairing forwarder. The public app URL is the shared website door (`/install.sh` and the Host allowlist), never a join target. The `direct` install path went with it: `pairing-target.ts`, the `pairing-target` utility-runtime operation, the `PairingTarget` contract, `pairingMode` on preferred join codes, the desktop PTY pairing handoff (`hosts-pairing.ts`, `ssh-pairing-pty.ts`, `PairingTerminal`, `hosts.pairing` IPC) and the direct install, restart-first repair and curl `pairingCommand` in `host-bootstrap.ts`. `pairing-allowlist.ts` stays (renamed tests in `pairing-allowlist.test.ts`) because the SSH-tunnel pairing forwarder uses it. Saved `relayToken` / `relaySessionId` config fields are dropped by `normalizeConfig` on the next read and write. The Heroku front-door bullet below is drafted; see "Heroku side (drafted)".
 
 - **Desktop server.** Delete `pairing-relay-client.ts`, `pairing-relay-controller.ts`, `pairing-relay-protocol.ts`, `pairing-session-url.ts` and `pairing-allowlist.ts` from `apps/server/src/http/`, together with their tests, including `pairing-relay-live.test.ts` and `pairing-relay-allowlist.guard.test.ts`. Remove `attachPairingRelay` from `product-server.ts` and `static-host.ts`, and `pairingRelay` from `product-context.ts`.
 - **Pairing target.** Delete `pairing-target.ts` and the `PairingTarget` contract. Pairing without Connect is tunnel-only, so no target needs resolving.
@@ -39,7 +39,7 @@ Desktop and build side done. Without Zana Connect every remote now joins through
 
 ### 2. Phone relay (`MOBILE_RELAY_TOKEN`, `mode: 'relay'`)
 
-Desktop side done. A saved `mode: 'relay'` connection loads as `unconfigured`, and `validateMobileConnection` rejects it with a Zana Connect sign-in message. `MobileGatewayManager.configure`, the `mobile.configure` IPC channel and its preload/contract entries are gone, since Connect enrollment uses enroll and redeem. The gateway always starts behind the Connect tunnel and pairs only through the account service. Deleted: `scripts/mobile-serve.ts` and the `mobile:serve` script, `services/mobile-relay/start.mjs`, `Procfile`, `app.json`, `Dockerfile`, `package.json`, `package-lock.json`, `e2e/phone-heroku-relay.live.spec.ts` and `e2e/fixtures/mobile-relay-service.ts`. `e2e/phone-network-connections.spec.ts` now checks the saved-relay fallback. `services/mobile-relay/server.mjs` stays: it is the in-process test peer for `client.mjs` (unit tests and `e2e/mobile-relay-upload.spec.ts`), and `website/scripts/sync-mobile-relay.mjs` still copies it into the front door. Still open: the Heroku bullets below, plus `website/README.md`'s reference to the deleted live spec.
+Desktop side done. A saved `mode: 'relay'` connection loads as `unconfigured`, and `validateMobileConnection` rejects it with a Zana Connect sign-in message. `MobileGatewayManager.configure`, the `mobile.configure` IPC channel and its preload/contract entries are gone, since Connect enrollment uses enroll and redeem. The gateway always starts behind the Connect tunnel and pairs only through the account service. Deleted: `scripts/mobile-serve.ts` and the `mobile:serve` script, `services/mobile-relay/start.mjs`, `Procfile`, `app.json`, `Dockerfile`, `package.json`, `package-lock.json`, `e2e/phone-heroku-relay.live.spec.ts` and `e2e/fixtures/mobile-relay-service.ts`. `e2e/phone-network-connections.spec.ts` now checks the saved-relay fallback. `services/mobile-relay/server.mjs` stays: it is the in-process test peer for `client.mjs` (unit tests and `e2e/mobile-relay-upload.spec.ts`), and `website/scripts/sync-mobile-relay.mjs` still copies it into the front door. The Heroku bullets below are drafted; see "Heroku side (drafted)".
 
 - Done: remove `mode: 'relay'` from `apps/server/src/mobile/connection.ts`, along with its migration of the previous token. Remove the relay branch in `manager.ts` and the related wiring in `apps/desktop/src/host.ts`. Saved relay connections should load as `unconfigured` and ask the user to sign in to Zana Connect.
 - **Heroku front door.** Delete `website/relay/mobile-routing.mjs` and its test, and stop syncing `server.mjs` into `website/relay/mobile/` once the front door no longer serves the one-computer relay.
@@ -51,6 +51,16 @@ Desktop side done. A saved `mode: 'relay'` connection loads as `unconfigured`, a
 - Done: `docs/mobile-app.md`: delete "Legacy relay development utility" and "Heroku relay". Shorten "Retired connection methods" and "Previously saved connections" to a one-line upgrade note.
 - Done: `services/mobile-relay/README.md`: describe only what Connect uses.
 - Add release notes saying that saved phone relay connections need a Zana Connect sign-in.
+
+## Heroku side (drafted)
+
+Drafted on 2026-10-17. Merge only after a desktop release without the relay clients has shipped, because older desktop builds still dial these routes.
+
+- `website/relay/front-door.mjs` now routes Zana Connect hosts first and proxies everything else to Next. The retired machine-relay paths (`/_zcc/relay`, `/t/<id>`, `/install.sh`, `/install/*`, `/internal/hosts/*`, `/internal/plugins/*`) answer `410 {"error":"relay_removed"}` instead of reaching Next's `trailingSlash` 308. Every non-Connect WebSocket upgrade gets `404`. The phone relay routing is gone.
+- Deleted: `pairing-hub.mjs`, `pairing-session.mjs`, `session-path.mjs`, `token.mjs`, `echo-laptop.mjs`, `mobile-routing.mjs`, `allowlist.mjs` / `allowlist.json`, `protocol.mjs`, `headers.mjs` and `ws-raw.mjs`, with their tests. Only the relay used them.
+- Kept: `website/relay/mobile/server.mjs`. `website/connect/gateway.mjs` builds Connect's laptop tunnels with its `createRelay`. The drift check that used to live in `mobile-routing.test.ts` is now `website/relay/mobile/snapshot.test.ts` and covers all four synced files.
+- `website/heroku.yml`, `website/Dockerfile` and `website/README.md` no longer mention `ZCC_RELAY_TOKEN`, `MOBILE_RELAY_TOKEN`, `MOBILE_RELAY_PUBLIC_URL` or the deleted live spec.
+- Manual step once the image is deployed (not done here): `heroku config:unset ZCC_RELAY_TOKEN MOBILE_RELAY_TOKEN MOBILE_RELAY_PUBLIC_URL -a zcc`.
 
 ## Order and verification
 

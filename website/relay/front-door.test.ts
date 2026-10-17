@@ -1,9 +1,10 @@
-import { createServer, type Server } from 'node:http';
-import { connect as netConnect } from 'node:net';
-import { afterEach, describe, expect, it } from 'vitest';
-import { startFrontDoor } from './front-door.mjs';
-import { FLAG, TYPE, decodeFrame, encodeFrame, encodeJsonPayload } from './protocol.mjs';
-import { connectWs } from './ws-raw.mjs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { connect as netConnect, type Socket } from 'node:net';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { isRetiredRelayPath, startFrontDoor } from './front-door.mjs';
 
 let door: Awaited<ReturnType<typeof startFrontDoor>> | null = null;
 let next: Server | null = null;
@@ -24,7 +25,7 @@ afterEach(async () => {
 async function listenNext(): Promise<string> {
   next = createServer((request, response) => {
     response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-    response.end('<html>docs</html>');
+    response.end(`<html>docs ${request.url}</html>`);
   });
   await new Promise<void>((resolve) => next!.listen(0, '127.0.0.1', () => resolve()));
   const address = next.address();
@@ -32,21 +33,62 @@ async function listenNext(): Promise<string> {
   return `http://127.0.0.1:${address.port}`;
 }
 
-describe('pairing front door', () => {
+/** Send one raw request and resolve with the status line. */
+function rawStatus(port: number, request: string): Promise<string> {
+  return new Promise((resolve) => {
+    let received = '';
+    const socket = netConnect(port, '127.0.0.1', () => socket.write(request));
+    socket.setTimeout(3_000, () => socket.destroy());
+    socket.on('data', (chunk) => {
+      received += chunk.toString();
+      if (received.includes('\r\n')) {
+        resolve(received.split('\r\n')[0]);
+        socket.destroy();
+      }
+    });
+    socket.on('error', () => resolve(received));
+    socket.on('close', () => resolve(received));
+  });
+}
+
+function upgradeRequest(path: string, host = 'localhost'): string {
+  return `GET ${path} HTTP/1.1\r\nHost: ${host}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n` +
+    'Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n';
+}
+
+describe('isRetiredRelayPath', () => {
+  it.each([
+    '/_zcc/relay', '/_zcc/relay/', '/t/zcrs_abcdefghijklmnop', '/t/zcrs_abcdefghijklmnop/install.sh',
+    '/install.sh', '/install.sh/', '/install/version', '/install/zcc-host.tgz',
+    '/internal/hosts/enroll', '/internal/hosts/ws', `/internal/plugins/x/host/${'a'.repeat(64)}`
+  ])('retires %s', (path) => {
+    expect(isRetiredRelayPath(path)).toBe(true);
+  });
+
+  it.each(['/', '/t', '/tools', '/docs/install', '/extensions/install', '/download', '/connect/', '/internal', '/api/connect/phone/start'])(
+    'leaves %s to the website',
+    (path) => {
+      expect(isRetiredRelayPath(path)).toBe(false);
+    }
+  );
+
+  it('treats a missing path as the root', () => {
+    expect(isRetiredRelayPath(undefined)).toBe(false);
+  });
+});
+
+describe('front door', () => {
   it('keeps a cold browser load alive across more than 160 proxy connections', async () => {
     const nextOrigin = await listenNext();
-    door = await startFrontDoor({
-      host: '127.0.0.1', port: 0, spawnNext: false, nextOrigin,
-      env: {} as NodeJS.ProcessEnv
-    });
-    const sockets: ReturnType<typeof netConnect>[] = [];
+    door = await startFrontDoor({ host: '127.0.0.1', port: 0, spawnNext: false, nextOrigin, connect: null, env: {} as NodeJS.ProcessEnv });
+    const sockets: Socket[] = [];
     try {
       // Hold completed HTTP connections open as an edge proxy does. The app's
       // module graph plus API calls exceeds the old 160-socket front-door cap.
       const replies = await Promise.all(Array.from({ length: 240 }, () => new Promise<string>((resolve) => {
         let received = '';
         const socket = netConnect(door!.port, '127.0.0.1', () => {
-          socket.write('GET /_zcc/relay HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n');
+          socket.write('GET /install.sh HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n');
         });
         sockets.push(socket);
         socket.setTimeout(3_000, () => socket.destroy());
@@ -57,400 +99,97 @@ describe('pairing front door', () => {
         socket.on('error', () => resolve(received));
         socket.on('close', () => resolve(received));
       })));
-      expect(replies.filter((status) => status === 'HTTP/1.1 400 Bad Request')).toHaveLength(240);
+      expect(replies.filter((status) => status === 'HTTP/1.1 410 Gone')).toHaveLength(240);
     } finally {
       for (const socket of sockets) socket.destroy();
     }
   });
 
-  it('serves Next for marketing paths and 503s bare install.sh without a laptop (never 308)', async () => {
+  it('serves Next for website paths and 410s retired relay paths without a redirect', async () => {
     const nextOrigin = await listenNext();
-    door = await startFrontDoor({
-      host: '127.0.0.1',
-      port: 0,
-      token: 'relay-token-relay-token',
-      spawnNext: false,
-      nextOrigin,
-      env: { ZCC_SKIP_NEXT: '1', ZCC_RELAY_TOKEN: 'relay-token-relay-token' } as NodeJS.ProcessEnv
-    });
-    const site = await fetch(door.url, { redirect: 'manual' });
+    door = await startFrontDoor({ host: '127.0.0.1', port: 0, spawnNext: false, nextOrigin, connect: null, env: {} as NodeJS.ProcessEnv });
+    const site = await fetch(new URL('docs/multiple-devices', door.url), { redirect: 'manual' });
     expect(site.status).toBe(200);
-    await expect(site.text()).resolves.toContain('docs');
-
-    const install = await fetch(new URL('install.sh', door.url), { method: 'HEAD', redirect: 'manual' });
-    expect(install.status).toBe(503);
-    expect(install.headers.get('location')).toBeNull();
-    const body = await fetch(new URL('install.sh', door.url), { redirect: 'manual' });
-    expect(body.status).toBe(503);
-    await expect(body.json()).resolves.toEqual({ error: 'session_required' });
-
-    const relayHttp = await fetch(new URL('_zcc/relay', door.url), { redirect: 'manual' });
-    expect(relayHttp.status).toBe(400);
-    expect(relayHttp.headers.get('location')).toBeNull();
-  });
-
-  it('refuses a laptop with the wrong token', async () => {
-    const nextOrigin = await listenNext();
-    door = await startFrontDoor({
-      host: '127.0.0.1',
-      port: 0,
-      token: 'expected-token-expected',
-      spawnNext: false,
-      nextOrigin
-    });
-    await expect(connectWs({
-      hostname: '127.0.0.1',
-      port: door.port,
-      path: '/_zcc/relay',
-      headers: { Authorization: 'Bearer wrong-token-wrong-token' }
-    })).rejects.toThrow(/401/);
-  });
-
-  it('relays session install.sh and streams a tarball in chunks once a laptop is attached', async () => {
-    const nextOrigin = await listenNext();
-    door = await startFrontDoor({
-      host: '127.0.0.1',
-      port: 0,
-      token: 'relay-token-relay-token',
-      spawnNext: false,
-      nextOrigin
-    });
-    const laptop = await connectWs({
-      hostname: '127.0.0.1',
-      port: door.port,
-      path: '/_zcc/relay',
-      headers: { Authorization: 'Bearer relay-token-relay-token' }
-    });
-    const helloPromise = waitForHello(laptop);
-    const tarball = Buffer.alloc(80 * 1024, 7);
-    laptop.on('message', (payload: Buffer) => {
-      const frame = decodeFrame(payload);
-      if (!frame) return;
-      if (frame.type === TYPE.PING) {
-        laptop.send(encodeFrame(TYPE.PONG, 0, frame.streamId));
-        return;
-      }
-      if (frame.type !== TYPE.HTTP_REQ || !(frame.flags & FLAG.META)) return;
-      const meta = JSON.parse(frame.payload.toString()) as { url: string };
-      if (meta.url.startsWith('/install.sh')) {
-        laptop.send(encodeFrame(TYPE.HTTP_RES, FLAG.META, frame.streamId, encodeJsonPayload({
-          status: 200,
-          headers: [['content-type', 'text/x-shellscript; charset=utf-8']]
-        })));
-        laptop.send(encodeFrame(TYPE.HTTP_RES, FLAG.FIN, frame.streamId, Buffer.from('#!/bin/sh\necho ok\n')));
-        return;
-      }
-      if (meta.url.startsWith('/install/zcc-host.tgz')) {
-        laptop.send(encodeFrame(TYPE.HTTP_RES, FLAG.META, frame.streamId, encodeJsonPayload({
-          status: 200,
-          headers: [
-            ['content-type', 'application/gzip'],
-            ['content-length', String(tarball.length)]
-          ]
-        })));
-        laptop.send(encodeFrame(TYPE.HTTP_RES, 0, frame.streamId, tarball.subarray(0, 64 * 1024)));
-        laptop.send(encodeFrame(TYPE.HTTP_RES, FLAG.FIN, frame.streamId, tarball.subarray(64 * 1024)));
-      }
-    });
-    for (let i = 0; i < 50 && !door.hasLaptop(); i++) {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-    expect(door.hasLaptop()).toBe(true);
-    const { sessionId } = await helloPromise;
-    const script = await fetch(new URL(`t/${sessionId}/install.sh`, door.url), { redirect: 'manual' });
-    expect(script.status).toBe(200);
-    expect(script.headers.get('location')).toBeNull();
-    await expect(script.text()).resolves.toContain('#!/bin/sh');
-
-    const artifact = await fetch(new URL(`t/${sessionId}/install/zcc-host.tgz`, door.url));
-    expect(artifact.status).toBe(200);
-    const bytes = Buffer.from(await artifact.arrayBuffer());
-    expect(bytes.equals(tarball)).toBe(true);
-
-    // Daemons whose builds dropped the session prefix self-update over the bare path.
-    const legacy = await fetch(new URL('install/zcc-host.tgz', door.url));
-    expect(legacy.status).toBe(200);
-    expect(Buffer.from(await legacy.arrayBuffer()).equals(tarball)).toBe(true);
-
-    laptop.close();
-  });
-
-  it('keeps two laptops on isolated /t/<id> paths (no steal)', async () => {
-    const nextOrigin = await listenNext();
-    door = await startFrontDoor({
-      host: '127.0.0.1',
-      port: 0,
-      token: 'relay-token-relay-token',
-      spawnNext: false,
-      nextOrigin
-    });
-    const first = await connectEchoLaptop(door.port, 'one');
-    const second = await connectEchoLaptop(door.port, 'two');
-    expect(first.hello.sessionId).not.toBe(second.hello.sessionId);
-    expect(door.sessionCount()).toBe(2);
-
-    const fromFirst = await fetch(new URL(`t/${first.hello.sessionId}/install.sh`, door.url));
-    expect(fromFirst.status).toBe(200);
-    await expect(fromFirst.text()).resolves.toBe('one');
-    const fromSecond = await fetch(new URL(`t/${second.hello.sessionId}/install.sh`, door.url));
-    expect(fromSecond.status).toBe(200);
-    await expect(fromSecond.text()).resolves.toBe('two');
-
-    const bare = await fetch(new URL('install.sh', door.url));
-    expect(bare.status).toBe(503);
-    await expect(bare.json()).resolves.toEqual({ error: 'session_required' });
-    const bareEnroll = await fetch(new URL('internal/hosts/enroll', door.url), { method: 'POST', body: '{}' });
-    expect(bareEnroll.status).toBe(503);
-    await expect(bareEnroll.json()).resolves.toEqual({ error: 'session_required' });
-    const bareVersion = await fetch(new URL('install/version', door.url));
-    expect(bareVersion.status).toBe(503);
-    await expect(bareVersion.json()).resolves.toEqual({ error: 'relay_ambiguous' });
-
-    first.laptop.close();
-    second.laptop.close();
-  });
-
-  it('refuses bare install and enroll even with a sole laptop attached', async () => {
-    const nextOrigin = await listenNext();
-    door = await startFrontDoor({
-      host: '127.0.0.1',
-      port: 0,
-      token: 'relay-token-relay-token',
-      spawnNext: false,
-      nextOrigin
-    });
-    const sole = await connectEchoLaptop(door.port, 'sole');
-    let soleRequests = 0;
-    sole.laptop.on('message', (payload: Buffer) => {
-      const frame = decodeFrame(payload);
-      if (frame?.type === TYPE.HTTP_REQ && frame.flags & FLAG.META) soleRequests++;
-    });
+    await expect(site.text()).resolves.toContain('docs /docs/multiple-devices');
 
     for (const [method, path] of [
-      ['GET', 'install.sh'],
-      ['HEAD', 'install.sh'],
-      ['GET', 'install.sh/'],
-      ['GET', 'install.sh?x=1'],
-      ['POST', 'internal/hosts/enroll']
-    ] as const) {
-      const response = await fetch(new URL(path, door.url), {
-        method,
-        ...(method === 'POST' ? { body: '{}' } : {})
-      });
-      expect(response.status, `${method} ${path}`).toBe(503);
-      if (method !== 'HEAD') {
-        await expect(response.json()).resolves.toEqual({ error: 'session_required' });
-      }
+      ['HEAD', 'install.sh'], ['GET', 'install.sh'], ['GET', 'install/zcc-host.tgz'], ['GET', '_zcc/relay'],
+      ['GET', 't/zcrs_abcdefghijklmnop/install.sh'], ['POST', 'internal/hosts/enroll']
+    ]) {
+      const response = await fetch(new URL(path, door.url), { method, redirect: 'manual' });
+      expect(response.status, `${method} /${path}`).toBe(410);
+      expect(response.headers.get('location')).toBeNull();
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      if (method !== 'HEAD') await expect(response.json()).resolves.toEqual({ error: 'relay_removed' });
     }
-    expect(soleRequests).toBe(0);
-
-    const routed = await fetch(new URL(`t/${sole.hello.sessionId}/internal/hosts/enroll`, door.url), {
-      method: 'POST',
-      body: '{}'
-    });
-    expect(routed.status).toBe(200);
-    await expect(routed.text()).resolves.toBe('sole');
-
-    const unknown = await fetch(new URL('t/zcrs_unknownunknownunknown/install.sh', door.url));
-    expect(unknown.status).toBe(503);
-    await expect(unknown.json()).resolves.toEqual({ error: 'relay_offline' });
-
-    // Bare host websockets still reach the sole laptop for daemons enrolled
-    // before the session prefix was preserved.
-    const legacyWs = await connectWs({ hostname: '127.0.0.1', port: door.port, path: '/internal/hosts/ws' });
-    legacyWs.close();
-    sole.laptop.close();
   });
 
-  it('routes an enroll for session B only to laptop B', async () => {
-    const nextOrigin = await listenNext();
-    door = await startFrontDoor({
-      host: '127.0.0.1',
-      port: 0,
-      token: 'relay-token-relay-token',
-      spawnNext: false,
-      nextOrigin
-    });
-    const a = await connectEchoLaptop(door.port, 'laptop-a');
-    const b = await connectEchoLaptop(door.port, 'laptop-b');
-    const seenByA: string[] = [];
-    a.laptop.on('message', (payload: Buffer) => {
-      const frame = decodeFrame(payload);
-      if (frame?.type === TYPE.HTTP_REQ && frame.flags & FLAG.META) {
-        seenByA.push((JSON.parse(frame.payload.toString()) as { url: string }).url);
-      }
-    });
-
-    const viaB = await fetch(new URL(`t/${b.hello.sessionId}/internal/hosts/enroll`, door.url), {
-      method: 'POST',
-      headers: { authorization: 'Bearer zcde_from_laptop_a' },
-      body: '{}'
-    });
-    expect(viaB.status).toBe(200);
-    await expect(viaB.text()).resolves.toBe('laptop-b');
-    expect(seenByA).toEqual([]);
-
-    a.laptop.close();
-    b.laptop.close();
-  });
-
-  it('answers a curl-style keep-alive GET without Content-Length', async () => {
-    const nextOrigin = await listenNext();
-    door = await startFrontDoor({
-      host: '127.0.0.1',
-      port: 0,
-      token: 'relay-token-relay-token',
-      spawnNext: false,
-      nextOrigin
-    });
-    const attached = await connectEchoLaptop(door.port, 'curl-ok');
-    const body = await new Promise<string>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('curl-style GET timed out')), 3_000);
-      const socket = netConnect(door.port, '127.0.0.1', () => {
-        socket.write(
-          `GET /t/${attached.hello.sessionId}/install.sh HTTP/1.1\r\n` +
-            `Host: 127.0.0.1:${door.port}\r\n` +
-            'User-Agent: curl/7.88.1\r\n' +
-            'Accept: */*\r\n' +
-            '\r\n'
-        );
-      });
-      let received = '';
-      socket.on('data', (chunk) => {
-        received += chunk.toString();
-        if (received.includes('curl-ok')) {
-          clearTimeout(timer);
-          socket.end();
-          resolve(received);
-        }
-      });
-      socket.on('error', (error) => {
-        clearTimeout(timer);
-        reject(error);
-      });
-    });
-    expect(body).toContain('HTTP/1.1 200');
-    expect(body).toContain('curl-ok');
-    attached.laptop.close();
-  });
-
-  it('reclaims a session after disconnect and 409s a live id', async () => {
-    const nextOrigin = await listenNext();
-    door = await startFrontDoor({
-      host: '127.0.0.1',
-      port: 0,
-      token: 'relay-token-relay-token',
-      spawnNext: false,
-      nextOrigin
-    });
-    const first = await connectEchoLaptop(door.port);
-    const sessionId = first.hello.sessionId;
-    const firstClosed = new Promise<void>((resolve) => first.laptop.on('close', () => resolve()));
-    first.laptop.close();
-    await firstClosed;
-    for (let i = 0; i < 50 && door.sessionCount() > 0; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 20));
+  it('refuses every non-Connect WebSocket upgrade, including the old laptop and host sockets', async () => {
+    door = await startFrontDoor({ host: '127.0.0.1', port: 0, spawnNext: false, nextOrigin: 'http://127.0.0.1:9', connect: null, env: {} as NodeJS.ProcessEnv });
+    for (const path of ['/_zcc/relay', '/internal/hosts/ws', '/t/zcrs_abcdefghijklmnop/internal/hosts/ws', '/']) {
+      await expect(rawStatus(door.port, upgradeRequest(path))).resolves.toBe('HTTP/1.1 404 Not Found');
     }
-    expect(door.sessionCount()).toBe(0);
-
-    const reclaimed = await connectEchoLaptop(door.port, 'reclaim', sessionId);
-    expect(reclaimed.hello.sessionId).toBe(sessionId);
-
-    await expect(connectWs({
-      hostname: '127.0.0.1',
-      port: door.port,
-      path: '/_zcc/relay',
-      headers: {
-        Authorization: 'Bearer relay-token-relay-token',
-        'X-Zcc-Relay-Session': sessionId
-      }
-    })).rejects.toThrow(/409/);
-
-    reclaimed.laptop.close();
   });
 
-  it('keeps join paths open after the join ttl while the laptop is attached', async () => {
+  it('routes Connect hosts first, so a laptop address still serves its own installer', async () => {
     const nextOrigin = await listenNext();
-    let now = 1_000_000;
-    door = await startFrontDoor({
-      host: '127.0.0.1',
-      port: 0,
-      token: 'relay-token-relay-token',
-      spawnNext: false,
-      nextOrigin,
-      now: () => now,
-      joinTtlMs: 5_000
-    });
-    const attached = await connectEchoLaptop(door.port);
-    const script = await fetch(new URL(`t/${attached.hello.sessionId}/install.sh`, door.url));
-    expect(script.status).toBe(200);
+    const connect = {
+      matches: vi.fn((request: IncomingMessage) => request.headers.host?.startsWith('my-computer.') ?? false),
+      handleHttp: vi.fn(async (request: IncomingMessage, response: ServerResponse) => {
+        response.writeHead(200, { 'content-type': 'text/plain' });
+        response.end(`connect ${request.url}`);
+      }),
+      handleUpgrade: vi.fn((_request: IncomingMessage, socket: Socket) => {
+        socket.end('HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n');
+      }),
+      close: vi.fn(async () => undefined)
+    };
+    door = await startFrontDoor({ host: '127.0.0.1', port: 0, spawnNext: false, nextOrigin, connect: connect as never, env: {} as NodeJS.ProcessEnv });
 
-    now += 6_000;
-    const afterTtl = await fetch(new URL(`t/${attached.hello.sessionId}/install.sh`, door.url));
-    expect(afterTtl.status).toBe(200);
-    const enroll = await fetch(new URL(`t/${attached.hello.sessionId}/internal/hosts/enroll`, door.url), {
-      method: 'POST',
-      body: '{}'
-    });
-    expect(enroll.status).toBe(200);
+    const viaConnect = await rawStatus(door.port, 'GET /install.sh HTTP/1.1\r\nHost: my-computer.zana.localhost\r\nConnection: close\r\n\r\n');
+    expect(viaConnect).toBe('HTTP/1.1 200 OK');
+    expect(connect.handleHttp).toHaveBeenCalledTimes(1);
+    await expect(rawStatus(door.port, upgradeRequest('/internal/hosts/ws', 'my-computer.zana.localhost')))
+      .resolves.toBe('HTTP/1.1 101 Switching Protocols');
+    expect(connect.handleUpgrade).toHaveBeenCalledTimes(1);
 
-    const hostWs = await connectWs({
-      hostname: '127.0.0.1',
-      port: door.port,
-      path: `/t/${attached.hello.sessionId}/internal/hosts/ws`
-    });
-    hostWs.close();
-    attached.laptop.close();
+    const site = await fetch(new URL('install.sh', door.url), { redirect: 'manual' });
+    expect(site.status).toBe(410);
+    expect(connect.handleHttp).toHaveBeenCalledTimes(1);
+
+    await door.close();
+    door = null;
+    expect(connect.close).toHaveBeenCalledTimes(1);
+  });
+
+  it('looks up Connect from the environment when none is injected', async () => {
+    door = await startFrontDoor({ host: '127.0.0.1', port: 0, spawnNext: false, nextOrigin: 'http://127.0.0.1:9', env: {} as NodeJS.ProcessEnv });
+    const response = await fetch(new URL('_zcc/relay', door.url));
+    expect(response.status).toBe(410);
+  });
+
+  it('answers 503 while the spawned Next server starts, then proxies to it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'zcc-front-door-'));
+    const probe = createServer();
+    await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', () => resolve()));
+    const nextPort = (probe.address() as { port: number }).port;
+    await new Promise<void>((resolve) => probe.close(() => resolve()));
+    writeFileSync(join(dir, 'server.js'), [
+      "const { createServer } = require('node:http');",
+      "setTimeout(() => createServer((q, r) => r.end('spawned ' + q.url)).listen(Number(process.env.PORT), process.env.HOSTNAME), 400);"
+    ].join('\n'));
+    try {
+      door = await startFrontDoor({ host: '127.0.0.1', port: 0, spawnNext: true, cwd: dir, connect: null, env: { ZCC_NEXT_PORT: String(nextPort) } as NodeJS.ProcessEnv });
+      expect(door.nextOrigin).toBe(`http://127.0.0.1:${nextPort}`);
+      const starting = await fetch(new URL('docs', door.url));
+      expect(starting.status).toBe(503);
+      await expect(starting.json()).resolves.toEqual({ error: 'site_starting' });
+      await expect.poll(async () => (await fetch(new URL('docs', door!.url))).status, { timeout: 10_000 }).toBe(200);
+      await expect((await fetch(new URL('docs', door.url))).text()).resolves.toBe('spawned /docs');
+    } finally {
+      await door?.close();
+      door = null;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
-
-async function waitForHello(
-  laptop: Awaited<ReturnType<typeof connectWs>>
-): Promise<{ sessionId: string; joinUntil: number }> {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('no HELLO')), 3_000);
-    laptop.on('message', (payload: Buffer) => {
-      const frame = decodeFrame(payload);
-      if (!frame || frame.type !== TYPE.HELLO) return;
-      clearTimeout(timer);
-      resolve(JSON.parse(frame.payload.toString()) as { sessionId: string; joinUntil: number });
-    });
-  });
-}
-
-function echoInstall(laptop: Awaited<ReturnType<typeof connectWs>>, body: string): void {
-  laptop.on('message', (payload: Buffer) => {
-    const frame = decodeFrame(payload);
-    if (!frame) return;
-    if (frame.type === TYPE.PING) {
-      laptop.send(encodeFrame(TYPE.PONG, 0, frame.streamId));
-      return;
-    }
-    if (frame.type === TYPE.HELLO) return;
-    if (frame.type !== TYPE.HTTP_REQ || !(frame.flags & FLAG.META)) return;
-    laptop.send(encodeFrame(TYPE.HTTP_RES, FLAG.META, frame.streamId, encodeJsonPayload({
-      status: 200,
-      headers: [['content-type', 'text/plain; charset=utf-8']]
-    })));
-    laptop.send(encodeFrame(TYPE.HTTP_RES, FLAG.FIN, frame.streamId, Buffer.from(body)));
-  });
-}
-
-async function connectEchoLaptop(
-  port: number,
-  body = 'ok',
-  sessionId?: string
-): Promise<{ laptop: Awaited<ReturnType<typeof connectWs>>; hello: { sessionId: string; joinUntil: number } }> {
-  const headers: Record<string, string> = { Authorization: 'Bearer relay-token-relay-token' };
-  if (sessionId) headers['X-Zcc-Relay-Session'] = sessionId;
-  const laptop = await connectWs({
-    hostname: '127.0.0.1',
-    port,
-    path: '/_zcc/relay',
-    headers
-  });
-  const helloPromise = waitForHello(laptop);
-  echoInstall(laptop, body);
-  const hello = await helloPromise;
-  return { laptop, hello };
-}
