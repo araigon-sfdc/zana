@@ -5,9 +5,9 @@
  * isolated clone of the exact object being pushed. CI remains merge authority.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const ZERO_OID = /^0+$/;
@@ -20,7 +20,6 @@ const DEFAULT_GITHUB_SSH_ALIASES = ['github.com-work-public'];
 // inert. plugins/** stays out: plugin dirs are path-installed and shipped.
 const INERT_DOC = /^(?:docs\/.+\.md|README\.md|CONTRIBUTING\.md|(?:(?:apps|packages|docs)\/(?:[^/]+\/)*)?(?:AGENTS|CLAUDE)\.md)$/;
 const UNSAFE_DOC = /(?:^|\/)(?:SKILL\.md|fixtures?\/|snapshots?\/|test(?:ing)?\/|test-data\/|assets\/|generated\/|builtin-skills\/|__tests__\/)/i;
-const DEPENDENCY_INPUT = /^(?:pnpm-lock\.yaml|pnpm-workspace\.yaml|\.npmrc|(?:apps|packages|plugins)\/[^/]+\/package\.json)$/;
 const TEST_RUNNER_CONFIG = /(?:^|\/)(?:vitest(?:\.[^/]+)?\.config\.[cm]?[jt]s|tsconfig(?:\.[^/]+)?\.json|vite\.config\.[cm]?[jt]s|electron\.vite\.config\.[cm]?[jt]s)$/;
 
 function git(args, { cwd = process.cwd(), encoding = 'utf8' } = {}) {
@@ -104,20 +103,10 @@ export function selectPush({ tuples, remoteUrl, aliases = {}, hasObject, mergeBa
       bases.add(base);
       for (const path of changed(base, tuple.localOid)) paths.add(path);
     } else {
-      if (hasObject(tuple.remoteOid) && isAncestor(tuple.remoteOid, tuple.localOid)) {
-        bases.add(tuple.remoteOid);
-        for (const path of changed(tuple.remoteOid, tuple.localOid)) paths.add(path);
-      } else {
-        // Force-push (rebase/squash) or an unknown remote tip: the old tip says nothing
-        // about this push, so measure the branch against main like a new branch. If main
-        // is unavailable there is no sound base, so fall back to full verification.
-        const why = hasObject(tuple.remoteOid) ? `non-ancestor update for ${tuple.remoteRef}` : `remote base ${tuple.remoteOid} is unavailable locally`;
-        if (!hasObject('origin/main')) return { action: 'full', reason: `${why}; no local origin/main base` };
-        const base = mergeBase('origin/main', tuple.localOid);
-        if (!base) return { action: 'full', reason: `${why}; no sound merge base with origin/main` };
-        bases.add(base);
-        for (const path of changed(base, tuple.localOid)) paths.add(path);
-      }
+      if (!hasObject(tuple.remoteOid)) return { action: 'full', reason: `remote base ${tuple.remoteOid} is unavailable locally` };
+      if (!isAncestor(tuple.remoteOid, tuple.localOid)) return { action: 'full', reason: `non-ancestor update for ${tuple.remoteRef}` };
+      bases.add(tuple.remoteOid);
+      for (const path of changed(tuple.remoteOid, tuple.localOid)) paths.add(path);
     }
     oids.add(tuple.localOid);
   }
@@ -147,53 +136,27 @@ export function configuredAliases(run, configured = process.env.ZANA_GITHUB_SSH_
 export function withSnapshot({ oid, root = process.cwd(), run = spawnSync, log = console.log }, verify) {
   if (!oid) throw new Error('no pushed object available for snapshot verification');
   const snapshot = mkdtempSync(join(tmpdir(), 'zana-pre-push-'));
+  // Git hooks inherit repository routing variables. Strip them before spawning
+  // snapshot Git so its cwd controls repository selection, not caller worktree.
+  const env = { ...process.env };
+  for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_PREFIX']) delete env[key];
   try {
     log(`pre-push: snapshot ${oid.slice(0, 12)} in ${snapshot}`);
-    const clone = run('git', ['clone', '--no-local', '--no-checkout', root, snapshot], { stdio: 'inherit' });
+    const clone = run('git', ['clone', '--no-local', '--no-checkout', root, snapshot], { stdio: 'inherit', env });
     if (clone.status !== 0) throw new Error('could not create isolated push snapshot');
-    const fetch = run('git', ['fetch', '--no-tags', root, oid], { cwd: snapshot, stdio: 'inherit' });
+    // A clone made from a linked worktree inherits `core.worktree`, which points
+    // at its source checkout. Remove it before checkout so Git writes only into
+    // this disposable snapshot.
+    const unsetWorktree = run('git', ['config', '--unset-all', 'core.worktree'], { cwd: snapshot, stdio: 'ignore', env });
+    if (unsetWorktree.status !== 0 && unsetWorktree.status !== 5) throw new Error('could not isolate snapshot worktree');
+    const fetch = run('git', ['fetch', '--no-tags', root, oid], { cwd: snapshot, stdio: 'inherit', env });
     if (fetch.status !== 0) throw new Error(`could not fetch pushed object ${oid}`);
-    const checkout = run('git', ['checkout', '--detach', oid], { cwd: snapshot, stdio: 'inherit' });
+    const checkout = run('git', ['checkout', '--detach', oid], { cwd: snapshot, stdio: 'inherit', env });
     if (checkout.status !== 0) throw new Error(`could not check out pushed object ${oid}`);
     return verify(snapshot);
   } finally {
     rmSync(snapshot, { recursive: true, force: true });
   }
-}
-
-function packageDependencyFields(packageJson) {
-  const manifest = JSON.parse(packageJson);
-  return JSON.stringify({
-    packageManager: manifest.packageManager,
-    dependencies: manifest.dependencies,
-    devDependencies: manifest.devDependencies,
-    optionalDependencies: manifest.optionalDependencies,
-    peerDependencies: manifest.peerDependencies
-  });
-}
-
-function dependencyInputsChanged(base, paths, root) {
-  if (paths.includes('package.json')) {
-    const baseManifest = gitOk(['show', `${base}:package.json`], { cwd: root });
-    try {
-      if (!baseManifest || packageDependencyFields(baseManifest) !== packageDependencyFields(readFileSync(join(root, 'package.json'), 'utf8'))) return true;
-    } catch {
-      return true;
-    }
-  }
-  return paths.some((path) => DEPENDENCY_INPUT.test(path));
-}
-
-function linkInstalledDependencies(snapshot, root) {
-  const installed = join(root, 'node_modules');
-  if (!existsSync(installed) || !existsSync(snapshot)) return false;
-  symlinkSync(installed, join(snapshot, 'node_modules'), 'dir');
-  return true;
-}
-
-/** Quotes one argument for the `sh -c` command line run-concurrent builds. */
-function shellQuote(value) {
-  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 function needsBroadChangedTests(paths) {
@@ -202,6 +165,32 @@ function needsBroadChangedTests(paths) {
 
 function testInputs(paths) {
   return paths.filter((path) => /\.[cm]?[jt]sx?$/.test(path) && !path.endsWith('.d.ts') && !path.startsWith('e2e/'));
+}
+
+function isTestFile(path) {
+  return /(?:^|\.)test\.[cm]?[jt]sx?$|(?:^|\.)spec\.[cm]?[jt]sx?$/.test(path);
+}
+
+// Vitest's import graph can span most of the monorepo through shared helpers.
+// Pre-push stays bounded by running changed tests and direct colocated tests;
+// CI remains responsible for transitive and full-suite coverage.
+export function selectedTestFiles(inputs, root) {
+  const tests = new Set(inputs.filter(isTestFile));
+  for (const input of inputs.filter((path) => !isTestFile(path))) {
+    const name = basename(input).replace(/\.[cm]?[jt]sx?$/, '');
+    for (const directory of [dirname(input), join(dirname(input), '__tests__')]) {
+      const absoluteDirectory = join(root, directory);
+      if (!existsSync(absoluteDirectory)) continue;
+      for (const entry of readdirSync(absoluteDirectory, { withFileTypes: true })) {
+        if (!entry.isFile() || !isTestFile(entry.name)) continue;
+        const testName = entry.name.replace(/(?:\.coverage)?\.(?:test|spec)\.[cm]?[jt]sx?$/, '');
+        if (testName === name) {
+          tests.add(join(directory, entry.name));
+        }
+      }
+    }
+  }
+  return [...tests].sort();
 }
 
 export function runFullVerification({ oid, root = process.cwd(), run = spawnSync, log = console.log }) {
@@ -227,39 +216,24 @@ function guardTests(snapshot, run) {
 export function runFastVerification({ oid, base, paths = [], root = process.cwd(), run = spawnSync, log = console.log }) {
   if (!base) throw new Error('no base object available for fast verification');
   return withSnapshot({ oid, root, run, log }, (snapshot) => {
-    const reuseInstalledDependencies = !dependencyInputsChanged(base, paths, snapshot) && linkInstalledDependencies(snapshot, root);
-    if (reuseInstalledDependencies) {
-      log('pre-push: fast (reusing installed dependencies)');
-    } else {
-      log('pre-push: fast (est. install)');
-      const install = run('pnpm', ['install', '--frozen-lockfile', '--prefer-offline'], { cwd: snapshot, stdio: 'inherit' });
-      if (install.status !== 0) throw new Error('snapshot dependency install failed');
-    }
-    if (paths.some((path) => path.startsWith('plugins/slack-bridge-2ff2/'))) {
-      log('pre-push: fast (est. Slack runtime assets)');
-      const assets = run('pnpm', ['--filter', 'zcc-plugin-slack-bridge-2ff2', 'package'], { cwd: snapshot, stdio: 'inherit' });
-      if (assets.status !== 0) throw new Error('snapshot Slack runtime asset preparation failed');
-    }
+    log('pre-push: fast (est. install)');
+    const install = run('pnpm', ['install', '--frozen-lockfile', '--prefer-offline'], { cwd: snapshot, stdio: 'inherit' });
+    if (install.status !== 0) throw new Error('snapshot dependency install failed');
+    log('pre-push: fast (est. typecheck)');
+    const typecheck = run('pnpm', ['run', 'typecheck'], { cwd: snapshot, stdio: 'inherit' });
+    if (typecheck.status !== 0) throw new Error('verification failed: pnpm run typecheck');
     const inputs = testInputs(paths);
-    let tests = null;
     if (needsBroadChangedTests(paths)) {
-      tests = { label: `vitest --changed ${base.slice(0, 12)}`, name: 'vitest --changed', command: `pnpm exec vitest run --changed ${base}` };
-    } else if (inputs.length) {
-      tests = {
-        label: `vitest related ${inputs.length} input${inputs.length === 1 ? '' : 's'}`,
-        name: 'vitest related',
-        command: `pnpm exec vitest related ${inputs.map(shellQuote).join(' ')} --run --passWithNoTests`
-      };
-    }
-    if (tests) {
-      // Typecheck and tests are independent; run them together.
-      log(`pre-push: fast (est. typecheck + ${tests.label}, concurrent)`);
-      const checks = run('node', [join(root, 'scripts', 'run-concurrent.mjs'), 'typecheck=pnpm run typecheck', `tests=${tests.command}`], { cwd: snapshot, stdio: 'inherit' });
-      if (checks.status !== 0) throw new Error(`verification failed: typecheck or ${tests.name}`);
+      log(`pre-push: fast (est. vitest --changed ${base.slice(0, 12)})`);
+      const changed = run('pnpm', ['exec', 'vitest', 'run', '--changed', base], { cwd: snapshot, stdio: 'inherit' });
+      if (changed.status !== 0) throw new Error('verification failed: vitest --changed');
     } else {
-      log('pre-push: fast (est. typecheck)');
-      const typecheck = run('pnpm', ['run', 'typecheck'], { cwd: snapshot, stdio: 'inherit' });
-      if (typecheck.status !== 0) throw new Error('verification failed: pnpm run typecheck');
+      const tests = selectedTestFiles(inputs, snapshot);
+      if (tests.length) {
+        log(`pre-push: fast (est. ${tests.length} changed or colocated test${tests.length === 1 ? '' : 's'})`);
+        const testRun = run('pnpm', ['exec', 'vitest', 'run', ...tests], { cwd: snapshot, stdio: 'inherit' });
+        if (testRun.status !== 0) throw new Error('verification failed: selected vitest tests');
+      }
     }
     const guards = guardTests(snapshot, run);
     if (guards.length) {
@@ -270,50 +244,13 @@ export function runFastVerification({ oid, base, paths = [], root = process.cwd(
   });
 }
 
-const MAX_STAMPS = 50;
-
-/**
- * Records trees that already passed verification so an unchanged tree (retried
- * push after a dropped connection, amended message, repeated force-push) is not
- * re-verified. Keyed by tree hash, so any content change invalidates it. Lives
- * in the git dir; a full stamp covers any fast check of the same tree.
- */
-export function createStampStore(root, runGit) {
-  const dir = () => {
-    const path = runGit(['rev-parse', '--git-path', 'pre-push-verified']);
-    return path ? resolve(root, path) : null;
-  };
-  return {
-    has(name) {
-      const base = dir();
-      return Boolean(base) && existsSync(join(base, name));
-    },
-    record(name) {
-      const base = dir();
-      if (!base) return;
-      mkdirSync(base, { recursive: true });
-      const tmp = join(base, `.${name}.${process.pid}.tmp`);
-      writeFileSync(tmp, `${new Date().toISOString()}\n`);
-      renameSync(tmp, join(base, name));
-      const stale = readdirSync(base).filter((entry) => !entry.startsWith('.'))
-        .map((entry) => ({ entry, mtime: statSync(join(base, entry)).mtimeMs }))
-        .sort((left, right) => right.mtime - left.mtime).slice(MAX_STAMPS);
-      for (const { entry } of stale) rmSync(join(base, entry), { force: true });
-    },
-  };
-}
-
-export function runPrePush({ input = readFileSync(0, 'utf8'), remoteUrl, root = process.cwd(), log = console.log, error = console.error, select = selectPush, verify = runFullVerification, fastVerify = runFastVerification, run = spawnSync, stamps } = {}) {
+export function runPrePush({ input = readFileSync(0, 'utf8'), remoteUrl, root = process.cwd(), log = console.log, error = console.error, select = selectPush, verify = runFullVerification, fastVerify = runFastVerification, run = spawnSync } = {}) {
   if (!remoteUrl) {
     error('pre-push: Git did not provide remote URL; aborting push.');
     return 1;
   }
   const tuples = parseTuples(input);
   const runGit = (args) => gitOk(args, { cwd: root });
-  const store = stamps ?? createStampStore(root, runGit);
-  const treeOf = (oid) => runGit(['rev-parse', `${oid}^{tree}`]);
-  const verified = (accepted) => accepted.some((name) => { try { return store.has(name); } catch { return false; } });
-  const remember = (name) => { try { store.record(name); } catch { /* a missing stamp only costs a re-verify */ } };
   let selection = select({
     tuples,
     remoteUrl,
@@ -329,28 +266,13 @@ export function runPrePush({ input = readFileSync(0, 'utf8'), remoteUrl, root = 
   if (selection.action === 'skip') return 0;
   try {
     if (selection.action === 'fast') {
-      const tree = treeOf(selection.oid);
-      const fastName = tree && `${tree}-fast-${selection.base}`;
-      if (tree && verified([`${tree}-full`, fastName])) {
-        log('pre-push: tree already verified locally; skipping');
-        return 0;
-      }
       fastVerify({ oid: selection.oid, base: selection.base, paths: selection.paths, root, log, run });
-      if (tree) remember(fastName);
       return 0;
     }
     const oids = selection.oids ?? (selection.oid ? [selection.oid] : [...new Set((tuples ?? [])
       .filter((tuple) => !ZERO_OID.test(tuple.localOid)).map((tuple) => tuple.localOid))]);
     if (!oids.length) throw new Error('no pushed object available for full verification');
-    for (const oid of oids) {
-      const tree = treeOf(oid);
-      if (tree && verified([`${tree}-full`])) {
-        log(`pre-push: tree of ${oid.slice(0, 12)} already fully verified locally; skipping`);
-        continue;
-      }
-      verify({ oid, root, log });
-      if (tree) remember(`${tree}-full`);
-    }
+    for (const oid of oids) verify({ oid, root, log });
     return 0;
   } catch (cause) {
     error(`pre-push: ${cause.message}`);

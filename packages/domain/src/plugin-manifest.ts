@@ -144,6 +144,7 @@ export const pluginZccManifestSchema = z
     mcpServers: pluginMcpServersSchema.optional(),
     extra: pluginExtraSchema.optional(),
     requires: z.array(requiredManifestString).max(PLUGIN_REQUIRES_MAX).optional(),
+    toolPolicy: z.boolean().optional(),
     projectTab: pluginProjectTabSchema.optional(),
     peers: z.boolean().optional(),
     themes: z
@@ -162,6 +163,9 @@ export const pluginZccManifestSchema = z
   .strict()
   .refine((block) => block.server !== undefined || block.app !== undefined, {
     message: 'must declare at least zcc.server or zcc.app'
+  })
+  .refine((block) => block.toolPolicy !== true || block.server !== undefined, {
+    message: 'zcc.toolPolicy requires zcc.server'
   });
 
 export const pluginPackageJsonSchema = z
@@ -208,6 +212,7 @@ export interface PluginManifest {
   mcpServers: PluginMcpServerContribution[];
   extra: PluginExtra;
   requires: string[];
+  toolPolicy: boolean | undefined;
   projectTab: PluginZccManifest['projectTab'];
   /** Declares the peer SDK (links to other installs); gates the core Peers settings page. */
   peers: boolean;
@@ -240,6 +245,7 @@ export function readPluginManifest(packageJson: unknown): PluginManifest {
     mcpServers,
     extra: parsed.zcc.extra ?? {},
     requires: parsePluginRequires(parsed.zcc.requires),
+    toolPolicy: parsed.zcc.toolPolicy,
     projectTab: parsed.zcc.projectTab,
     peers: parsed.zcc.peers === true,
     themes: parsed.zcc.themes ?? [],
