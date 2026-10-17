@@ -193,14 +193,22 @@ export function selectedTestFiles(inputs, root) {
   return [...tests].sort();
 }
 
+const SLACK_BRIDGE = 'plugins/slack-bridge-2ff2/';
+
+// The Slack bridge tests read git-ignored runtime assets (mermaid.min.js) that
+// a fresh snapshot does not have, so build them before any run that includes them.
+function prepareSlackAssets(snapshot, run, log, mode) {
+  log(`pre-push: ${mode} (est. Slack runtime assets)`);
+  const assets = run('pnpm', ['--filter', 'zcc-plugin-slack-bridge-2ff2', 'package'], { cwd: snapshot, stdio: 'inherit' });
+  if (assets.status !== 0) throw new Error('snapshot Slack runtime asset preparation failed');
+}
+
 export function runFullVerification({ oid, root = process.cwd(), run = spawnSync, log = console.log }) {
   return withSnapshot({ oid, root, run, log }, (snapshot) => {
     log('pre-push: full (est. install)');
     const install = run('pnpm', ['install', '--frozen-lockfile'], { cwd: snapshot, stdio: 'inherit' });
     if (install.status !== 0) throw new Error('snapshot dependency install failed');
-    log('pre-push: full (est. Slack runtime assets)');
-    const assets = run('pnpm', ['--filter', 'zcc-plugin-slack-bridge-2ff2', 'package'], { cwd: snapshot, stdio: 'inherit' });
-    if (assets.status !== 0) throw new Error('snapshot Slack runtime asset preparation failed');
+    prepareSlackAssets(snapshot, run, log, 'full');
     log('pre-push: full (est. verify:full)');
     const result = run('pnpm', ['verify:full'], { cwd: snapshot, stdio: 'inherit' });
     if (result.status !== 0) throw new Error('verification failed: pnpm verify:full');
@@ -224,11 +232,13 @@ export function runFastVerification({ oid, base, paths = [], root = process.cwd(
     if (typecheck.status !== 0) throw new Error('verification failed: pnpm run typecheck');
     const inputs = testInputs(paths);
     if (needsBroadChangedTests(paths)) {
+      prepareSlackAssets(snapshot, run, log, 'fast');
       log(`pre-push: fast (est. vitest --changed ${base.slice(0, 12)})`);
       const changed = run('pnpm', ['exec', 'vitest', 'run', '--changed', base], { cwd: snapshot, stdio: 'inherit' });
       if (changed.status !== 0) throw new Error('verification failed: vitest --changed');
     } else {
       const tests = selectedTestFiles(inputs, snapshot);
+      if (tests.some((test) => test.startsWith(SLACK_BRIDGE))) prepareSlackAssets(snapshot, run, log, 'fast');
       if (tests.length) {
         log(`pre-push: fast (est. ${tests.length} changed or colocated test${tests.length === 1 ? '' : 's'})`);
         const testRun = run('pnpm', ['exec', 'vitest', 'run', ...tests], { cwd: snapshot, stdio: 'inherit' });

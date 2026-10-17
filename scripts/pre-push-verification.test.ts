@@ -126,6 +126,7 @@ it('installs dependencies and runs changed tests plus direct colocated tests', (
       ['git', ['checkout', '--detach', OID]],
       ['pnpm', ['install', '--frozen-lockfile', '--prefer-offline']],
       ['pnpm', ['run', 'typecheck']],
+      ['pnpm', ['--filter', 'zcc-plugin-slack-bridge-2ff2', 'package']],
       ['pnpm', ['exec', 'vitest', 'run', 'plugins/slack-bridge-2ff2/src/index.test.ts']],
       ['fd', ['-e', 'ts', 'guard\\.test']],
       ['pnpm', ['exec', 'vitest', 'run', 'apps/app/src/__tests__/rule6.guard.test.ts', 'scripts/install-seam.guard.test.ts']],
@@ -185,7 +186,35 @@ it('uses broad changed-test selection for test and runner configuration inputs',
   });
   try {
     runFastVerification({ oid: OID, base: BASE, paths: ['vitest.config.ts'], root, run, log: vi.fn() });
-    expect(run).toHaveBeenCalledWith('pnpm', ['exec', 'vitest', 'run', '--changed', BASE], expect.anything());
+    const commands = run.mock.calls.map(([command, args]) => [command, args]);
+    const assets = commands.findIndex(([, args]) => args.includes('package'));
+    expect(assets).toBeGreaterThan(-1);
+    expect(commands.slice(assets, assets + 2)).toEqual([
+      ['pnpm', ['--filter', 'zcc-plugin-slack-bridge-2ff2', 'package']],
+      ['pnpm', ['exec', 'vitest', 'run', '--changed', BASE]],
+    ]);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+it('skips Slack asset preparation when no selected test is in the Slack bridge', () => {
+  const root = mkdtempSync(join(tmpdir(), 'zana-push-fast-no-slack-'));
+  const run = vi.fn((command) => (command === 'fd' ? { status: 0, stdout: '' } : { status: 0 }));
+  try {
+    runFastVerification({ oid: OID, base: BASE, paths: ['apps/server/src/service.test.ts'], root, run, log: vi.fn() });
+    expect(run).not.toHaveBeenCalledWith('pnpm', ['--filter', 'zcc-plugin-slack-bridge-2ff2', 'package'], expect.anything());
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+it('fast verification fails when Slack asset preparation fails before broad tests', () => {
+  const root = mkdtempSync(join(tmpdir(), 'zana-push-fast-slack-failure-'));
+  const run = vi.fn((command, args) => {
+    if (args.includes('package')) return { status: 1 };
+    return command === 'fd' ? { status: 0, stdout: '' } : { status: 0 };
+  });
+  try {
+    expect(() => runFastVerification({ oid: OID, base: BASE, paths: ['vitest.config.ts'], root, run, log: vi.fn() }))
+      .toThrow('snapshot Slack runtime asset preparation failed');
+    expect(run).not.toHaveBeenCalledWith('pnpm', expect.arrayContaining(['vitest']), expect.anything());
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
