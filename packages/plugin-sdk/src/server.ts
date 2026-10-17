@@ -702,6 +702,13 @@ export interface PluginPeerLink {
   credentialExpiresAt?: number;
 }
 
+/** `label` is 1-40 characters, `detail` at most 200; no control characters. `attention` renders amber. */
+export interface PluginPeerLinkNote {
+  state: 'ok' | 'attention';
+  label: string;
+  detail?: string;
+}
+
 export interface PluginSdkPeers {
   localIdentity(): Promise<{ id: string }>;
   /**
@@ -742,6 +749,12 @@ export interface PluginSdkPeers {
   cancelInvitation?(args: { invitationId: string; signal?: AbortSignal }): Promise<void>;
   /** Transport state of this plugin's invitation-founded links, optionally for one peer. */
   peerLinks?(args?: { peerId?: string; signal?: AbortSignal }): Promise<PluginPeerLink[]>;
+  /**
+   * Attach a short status to one of this plugin's peer links; core shows it beside this plugin's row in Settings → Peers.
+   * `note: null` clears it. Refused (`not_found`) unless this plugin owns a link to `peerId` in `scope`. In memory only:
+   * dropped when the plugin stops or the link/use goes, so re-report on every poll. Optional on older hosts.
+   */
+  setPeerLinkNote?(peerId: string, args: { scope: string; note: PluginPeerLinkNote | null; signal?: AbortSignal }): Promise<void>;
   /** Rotate the link credential (a fresh forward-only join code over the live link) and reopen the link. Linked peers only. */
   reconnectPeer?(peerId: string, args?: { signal?: AbortSignal }): Promise<PluginPeerLink[]>;
   /** Queue a scoped introduction; does not install or enroll a daemon. Both peers need current grants. */

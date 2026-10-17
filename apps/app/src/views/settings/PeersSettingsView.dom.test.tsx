@@ -145,4 +145,22 @@ describe('PeersSettingsView', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Confirm remove' }));
     await waitFor(() => expect(screen.getByRole('alert').textContent).toBe('Request failed'));
   });
+
+  it('renders a plugin-supplied note beside only that plugin use, amber for attention', async () => {
+    const uses = [
+      { pluginId: 'a', label: 'Alpha plugin', scope: 'proj-1', since: 1_700_000_000_000, note: { state: 'attention', label: 'Sync not set up', detail: 'Connected, but database sync is not set up.' } },
+      { pluginId: 'b', label: 'Beta plugin', scope: 'proj-2', since: 1_700_000_000_000, note: { state: 'ok', label: 'Synced' } },
+      { pluginId: 'c', label: 'Gamma plugin', scope: 'proj-3', since: 1_700_000_000_000 }
+    ];
+    api.list.mockResolvedValue({ links: [link({ uses })] });
+    render(<PeersSettingsView />);
+    const rows = await screen.findAllByTestId('peer-link-use');
+    expect(within(rows[0]!).getByText('Sync not set up').getAttribute('data-state')).toBe('attention');
+    expect(within(rows[0]!).getByText('Connected, but database sync is not set up.')).toBeTruthy();
+    expect(within(rows[1]!).getByText('Synced').getAttribute('data-state')).toBe('ok');
+    expect(within(rows[2]!).queryByTestId('peer-use-note')).toBeNull();
+    // The link-level badges are unchanged.
+    expect(screen.getByText('Linked')).toBeTruthy();
+    expect(screen.getByText('Connected')).toBeTruthy();
+  });
 });

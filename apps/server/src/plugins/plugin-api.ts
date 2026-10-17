@@ -19,6 +19,7 @@ import { conversationHistoryAsync } from '../services/threads/conversation-histo
 import { threadSummary } from './thread-events.js';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createHash } from 'node:crypto';
+import { parsePluginLinkNote } from '../services/peers/plugin-link-notes.js';
 import { PEER_ID, validScope } from '../services/peers/peer-auth.js';
 import { linkCapable } from '../services/peers/scoped-link-authority.js';
 import { InvitationError, type PublicInvitationStatus } from '../services/peers/peer-invitation.js';
@@ -512,6 +513,8 @@ export function createPluginApi(
   const rpc = new Map<string, (args: unknown) => unknown | Promise<unknown>>();
   const kv = openAsyncJsonStore(kvPath);
   disposeHooks.push(() => kv.dispose());
+  // Plugin link notes are in memory and plugin-reported: they die with this plugin generation (stop, reload, uninstall).
+  disposeHooks.push(() => options?.productContext?.peerLinkNotes?.clearPlugin(pluginId));
   const readSettings = (): Record<string, PluginSettingValue | undefined> =>
     mergeSecretSettings(
       kvDir,
@@ -843,6 +846,7 @@ export function createPluginApi(
             await ctx.peerLinks.release(peerId, pluginId, args.scope as string);
             assertLive();
           }
+          ctx.peerLinkNotes?.clear(pluginId, peerId, args.scope as string);
         },
         createInvitation: async (args) => {
           const a = inviteArgs(args, ['scope', 'signal']);
@@ -897,6 +901,24 @@ export function createPluginApi(
           const a = inviteArgs(args ?? {}, ['peerId', 'signal']);
           const peerId = a.peerId === undefined ? undefined : inviteId(a.peerId);
           return (await inviteGuard(peerSignal(a.signal as AbortSignal | undefined), () => ownLinks(peerId))).map(publicLink);
+        },
+        setPeerLinkNote: async (peerId, args) => {
+          const a = inviteArgs(args, ['scope', 'note', 'signal']);
+          const id = inviteId(peerId), ctx = peerContext();
+          if (typeof a.scope !== 'string' || !validScope(a.scope)) throw new InvitationError('invalid_invitation');
+          const note = a.note === null ? null : parsePluginLinkNote(a.note);
+          if (a.note !== null && !note) throw new InvitationError('invalid_invitation');
+          const scope = a.scope;
+          await inviteGuard(peerSignal(a.signal as AbortSignal | undefined), async () => {
+            // Only a live link this plugin owns in this scope may carry its note; another plugin's links read as absent.
+            if (!(await ownLinks(id)).some(link => link.scope === scope && link.phase !== 'removed')) {
+              ctx.peerLinkNotes?.clear(pluginId, id, scope);
+              throw new InvitationError('not_found');
+            }
+            if (!ctx.peerLinkNotes) throw new InvitationError('unavailable');
+            if (note === null) ctx.peerLinkNotes.clear(pluginId, id, scope);
+            else if (!ctx.peerLinkNotes.set(pluginId, id, scope, note)) throw new InvitationError('capacity');
+          });
         },
         reconnectPeer: async (peerId, args) => {
           const a = inviteArgs(args ?? {}, ['signal']);

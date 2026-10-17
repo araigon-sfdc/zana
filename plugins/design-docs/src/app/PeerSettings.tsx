@@ -620,7 +620,7 @@ export function PeerSettings({ requestApproval = experimental_requestApproval, j
       if (!mounted.current) return;
       if (result.outcome === 'unavailable') {
         const cause = result.reason ? lifecycleText(result.reason) : result.detail ?? 'The reason was not reported.';
-        const text = `Repair could not finish: ${cause}${result.reason || /Add peer|offline/.test(cause) ? '' : ' Next step: use Reconnect, or remove this computer and add the peer again.'}`;
+        const text = `Repair could not finish: ${cause}${result.reason || /Add peer|offline|add the peer again/.test(cause) ? '' : ' Next step: use Reconnect, or remove this computer and add the peer again.'}`;
         setError(text); note(text, false);
       } else if (result.outcome === 'pending') {
         const text = `Repair started but sync is not set up yet. ${result.detail ?? ''}`.trim();

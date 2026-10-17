@@ -7,6 +7,7 @@ import {
 } from '@zana-ai/zcc-db';
 import type { PeerLink, PeerLinkListResponse, PeerLinkState } from '@zana-ai/zcc-server-contract';
 import type { ProductHttpContext } from '../../http/product-context.js';
+import { PluginLinkNotes } from '../peers/plugin-link-notes.js';
 import { revokeConnectHost } from './connect-enrollment.js';
 
 /** What an owner store (the thing that created a plugin link) knows about the peer. */
@@ -37,7 +38,8 @@ type LinkCtx = ProductHttpContext;
 
 const REASON_MAX = 200;
 
-function toPeerLink(host: HostRow, directory: PeerLinkDirectory | undefined, connected: ReadonlySet<string>): PeerLink {
+function toPeerLink(host: HostRow, ctx: LinkCtx, connected: ReadonlySet<string>): PeerLink {
+  const directory = ctx.peerLinkDirectory;
   const uses = host.purpose.kind === 'plugin-link' ? host.purpose.uses : [];
   const entry = directory?.describe(host.id);
   const link: PeerLink = {
@@ -47,7 +49,11 @@ function toPeerLink(host: HostRow, directory: PeerLinkDirectory | undefined, con
     // A forward host no owner store claims and with no uses is surfaced for removal, not hidden.
     state: entry?.state ?? (uses.length > 0 ? 'linked' : 'unclaimed'),
     connected: connected.has(host.id),
-    uses: uses.map(({ pluginId, label, scope, since }) => ({ pluginId, label, scope, since }))
+    uses: uses.map(({ pluginId, label, scope, since }) => {
+      // Notes are keyed by the peer the owner store names; an unclaimed link has none.
+      const note = entry && ctx.peerLinkNotes?.get(pluginId, entry.peerInstanceId, scope);
+      return note ? { pluginId, label, scope, since, note } : { pluginId, label, scope, since };
+    })
   };
   if (entry?.paused) link.paused = true;
   if (entry?.reason) link.reason = entry.reason.slice(0, REASON_MAX);
@@ -56,7 +62,17 @@ function toPeerLink(host: HostRow, directory: PeerLinkDirectory | undefined, con
 
 export function listPeerLinks(ctx: LinkCtx): PeerLinkListResponse {
   const connected = new Set(ctx.hostHub.connectedHostIds());
-  return { links: listPluginLinkHosts(ctx.db).map((host) => toPeerLink(host, ctx.peerLinkDirectory, connected)) };
+  const hosts = listPluginLinkHosts(ctx.db);
+  if (ctx.peerLinkNotes?.size) {
+    // Backstop for every way a link or use can vanish: a note outlives nothing it was reported against.
+    const live = new Set<string>();
+    for (const host of hosts) {
+      const peer = ctx.peerLinkDirectory?.describe(host.id)?.peerInstanceId;
+      if (peer && host.purpose.kind === 'plugin-link') for (const use of host.purpose.uses) live.add(PluginLinkNotes.liveKey(use.pluginId, peer, use.scope));
+    }
+    ctx.peerLinkNotes.retainOnly(live);
+  }
+  return { links: hosts.map((host) => toPeerLink(host, ctx, connected)) };
 }
 
 export type PeerLinkRemoval =
@@ -92,8 +108,10 @@ export async function removePeerLinkUse(
   if (!host.purpose.uses.some((use) => use.pluginId === pluginId && (scope === undefined || use.scope === scope))) {
     return { status: 'not-found' };
   }
+  const peer = ctx.peerLinkDirectory?.describe(hostId)?.peerInstanceId;
   let delegated: { linkRemoved: boolean } | undefined;
   try { delegated = await ctx.peerLinkDirectory?.release?.(hostId, pluginId, scope); } catch { return { status: 'unavailable' }; }
+  if (peer) ctx.peerLinkNotes?.clearUse(pluginId, peer, scope);
   if (delegated) return { status: 'ok', linkRemoved: delegated.linkRemoved };
   if (removeHostLinkUse(ctx.db, hostId, pluginId, scope) > 0) return { status: 'ok', linkRemoved: false };
   return teardownLink(ctx, host);
@@ -103,8 +121,10 @@ export async function removePeerLinkUse(
 export async function removePeerLink(ctx: LinkCtx, hostId: string): Promise<PeerLinkRemoval> {
   const host = pluginLink(ctx, hostId);
   if (!host) return { status: 'not-found' };
+  const peer = ctx.peerLinkDirectory?.describe(hostId)?.peerInstanceId;
   let delegated: { linkRemoved: true } | undefined;
   try { delegated = await ctx.peerLinkDirectory?.remove?.(hostId); } catch { return { status: 'unavailable' }; }
+  if (peer) ctx.peerLinkNotes?.clearPeer(peer);
   if (delegated) return { status: 'ok', linkRemoved: true };
   return teardownLink(ctx, host);
 }

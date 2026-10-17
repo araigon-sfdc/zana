@@ -100,6 +100,12 @@ export const peerLinkUseSchema = z.object({
   label: z.string().min(1).max(80),
   scope: z.string().min(1).max(256),
   since: z.number().int().nonnegative(),
+  /** Short status the using plugin reported for this link. Core relays it verbatim and never interprets it. */
+  note: z.object({
+    state: z.enum(["ok", "attention"]),
+    label: z.string().min(1).max(40),
+    detail: z.string().max(200).optional(),
+  }).strict().optional(),
 });
 export type PeerLinkUse = z.infer<typeof peerLinkUseSchema>;
 /** `unclaimed`: a forward-only host no owner store claims (e.g. migrated); the owner can remove it. */

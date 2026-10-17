@@ -570,6 +570,13 @@ describe('invitation pairing UI', () => {
     await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/no linked connection/));
   });
 
+  it('a Repair cause that already names its next step is not given a second, contradicting one', async () => {
+    const detail = 'The connection was re-linked, but the other computer has not reconnected on the new link yet. Keep Zana open on both computers, wait a few seconds, then press Repair again. If it keeps failing, remove this computer and add the peer again.';
+    mount({ inviteState: async () => view({ links: [lnk()] }), repairPeer: vi.fn(async () => ({ outcome: 'unavailable', detail, reason: null })) });
+    fireEvent.click(await screen.findByRole('button', { name: 'Repair' }));
+    expect((await screen.findByRole('alert')).textContent).toBe(`Repair could not finish: ${detail}`);
+  });
+
   it('Repair that leaves sync pending shows the concrete state instead of success; unenrolled link says to pair again', async () => {
     const repair = vi.fn()
       .mockResolvedValueOnce({ outcome: 'pending', detail: 'Sync setup started but has not finished: keychain locked', reason: null })

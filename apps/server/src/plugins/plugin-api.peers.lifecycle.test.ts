@@ -13,6 +13,7 @@ import { createFakePluginHost } from '@zana-ai/zcc-plugin-sdk/testing';
 import { createPluginApi, type PluginHandle } from './plugin-api.js';
 import { InvitationError, PeerInvitations, type InvitationTransport, type PeerInvitationsOptions } from '../services/peers/peer-invitation.js';
 import type { PeerLinkView } from '../services/peers/peer-links.js';
+import { NOTES_PER_PLUGIN_MAX, PluginLinkNotes } from '../services/peers/plugin-link-notes.js';
 
 const roots: string[] = [], servers: ProductServer[] = [], connections: EnrolledHostConnection[] = [], handles: PluginHandle[] = [];
 afterEach(async () => {
@@ -667,4 +668,62 @@ it('lists execution machines only, names plugin-link peers by their owner record
     removeHostLinkUse(db, foreign.id, 'other-plugin');
     expect((await handle.api.sdk.peers.enrolled()).map(peer => peer.hostId)).toEqual([execution.id, forward.id, foreign.id]);
   } finally { db.close(); }
+});
+
+it('setPeerLinkNote: a plugin annotates only live links it owns, with validated, bounded notes cleared on revoke and dispose', async () => {
+  const mine = link({ peerInstanceId: randomUUID() });
+  const theirs = link({ pluginId: 'other-plugin', peerInstanceId: randomUUID() });
+  const gone = link({ peerInstanceId: randomUUID(), phase: 'removed' });
+  const all = [mine, theirs, gone];
+  const peerLinkNotes = new PluginLinkNotes();
+  const ctx = { peerLinkNotes, peerLinks: { links: vi.fn(async (peer?: string) => all.filter(item => !peer || item.peerInstanceId === peer)), rotate: vi.fn(), release: vi.fn(async () => true) },
+    peerAuthority: { proposals: vi.fn(async () => []), revoke: vi.fn() } };
+  const handle = createPluginApi('sync-plugin', join(tmpdir(), 'plugins', 'sync-plugin'), { productContext: { productInstanceId: randomUUID(), ...ctx } as never });
+  handles.push(handle);
+  const peers = handle.api.sdk.peers;
+  const note = { state: 'attention', label: 'Sync not set up', detail: 'x' } as const;
+  await peers.setPeerLinkNote!(mine.peerInstanceId, { scope: INV_SCOPE, note });
+  expect(peerLinkNotes.get('sync-plugin', mine.peerInstanceId, INV_SCOPE)).toEqual(note);
+  // Another plugin's link, an unknown peer, a wrong scope and a removed link all read as not found and store nothing.
+  for (const [peer, scope] of [[theirs.peerInstanceId, INV_SCOPE], [randomUUID(), INV_SCOPE], [mine.peerInstanceId, 'other-scope'], [gone.peerInstanceId, INV_SCOPE]] as const) {
+    await expect(peers.setPeerLinkNote!(peer, { scope, note })).rejects.toThrow('Invitation not found');
+    expect(peerLinkNotes.get('sync-plugin', peer, scope)).toBeUndefined();
+  }
+  expect(peerLinkNotes.get('other-plugin', theirs.peerInstanceId, INV_SCOPE)).toBeUndefined();
+  // Validation happens before any link lookup.
+  const lookups = ctx.peerLinks.links.mock.calls.length;
+  for (const bad of [{ state: 'bad', label: 'x' }, { state: 'ok', label: '' }, { state: 'ok', label: 'x', extra: 1 }, undefined, 'x']) {
+    await expect(peers.setPeerLinkNote!(mine.peerInstanceId, { scope: INV_SCOPE, note: bad as never })).rejects.toThrow('not valid');
+  }
+  await expect(peers.setPeerLinkNote!('!', { scope: INV_SCOPE, note })).rejects.toThrow('not valid');
+  await expect(peers.setPeerLinkNote!(mine.peerInstanceId, { scope: '', note })).rejects.toThrow('not valid');
+  await expect(peers.setPeerLinkNote!(mine.peerInstanceId, { scope: INV_SCOPE, note, extra: 1 } as never)).rejects.toThrow('not valid');
+  expect(ctx.peerLinks.links.mock.calls.length).toBe(lookups);
+  // Null clears; a stale note is cleared even when the link has vanished.
+  await peers.setPeerLinkNote!(mine.peerInstanceId, { scope: INV_SCOPE, note: null });
+  expect(peerLinkNotes.size).toBe(0);
+  peerLinkNotes.set('sync-plugin', gone.peerInstanceId, INV_SCOPE, note);
+  await expect(peers.setPeerLinkNote!(gone.peerInstanceId, { scope: INV_SCOPE, note: null })).rejects.toThrow('Invitation not found');
+  expect(peerLinkNotes.size).toBe(0);
+  // Revoke drops the note for that scope.
+  await peers.setPeerLinkNote!(mine.peerInstanceId, { scope: INV_SCOPE, note });
+  await peers.revoke(mine.peerInstanceId, { scope: INV_SCOPE });
+  expect(peerLinkNotes.size).toBe(0);
+  // The cap is refused with a fixed reason; another plugin's notes are untouched.
+  peerLinkNotes.set('other-plugin', theirs.peerInstanceId, INV_SCOPE, note);
+  for (let i = 0; i < NOTES_PER_PLUGIN_MAX; i++) peerLinkNotes.set('sync-plugin', `peer-${i}`, 's', note);
+  await expect(peers.setPeerLinkNote!(mine.peerInstanceId, { scope: INV_SCOPE, note })).rejects.toThrow();
+  // Dispose (plugin stop / uninstall) clears only this plugin's notes.
+  await handle.dispose();
+  expect(peerLinkNotes.size).toBe(1);
+  expect(peerLinkNotes.get('other-plugin', theirs.peerInstanceId, INV_SCOPE)).toEqual(note);
+  await expect(peers.setPeerLinkNote!(mine.peerInstanceId, { scope: INV_SCOPE, note })).rejects.toThrow('stale');
+});
+
+it('setPeerLinkNote reports unavailable without a notes store or invitation links', async () => {
+  const mine = link({ peerInstanceId: randomUUID() });
+  const withoutStore = inviteApi(tmpdir(), 'sync-plugin', { peerLinks: { links: vi.fn(async () => [mine]) } });
+  await expect(withoutStore.setPeerLinkNote!(mine.peerInstanceId, { scope: INV_SCOPE, note: { state: 'ok', label: 'x' } })).rejects.toThrow('unavailable');
+  const withoutLinks = inviteApi(tmpdir(), 'sync-plugin', { peerLinkNotes: new PluginLinkNotes() });
+  await expect(withoutLinks.setPeerLinkNote!(mine.peerInstanceId, { scope: INV_SCOPE, note: null })).rejects.toThrow('unavailable');
 });

@@ -75,6 +75,7 @@ import { PeerTunnels } from '@zana-ai/zcc-host-daemon/peer-tunnels';
 import { listPublicHosts } from '../services/hosts/host-public.js';
 import { PeerInvitations } from '../services/peers/peer-invitation.js';
 import { PeerLinks } from '../services/peers/peer-links.js';
+import { PluginLinkNotes } from '../services/peers/plugin-link-notes.js';
 import { createPeerForwarderLease } from '../services/peers/peer-forwarder-lease.js';
 import { createLocalEndpoint, preflightPeerSsh } from '../services/peers/peer-ssh-local.js';
 import { createPeerSshTransport } from '../services/peers/peer-ssh-transport.js';
@@ -137,6 +138,8 @@ export interface ProductHttpContext {
   peerLinks?: PeerLinks;
   /** Owner-store view of plugin links for the core Peers hub. Absent: links are listed from host rows alone. */
   peerLinkDirectory?: import('../services/hosts/peer-link-view.js').PeerLinkDirectory;
+  /** Plugin-reported per-link state notes shown by the core Peers hub. In memory, bounded. */
+  peerLinkNotes?: PluginLinkNotes;
   pairingRelay?: import('./pairing-relay-controller.js').PairingRelayHandle;
   /**
    * Optional host-injected Team verbs. Product HTTP validates bounded wire
@@ -558,6 +561,7 @@ export function createProductHttpContext(
     peerInvitations,
     peerLinks,
     ...(peerLinks ? { peerLinkDirectory: peerLinks.directory } : {}),
+    peerLinkNotes: new PluginLinkNotes(),
     peerControlReplay: new PeerReplayWindow({ directory: join(realpathSync(dataDir), 'peer-control-replay'), localInstanceId: productInstanceId, keyProvider }),
     pluginStorageEpochs: new PluginStorageEpochs({ directory: join(realpathSync(dataDir), 'plugin-storage-epochs'), instanceId: productInstanceId, keyProvider }),
     verifyUiSend,

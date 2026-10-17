@@ -529,6 +529,11 @@ export function createFakePluginHost(options?: FakePluginHostOptions): FakePlugi
           args?.signal?.throwIfAborted();
           return invokeSdk('peers.peerLinks', () => [], args) as Promise<PluginPeerLink[]>;
         },
+        async setPeerLinkNote(peerId, args) {
+          assertLive();
+          args.signal?.throwIfAborted();
+          await invokeSdk('peers.setPeerLinkNote', () => undefined, peerId, args);
+        },
         async reconnectPeer(peerId, args) {
           assertLive();
           args?.signal?.throwIfAborted();

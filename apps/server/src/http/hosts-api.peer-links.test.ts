@@ -279,3 +279,43 @@ describe('DELETE peer-link', () => {
     expect(getHost(s.ctx.db, link.id)?.destroyedAt).toBeNull();
   });
 });
+
+describe('plugin link state notes', () => {
+  const directory = (id: string): PeerLinkDirectory => ({
+    describe: host => host === id ? { peerInstanceId: 'inst-ada', peerName: 'Ada', state: 'linked' } : undefined
+  });
+  const list = async () => (await fetch(url('/peer-links')).then(r => r.json()) as { links: Array<{ uses: Array<Record<string, any>> }> }).links[0]!.uses;
+
+  it('attaches a plugin note to exactly that plugin and scope use', async () => {
+    const s = await start();
+    const { link } = seed(s);
+    s.ctx.peerLinkDirectory = directory(link.id);
+    s.ctx.peerLinkNotes!.set('plug-a', 'inst-ada', 'repo-1', { state: 'attention', label: 'Sync not set up', detail: 'why' });
+    s.ctx.peerLinkNotes!.set('plug-b', 'inst-ada', 'other-scope', { state: 'ok', label: 'Stale scope' });
+    const uses = await list();
+    expect(uses.find(u => u.pluginId === 'plug-a')!.note).toEqual({ state: 'attention', label: 'Sync not set up', detail: 'why' });
+    expect(uses.find(u => u.pluginId === 'plug-b')).not.toHaveProperty('note');
+    // The note for a scope no use has is dropped, not kept for a later link.
+    expect(s.ctx.peerLinkNotes!.get('plug-b', 'inst-ada', 'other-scope')).toBeUndefined();
+  });
+
+  it('shows no note when no owner store names the peer', async () => {
+    const s = await start();
+    seed(s);
+    s.ctx.peerLinkNotes!.set('plug-a', 'inst-ada', 'repo-1', { state: 'ok', label: 'x' });
+    expect((await list()).every(u => !('note' in u))).toBe(true);
+  });
+
+  it('drops a use note when that use is removed, and every note when the link is removed', async () => {
+    const s = await start();
+    const { link } = seed(s);
+    s.ctx.peerLinkDirectory = directory(link.id);
+    s.ctx.peerLinkNotes!.set('plug-a', 'inst-ada', 'repo-1', { state: 'ok', label: 'a' });
+    s.ctx.peerLinkNotes!.set('plug-b', 'inst-ada', 'repo-2', { state: 'ok', label: 'b' });
+    await fetch(url(`/peer-links/${link.id}/uses/plug-a?scope=repo-1`), { method: 'DELETE', headers: JSON_HEADERS });
+    expect(s.ctx.peerLinkNotes!.get('plug-a', 'inst-ada', 'repo-1')).toBeUndefined();
+    expect(s.ctx.peerLinkNotes!.get('plug-b', 'inst-ada', 'repo-2')).toBeDefined();
+    await fetch(url(`/peer-links/${link.id}`), { method: 'DELETE', headers: JSON_HEADERS });
+    expect(s.ctx.peerLinkNotes!.size).toBe(0);
+  });
+});

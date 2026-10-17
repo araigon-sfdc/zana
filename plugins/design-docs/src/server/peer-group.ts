@@ -70,11 +70,14 @@ export class DesignDocPeerGroup {
    * computer left (it keeps a roster it is no longer in), or it is the only member left and `peerId` is a former member.
    * Both are history once their teardown is delivered, so a new pairing starts from a fresh replica (`detachForRejoin`).
    * Pending teardown of `peerId` itself is superseded by the new pairing; any other pending work must finish first.
+   * So is a not yet frozen setup with `peerId` kept beside that history: it can never finish (a group never re-admits a
+   * computer it removed, and a computer that left never joins through its old roster), and counting it as "setup in
+   * progress" left both sides waiting on each other. A frozen join (unknown outcome) or a setup with another computer stays.
    */
   rejoinState(peerId: string): { kind: 'clear' } | { kind: 'detach' } | { kind: 'blocked'; reason: string } {
     id.parse(peerId);
-    const roster = this.roster();
-    if (!roster || this.consent()) return { kind: 'clear' };
+    const roster = this.roster(), consent = this.consent();
+    if (!roster || (consent && (consent.peerId !== peerId || consent.request || consent.capacity))) return { kind: 'clear' };
     const live = this.liveRoster();
     const former = historicalMembers(roster).some((member) => member.machineId === peerId) && !roster.members.some((member) => member.machineId === peerId);
     if (live && !former) return { kind: 'clear' };

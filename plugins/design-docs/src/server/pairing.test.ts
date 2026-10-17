@@ -806,6 +806,51 @@ describe('DD invitation pairing', () => {
       } finally { warn.mockRestore(); }
     });
 
+    it('after re-linking, waits for the other computer to come back on the new link before trying again', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const net = network(), a = net.app('a'), b = net.app('b', { relinkWait: { timeoutMs: 200, intervalMs: 5 } }); net.link(a, b);
+        await a.pairing.enable('b');
+        const calls = withInvites(b, { links: [link({ peerInstanceId: 'a' })] });
+        vi.spyOn(b.peers, 'enable').mockRejectedValueOnce(new Error('pair store busy'));
+        // A re-key tears the connector down; core does not list the peer until it is re-established.
+        const enrolled = b.peers.enrolled.bind(b.peers);
+        let away = 0;
+        calls.reconnectPeer.mockImplementationOnce(async () => { away = 3; return [link({ peerInstanceId: 'a', state: 'reconnecting' })]; });
+        vi.spyOn(b.peers, 'enrolled').mockImplementation(async (args) => away-- > 0 ? [] : enrolled(args));
+        await expect(b.pairing.repair('a')).resolves.toMatchObject({ outcome: 'relinked' });
+      } finally { warn.mockRestore(); }
+    });
+
+    it('when the other computer does not come back after re-linking, says so in plain words with the next step', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const net = network(), a = net.app('a'), b = net.app('b', { relinkWait: { timeoutMs: 30, intervalMs: 5 } }); net.link(a, b);
+        await a.pairing.enable('b');
+        const calls = withInvites(b, { links: [link({ peerInstanceId: 'a' })] });
+        vi.spyOn(b.peers, 'enable').mockRejectedValueOnce(new Error('pair store busy'));
+        const enrolled = b.peers.enrolled.bind(b.peers);
+        let relinked = false;
+        calls.reconnectPeer.mockImplementationOnce(async () => { relinked = true; return [link({ peerInstanceId: 'a', state: 'reconnecting' })]; });
+        vi.spyOn(b.peers, 'enrolled').mockImplementation(async (args) => relinked ? [] : enrolled(args));
+        const result = await b.pairing.repair('a');
+        expect(result.outcome).toBe('unavailable');
+        expect(result.detail).not.toContain('mutually enrolled peer unavailable');
+        expect(result.detail).toMatch(/re-linked.*press Repair again.*remove this computer.*add the peer again/s);
+      } finally { warn.mockRestore(); }
+    });
+
+    it('does not re-link for a sync-group conflict: re-linking revokes the link grants and cannot resolve it', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const net = network(), a = net.app('a'), b = net.app('b'), c = net.app('c'); net.link(a, b); net.link(a, c);
+        const calls = withInvites(a, { links: [link({ peerInstanceId: 'c' })] });
+        await a.pairing.enable('b');
+        await expect(a.pairing.repair('c')).resolves.toMatchObject({ outcome: 'unavailable', detail: expect.stringContaining('another database setup is pending') });
+        expect(calls.reconnectPeer).not.toHaveBeenCalled();
+      } finally { warn.mockRestore(); }
+    });
+
     it('reports the cause when re-linking fails too, without touching other computers', async () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       try {
@@ -1366,6 +1411,88 @@ describe('DD invitation pairing', () => {
       await expect(a.pairing.repair('b')).resolves.toMatchObject({ outcome: 'unavailable', detail: expect.stringContaining('cannot take a removed computer back') });
     });
 
+    /**
+     * The real two-machine deadlock: the computer that stayed also holds a sponsor setup (consent) for the leaver, persisted
+     * beside its one-member roster (an older build, or a setup started before the removal arrived). The leaver detached and
+     * waits for it to set that group aside; the stayer counted its own consent as "setup in progress" and never did.
+     */
+    const staleSponsorSetup = (stayed: InviteApp, left: InviteApp, replicaId: string) => {
+      stayed.group.enable(stayed.peerId, left.peerId, stayed.group.sync.localRepository()!.repoId, replicaId);
+      expect(stayed.group.consent()).toMatchObject({ peerId: left.peerId });
+      expect(stayed.group.liveRoster()!.members.map((member) => member.machineId)).toEqual([stayed.peerId]);
+    };
+
+    it('a stale setup for the former member does not hide the leftover group: it is set aside, not cleared', async () => {
+      const { left, stayed } = await dissolvedThenRelinked('b');
+      staleSponsorSetup(stayed, left, left.group.sync.localRepository()!.replicaId);
+      expect(stayed.group.rejoinState(left.peerId)).toEqual({ kind: 'detach' });
+      // A frozen join has an unknown outcome and is never dropped; a setup with another computer is not this pairing's.
+      const consent = stayed.group.consent()!;
+      stayed.db.prepare('UPDATE sync_group_control SET consent_json = ?').run(JSON.stringify({ ...consent, request: { requestId: consent.requestId } }));
+      expect(stayed.group.rejoinState(left.peerId)).toEqual({ kind: 'clear' });
+      stayed.db.prepare('UPDATE sync_group_control SET consent_json = ?').run(JSON.stringify({ ...consent, peerId: 'c' }));
+      expect(stayed.group.rejoinState(left.peerId)).toEqual({ kind: 'clear' });
+      stayed.db.prepare('UPDATE sync_group_control SET consent_json = ?').run(JSON.stringify(consent));
+      stayed.group.detachForRejoin(stayed.peerId, left.peerId);
+      expect(stayed.group.consent()).toBeNull();
+      expect(stayed.group.roster()).toBeNull();
+    });
+
+    it.each(['a', 'b'] as const)('leaver %s: the stayer sets aside its leftover group and stale setup by polling, no owner action', async (leaver) => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const { a, b, left, stayed } = await dissolvedThenRelinked(leaver);
+        staleSponsorSetup(stayed, left, left.group.sync.localRepository()!.replicaId);
+        const replica = stayed.group.sync.localRepository()!.replicaId;
+        await poll(a, b);
+        await formed(a, b);
+        expect(stayed.group.sync.localRepository()!.replicaId).not.toBe(replica);
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining('archived the sync group left over from an earlier removal'));
+      } finally { warn.mockRestore(); }
+    });
+
+    it('Repair on the stuck stayer sets the leftover group aside and converges, never "mutually enrolled peer unavailable"', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const { a, b } = await dissolvedThenRelinked('b');
+        // The leaver detached first (its consent is pinned to the stayer's old replica), exactly the machine evidence.
+        // The stayer (initiator) re-created the bootstrap binding, so the leaver detaches, pins its setup to the stayer's
+        // current replica and waits for it to set its leftover group aside: the machine evidence.
+        await a.peers.enable('b', { scope: bootstrapScope('a', 'b') });
+        await vi.waitFor(async () => {
+          await b.pairing.inviteState(); await b.pairing.retry(true);
+          expect(b.group.consent()).toMatchObject({ peerId: 'a', error: expect.stringContaining('set aside the sync group') });
+        });
+        staleSponsorSetup(a, b, 'replica-from-an-older-attempt');
+        const calls = a.peers as unknown as { reconnectPeer: ReturnType<typeof vi.fn> };
+        const result = await a.pairing.repair('b');
+        expect(result.outcome).not.toBe('unavailable');
+        expect(calls.reconnectPeer).not.toHaveBeenCalled();
+        await poll(a, b);
+        await formed(a, b);
+      } finally { warn.mockRestore(); }
+    });
+
+    it('the waiting side is told exactly what to do while the other computer still holds the leftover group', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const { a, b } = await dissolvedThenRelinked('b');
+        // The stayer (initiator) re-created the bootstrap binding, so the leaver detaches, pins its setup to the stayer's
+        // current replica and waits for it to set its leftover group aside: the machine evidence.
+        await a.peers.enable('b', { scope: bootstrapScope('a', 'b') });
+        await vi.waitFor(async () => {
+          await b.pairing.inviteState(); await b.pairing.retry(true);
+          expect(b.group.consent()).toMatchObject({ peerId: 'a', error: expect.stringContaining('set aside the sync group') });
+        });
+        // The stayer runs a build that never sets it aside: the leaver's Repair must still give a way forward.
+        a.pairing.retry = async () => {};
+        const result = await b.pairing.repair('a');
+        expect(result.outcome).toBe('pending');
+        expect(result.detail).not.toContain('waiting for the other computer to set aside');
+        expect(result.detail).toMatch(/other computer.*Repair.*remove this computer.*add the peer again/s);
+      } finally { warn.mockRestore(); }
+    });
+
     it('a local Disable Link of the new link is not undone by the next tick', async () => {
       const { a, b } = await dissolvedThenRelinked('b');
       await a.pairing.revoke('b');
@@ -1477,5 +1604,73 @@ describe('DD out-of-sync check', () => {
     left = right = 'merged';
     expect(await a.pairing.outOfSync()).toBe(false);
     expect(await b.pairing.outOfSync()).toBe(false);
+  });
+});
+
+describe('DD link state notes for core Peers', () => {
+  type NoteCall = [string, { scope: string; note: { state: string; label: string; detail?: string } | null }];
+  const setup = () => {
+    const net = network(), a = net.app('a'), b = net.app('b'); net.link(a, b);
+    const mocks = withInvites(a, { links: [link()] });
+    const setPeerLinkNote = vi.fn(async (_peer: string, _args: unknown) => undefined);
+    Object.assign(a.peers, { setPeerLinkNote });
+    const calls = () => setPeerLinkNote.mock.calls as unknown as NoteCall[];
+    return { net, a, b, mocks, setPeerLinkNote, calls };
+  };
+
+  it('reports attention once for a connected link without sync, and not again until it changes', async () => {
+    const { a, calls } = setup();
+    await a.pairing.inviteState();
+    await a.pairing.inviteState();
+    expect(calls()).toHaveLength(1);
+    expect(calls()[0]![0]).toBe('b');
+    expect(calls()[0]![1]).toMatchObject({ scope: 'repo', note: { state: 'attention', label: 'Sync not set up' } });
+  });
+
+  it('clears the note once the computer is synced', async () => {
+    const { a, b, calls } = setup();
+    withInvites(b, { list: [ready('a')], links: [link({ peerInstanceId: 'a' })] });
+    // Both computers are linked; the invitation flow enables sync on its own, after which the attention note is cleared.
+    await vi.waitFor(async () => {
+      await a.pairing.inviteState(); await b.pairing.inviteState();
+      expect(calls().map(([, args]) => args.note?.state ?? null)).toEqual(['attention', null]);
+    }, { timeout: 3000 });
+  });
+
+  it('sends nothing for a link that is not connected, and clears after the link goes away', async () => {
+    const { a, mocks, calls } = setup();
+    mocks.peerLinks.mockResolvedValue([link({ state: 'reconnecting' })]);
+    await a.pairing.inviteState();
+    expect(calls()).toHaveLength(0);
+    mocks.peerLinks.mockResolvedValue([link()]);
+    await a.pairing.inviteState();
+    expect(calls()).toHaveLength(1);
+    // Core drops the note with the link; a link that reappears is reported afresh.
+    mocks.peerLinks.mockResolvedValue([]);
+    await a.pairing.inviteState();
+    mocks.peerLinks.mockResolvedValue([link()]);
+    await a.pairing.inviteState();
+    expect(calls()).toHaveLength(2);
+  });
+
+  it('clears a stale attention note when the link stops being connected', async () => {
+    const { a, mocks, calls } = setup();
+    await a.pairing.inviteState();
+    mocks.peerLinks.mockResolvedValue([link({ state: 'disconnected' })]);
+    await a.pairing.inviteState();
+    expect(calls().map(([, args]) => args.note?.state ?? null)).toEqual(['attention', null]);
+  });
+
+  it('tolerates older hosts without setPeerLinkNote and a failing report (retried next time)', async () => {
+    const { a, setPeerLinkNote, calls } = setup();
+    setPeerLinkNote.mockRejectedValueOnce(new Error('note refused'));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await expect(a.pairing.inviteState()).resolves.toMatchObject({ available: true });
+      await a.pairing.inviteState();
+      expect(calls()).toHaveLength(2);
+    } finally { warn.mockRestore(); }
+    const older = network(), c = older.app('c'); withInvites(c, { links: [link({ peerInstanceId: 'd' })] });
+    await expect(c.pairing.inviteState()).resolves.toMatchObject({ available: true });
   });
 });

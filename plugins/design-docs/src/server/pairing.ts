@@ -37,6 +37,24 @@ export function lifecycleReasonOf(error: unknown): PeerLifecycleReason {
 const isTransient = (error: unknown): boolean => error instanceof Error && error.message === TRANSIENT_PEER_ERROR;
 /** Cap for the follower's backoff between failed probes of an unreachable initiator. */
 const FOLLOWER_PROBE_MAX_MS = 5 * 60 * 1000;
+/** Repair's re-link tears down that link's connector; core lists the peer as enrolled again once it is re-established. */
+const RELINK_WAIT = { timeoutMs: 20_000, intervalMs: 500 };
+const ENROLLMENT_UNAVAILABLE = 'mutually enrolled peer unavailable';
+const RELINK_NOT_BACK = 'The connection was re-linked, but the other computer has not reconnected on the new link yet. ' +
+  'Keep Zana open on both computers, wait a few seconds, then press Repair again. If it keeps failing, remove this computer and add the peer again.';
+/**
+ * Setup errors that mean "the other computer must act", in owner words with the way forward. The protocol text stays in
+ * the log and the status line; Repair shows this instead of a bare waiting message.
+ */
+const SETUP_GUIDANCE: Record<string, string> = {
+  'waiting for the other computer to set aside the sync group from an earlier removal':
+    'The other computer still keeps the sync group from the earlier removal. It sets that aside by itself once it runs this version of Design Docs with Zana open. ' +
+    'If this does not clear within a minute, open Design Docs settings on the other computer and press Repair on this computer\'s card. ' +
+    'If that does not help either, remove this computer there and add the peer again.',
+  'pair unavailable; automatic introduction pending':
+    'This computer is waiting for the other computer to finish its half of the setup. Keep Zana open on both computers. ' +
+    'If this does not clear within a minute, press Repair on this computer\'s card on the other computer; if that fails, remove this computer there and add the peer again.'
+};
 
 /** Invitation UX is gated apart from group sync: older hosts keep syncing an existing group and only lose the new action. */
 export function inviteCapability(peers: Pick<PluginSdkPeers, never> | undefined): { available: true } | { available: false; reason: typeof INVITE_UNSUPPORTED_REASON } {
@@ -119,6 +137,8 @@ export class DesignDocPairing {
   private lifecycleReason: PeerLifecycleReason | null = null;
   private readonly logged = new Set<string>();
   private timer: ReturnType<typeof setInterval> | null = null;
+  /** Last link note sent to core per `peer\0scope`; resent only on change or after the link reappears. */
+  private readonly reportedNotes = new Map<string, 'attention' | 'clear'>();
   private running: Promise<void> | null = null;
   private enabling: Promise<GroupStatus> | null = null;
   private revoking: Promise<GroupStatus> | null = null;
@@ -143,7 +163,7 @@ export class DesignDocPairing {
    * content. `stateChanged` fires when a peer says its state moved (e.g. after its Sync Now) so the UI can re-check.
    */
   constructor(readonly group: DesignDocPeerGroup, private readonly peers: PluginSdkPeers,
-    private readonly hooks: { stateDigest?: () => string | null; stateChanged?: () => void } = {}) {}
+    private readonly hooks: { stateDigest?: () => string | null; stateChanged?: () => void; relinkWait?: { timeoutMs: number; intervalMs: number } } = {}) {}
 
   register(zcc: Pick<ZccPluginApi, 'onDispose'>): void {
     this.peers.handle('group-hello', async (request) => {
@@ -302,7 +322,37 @@ export class DesignDocPairing {
     }
     this.setupError = failure ? this.message(failure) : null;
     if (failure) this.logOnce('setup', `peer setup step failed: ${this.setupError}`);
+    await this.reportLinkNotes(links).catch(() => undefined);
     return snapshot;
+  }
+
+  /**
+   * Tell core, per link, when the connection is live but database sync is not set up, so core's Peers hub agrees with
+   * this plugin's computer card ("Connected, sync not set up"). Same definition as the card and Repair (`syncedWith`).
+   * Sent on change only; best effort (older hosts lack `setPeerLinkNote`).
+   */
+  private async reportLinkNotes(links: PluginPeerLink[]): Promise<void> {
+    const peers = this.peers;
+    if (typeof peers.setPeerLinkNote !== 'function' || this.abort.signal.aborted) return;
+    const keyOf = (link: PluginPeerLink) => `${link.peerInstanceId}\u0000${link.scope}`;
+    const present = new Set(links.map(keyOf));
+    for (const key of [...this.reportedNotes.keys()]) if (!present.has(key)) this.reportedNotes.delete(key);
+    const live = links.filter((link) => link.phase === 'linked' && link.state === 'connected');
+    if (!live.length && !this.reportedNotes.size) return;
+    const status = live.length ? await this.status() : null;
+    for (const link of links) {
+      const key = keyOf(link), unsynced = !!status && live.includes(link) && !syncedWith(status, link.peerInstanceId);
+      const want = unsynced ? 'attention' : 'clear';
+      if ((this.reportedNotes.get(key) ?? 'clear') === want) continue;
+      try {
+        await peers.setPeerLinkNote(link.peerInstanceId, { scope: link.scope, signal: this.abort.signal,
+          note: unsynced ? { state: 'attention', label: 'Sync not set up', detail: 'Connected, but database sync is not set up with this computer.' } : null });
+        this.reportedNotes.set(key, want);
+      } catch (error) {
+        this.abort.signal.throwIfAborted();
+        this.logOnce(`link-note:${link.peerInstanceId}`, `reporting link status failed: ${this.message(error)}`);
+      }
+    }
   }
 
   /**
@@ -444,6 +494,17 @@ export class DesignDocPairing {
     return true;
   }
 
+  /**
+   * A setup with a former member, kept beside the group left over from an earlier removal, can never finish, and the other
+   * computer waits for this one to set that group aside. This side owns that state, so it archives it on its own tick
+   * rather than waiting for an owner action or the peer; the next automatic enable then pairs again from a fresh replica.
+   */
+  private setAsideStaleSetup(): void {
+    const consent = this.group.consent(), self = this.group.localPeerId();
+    if (!consent || !self || this.enabling || this.revoking || this.group.rejoinState(consent.peerId).kind !== 'detach') return;
+    this.prepareRejoin(self, consent.peerId);
+  }
+
   private async hasGrant(peerId: string, scope: string): Promise<boolean> {
     return this.grant(peerId, scope).then(() => true, () => false);
   }
@@ -515,22 +576,50 @@ export class DesignDocPairing {
       this.enableError = null;
       const joined = this.group.liveRoster(), consent = this.group.consent();
       if (joined?.members.some((entry) => entry.machineId === peerId && !isRetiring(joined, entry.replicaId))) return { outcome, detail: null, reason: null };
-      return { outcome: 'pending', reason: null, detail: consent?.peerId === peerId && consent.error ? `Sync setup started but has not finished: ${consent.error}`
+      const error = consent?.peerId === peerId ? consent.error : null;
+      return { outcome: 'pending', reason: null, detail: error ? SETUP_GUIDANCE[error] ?? `Sync setup started but has not finished: ${error}`
         : 'Sync setup started on this computer and is waiting for the other computer to join. If it does not finish in a minute, open Design Docs settings on the other computer and press Repair on this computer\'s card.' };
     };
     try { await attempt(); return await settled('sync-enabled'); }
     catch (first) {
       this.abort.signal.throwIfAborted();
+      // A sync-group conflict is governance, not transport: re-linking would only revoke the link's grants on both sides.
+      if (first instanceof PeerProtocolError && first.code === 'conflict') {
+        this.logOnce(`repair-enable:${peerId}`, `repair: enable failed: ${first.message}`);
+        return { outcome: 'unavailable', detail: first.message, reason: null };
+      }
       this.logOnce(`repair-enable:${peerId}`, `repair: enable failed, re-linking: ${this.message(first)}`);
       try {
         await peers.reconnectPeer(peerId, { signal: this.abort.signal });
+        // The re-key tears down this link's connector; enabling before core re-enrolls the peer can only fail.
+        if (!(await this.enrolledAgain(peerId))) {
+          this.logOnce(`repair-relink:${peerId}`, 'repair: re-linked, but the peer did not re-enroll in time');
+          return { outcome: 'unavailable', detail: RELINK_NOT_BACK, reason: null };
+        }
         await attempt();
         return await settled('relinked');
       } catch (second) {
         this.abort.signal.throwIfAborted();
         this.logOnce(`repair-relink:${peerId}`, `repair: re-link failed: ${this.message(second)}`);
+        if (this.message(second) === ENROLLMENT_UNAVAILABLE) return { outcome: 'unavailable', detail: RELINK_NOT_BACK, reason: null };
         return { outcome: 'unavailable', detail: this.message(second), reason: lifecycleReasonOf(second) === 'unknown' ? null : lifecycleReasonOf(second) };
       }
+    }
+  }
+
+  /** Bounded wait (abortable) until core lists `peerId` as enrolled and connected again. */
+  private async enrolledAgain(peerId: string): Promise<boolean> {
+    const { timeoutMs, intervalMs } = this.hooks.relinkWait ?? RELINK_WAIT, deadline = Date.now() + timeoutMs;
+    for (;;) {
+      this.abort.signal.throwIfAborted();
+      const enrolled = await this.peers.enrolled({ signal: this.abort.signal }).catch(() => []);
+      if (enrolled.some((peer) => peer.id === peerId && peer.connected)) return true;
+      if (Date.now() + intervalMs > deadline) return false;
+      await new Promise<void>((resolve) => {
+        const done = () => { clearTimeout(timer); this.abort.signal.removeEventListener('abort', done); resolve(); };
+        const timer = setTimeout(done, intervalMs);
+        this.abort.signal.addEventListener('abort', done, { once: true });
+      });
     }
   }
 
@@ -630,7 +719,7 @@ export class DesignDocPairing {
     if (consent?.request) { await this.retry(true); return this.status(); }
     const self = id.parse((await this.peers.localIdentity()).id), scope = bootstrapScope(self, peerId);
     const enrolled = await this.peers.enrolled({ signal: this.abort.signal });
-    if (!enrolled.some((peer) => peer.id === peerId && peer.connected)) throw new PeerProtocolError('invalid', 'mutually enrolled peer unavailable');
+    if (!enrolled.some((peer) => peer.id === peerId && peer.connected)) throw new PeerProtocolError('invalid', ENROLLMENT_UNAVAILABLE);
     const rejoin = this.group.rejoinState(peerId);
     if (rejoin.kind === 'blocked') throw new PeerProtocolError('conflict', rejoin.reason);
     if (rejoin.kind === 'detach') this.prepareRejoin(self, peerId);
@@ -709,6 +798,7 @@ export class DesignDocPairing {
 
   private async work(): Promise<void> {
     if (this.abort.signal.aborted) return;
+    this.setAsideStaleSetup();
     const consent = this.group.consent();
     if (consent && !this.group.roster() && !this.revoking) {
       try {

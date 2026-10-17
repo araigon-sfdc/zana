@@ -126,7 +126,13 @@ export function PeersSettingsView() {
                       return (
                         <li key={key} className="peers-use" data-testid="peer-link-use">
                           <span className="peers-use-label">{use.label}</span>
+                          {use.note && (
+                            <span className="peers-state" data-state={use.note.state === 'attention' ? 'attention' : 'ok'} data-testid="peer-use-note" role="status" title={use.note.detail}>
+                              {use.note.label}
+                            </span>
+                          )}
                           <span className="peers-use-meta" title={use.scope}>{use.scope} · since {sinceText(use.since)}</span>
+                          {use.note?.detail && <span className="peers-note-detail">{use.note.detail}</span>}
                           {link.uses.length > 1 && (
                             <button
                               type="button"
