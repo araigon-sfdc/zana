@@ -107,7 +107,7 @@ export function parsePeerMac(payload: Uint8Array): PeerRequestFields {
 
 export function sealPeerBytes(plaintext: Uint8Array, key: Uint8Array, aad: string): Buffer {
   if (key.byteLength !== 32) throw new Error('peer encryption key unavailable');
-  const iv = randomBytes(12), cipher = createCipheriv('aes-256-gcm', key, iv);
+  const iv = randomBytes(12), cipher = createCipheriv('aes-256-gcm', key, iv, { authTagLength: 16 });
   cipher.setAAD(Buffer.from(aad));
   const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
   return Buffer.concat([Buffer.from('ZCP2'), iv, cipher.getAuthTag(), ciphertext]);
@@ -115,7 +115,7 @@ export function sealPeerBytes(plaintext: Uint8Array, key: Uint8Array, aad: strin
 
 export function unsealPeerBytes(bytes: Buffer, key: Uint8Array, aad: string): Buffer {
   if (key.byteLength !== 32 || bytes.length < 32 || bytes.subarray(0, 4).toString() !== 'ZCP2') throw new Error('invalid encrypted peer storage');
-  const decipher = createDecipheriv('aes-256-gcm', key, bytes.subarray(4, 16));
+  const decipher = createDecipheriv('aes-256-gcm', key, bytes.subarray(4, 16), { authTagLength: 16 });
   decipher.setAAD(Buffer.from(aad));
   decipher.setAuthTag(bytes.subarray(16, 32));
   return Buffer.concat([decipher.update(bytes.subarray(32)), decipher.final()]);
