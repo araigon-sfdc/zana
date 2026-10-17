@@ -67,7 +67,7 @@ test('Connect enrolls through desktop IPC and serves authenticated phone traffic
   let browserContext: Awaited<ReturnType<NonNullable<typeof browser>['newContext']>> | undefined;
   try {
     const pluginDir = join(home, 'connect-probe-plugin'); mkdirSync(pluginDir);
-    writeFileSync(join(pluginDir, 'package.json'), JSON.stringify({ name: 'zcc-plugin-connect-probe', type: 'module', version: '1.0.0', engines: { zcc: '>=1.0.0', zccPluginSdk: '>=0.1.0' }, zcc: { name: 'Connect probe', server: './server.ts' } }));
+    writeFileSync(join(pluginDir, 'package.json'), JSON.stringify({ name: 'zcc-plugin-connect-probe', type: 'module', version: '1.0.0', engines: { zcc: '>=1.0.0', zccPluginSdk: '>=0.1.0' }, zcc: { name: 'Connect probe', description: 'Connect dispatch fixture', branding: { icon: 'Puzzle' }, server: './server.ts' } }));
     writeFileSync(join(pluginDir, 'server.ts'), `export default function(zcc) { zcc.http.route('POST', '/connect', request => ({ json: { accepted: true, echo: request.body } })); }`);
     const pluginStore = join(home, '.zcc/plugins'); mkdirSync(pluginStore, { recursive: true });
     writeFileSync(join(pluginStore, 'installed.json'), JSON.stringify({ version: 1, plugins: [{ id: 'connect-probe', version: '1.0.0', name: 'Connect probe', enabled: true, status: 'running', provenance: 'direct', sourceKind: 'path', source: `path:${pluginDir}`, rootDir: pluginDir, serverEntry: './server.ts', appEntry: null, installedAt: Date.now(), updatedAt: Date.now() }] }));
