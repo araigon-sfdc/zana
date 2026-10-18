@@ -31,6 +31,7 @@
 import { test, expect } from './fixtures/app.js';
 import { makeJobTeamCoordinatorBinary } from './sdk/harness.js';
 import { answerJobBlockerThroughUi } from './sdk/job-team-scenario.js';
+import { retryWhileToolPolicyNotReady } from './fixtures/tool-policy.js';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
@@ -60,7 +61,7 @@ test.use({
     FAKE_ACP_MODE_OPTIONS: 'build:Build,plan:Plan'
   }
 });
-test.setTimeout(120_000);
+test.setTimeout(210_000);
 
 test('Modern owner starts a durable Job Team through the host tool-call bridge and completes', async ({ app }) => {
   const { window, home } = app;
@@ -134,57 +135,63 @@ test('Modern owner starts a durable Job Team through the host tool-call bridge a
       return (body.thread?.status ?? 'missing') as string;
     }, threadId), { timeout: 30_000, intervals: [500] }).toMatch(/^(starting|active|idle|stopping)$/);
 
-    // Native tool policy fails closed until every enabled server plugin has been
-    // activated and sealed (plugins start sequentially after boot, and the
-    // default-installed plugins can finish after the provider catalog and owner
-    // thread are up). Wait for activation instead of racing the denial.
-    await expect.poll(async () => window.evaluate(async () => {
-      const plugins = await window.cc.pluginApps.list();
-      return plugins.filter((plugin) => plugin.enabled && plugin.status !== 'running' && plugin.status !== 'needs-configuration')
-        .map((plugin) => `${plugin.id}:${plugin.status}`);
-    }), { timeout: 60_000, intervals: [500], message: 'enabled plugins finish activating' }).toEqual([]);
-
     // Submit the owner's execution_start through the SAME host tool-call bridge a
     // real ACP dynamic tool uses. From Node context (no browser Origin header),
     // authenticated with the daemon's own self-host credentials.
+    // Native tool policy fails closed until every enabled server plugin has
+    // activated and sealed; bundled plugins can finish after the provider
+    // catalog and owner thread are up. The deny precedes any tool side effect,
+    // so repeat the call while the gate itself reports not-ready.
     const rendererOrigin = new URL(window.url()).origin;
     const auth = JSON.parse(readFileSync(join(home, '.zcc', 'auth.json'), 'utf8')) as { hostId: string; hostKey: string };
-    const toolCall = await fetch(`${rendererOrigin}/internal/hosts/tool-call`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${auth.hostKey}`,
-        'x-zcc-host-id': auth.hostId
-      },
-      body: JSON.stringify({
-        sessionId: threadId,
-        threadId,
-        providerThreadId: threadId,
-        turnId: 'e2e-modern-turn-1',
-        callId: 'e2e-modern-call-1',
-        tool: 'execution_start',
-        arguments: {
-          version: 1,
-          teamId: 'e2e-job-team',
-          launchRequestId: `e2e-modern-owner-job-${Date.now()}`,
-          jobTitle: 'Modern durable job',
-          summary: 'Full Job Team route started by a Modern owner.',
-          workUnits: PLAN,
-          slots: [
-            { initialTask: 'Coordinate the durable execution.' },
-            { initialTask: 'Run assigned work from the durable execution.' },
-            { initialTask: 'Run assigned work from the durable execution.' }
-          ]
-        }
-      })
-    });
-    const toolBody = await toolCall.json() as { success?: boolean; contentItems?: Array<{ text?: string }> };
-    const toolText = (toolBody.contentItems ?? []).map((item) => item.text ?? '').join('\n');
+    const launchRequestId = `e2e-modern-owner-job-${Date.now()}`;
+    type ToolCallReply = { status: number; body: { success?: boolean; contentItems?: Array<{ text?: string }> } };
+    const replyText = (reply: ToolCallReply) => (reply.body.contentItems ?? []).map((item) => item.text ?? '').join('\n');
+    const reply = await retryWhileToolPolicyNotReady<ToolCallReply>(async () => {
+      const response = await fetch(`${rendererOrigin}/internal/hosts/tool-call`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${auth.hostKey}`,
+          'x-zcc-host-id': auth.hostId
+        },
+        body: JSON.stringify({
+          sessionId: threadId,
+          threadId,
+          providerThreadId: threadId,
+          turnId: 'e2e-modern-turn-1',
+          callId: 'e2e-modern-call-1',
+          tool: 'execution_start',
+          arguments: {
+            version: 1,
+            teamId: 'e2e-job-team',
+            launchRequestId,
+            jobTitle: 'Modern durable job',
+            summary: 'Full Job Team route started by a Modern owner.',
+            workUnits: PLAN,
+            slots: [
+              { initialTask: 'Coordinate the durable execution.' },
+              { initialTask: 'Run assigned work from the durable execution.' },
+              { initialTask: 'Run assigned work from the durable execution.' }
+            ]
+          }
+        })
+      });
+      const text = await response.text();
+      let body: ToolCallReply['body'];
+      try {
+        body = JSON.parse(text) as ToolCallReply['body'];
+      } catch {
+        body = { contentItems: [{ text }] };
+      }
+      return { status: response.status, body };
+    }, replyText);
+    const toolText = replyText(reply);
     // The regression gate: a "session MCP is not authorized for this live session"
     // failure surfaces here as HTTP 200 with success:false (or a non-200 identity
     // rejection). Either fails this assertion with the underlying message.
-    expect(toolCall.status, `tool-call HTTP ${toolCall.status}: ${toolText}`).toBe(200);
-    expect(toolBody.success, `execution_start failed: ${toolText}\n${diagnostics.join('\n')}`).toBe(true);
+    expect(reply.status, `tool-call HTTP ${reply.status}: ${toolText}`).toBe(200);
+    expect(reply.body.success, `execution_start failed: ${toolText}\n${diagnostics.join('\n')}`).toBe(true);
 
     await expect.poll(async () => window.evaluate(async (projectId) => {
       const page = await window.cc.executionBoard.listProject(projectId);

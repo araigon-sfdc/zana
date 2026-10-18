@@ -9,6 +9,7 @@ import { delimiter, join } from 'node:path';
 import type { Page } from '@playwright/test';
 import { test, expect, closeApp, launchApp } from './fixtures/app.js';
 import { makeFakeAgentBinary } from './sdk/harness.js';
+import { waitForThreadProvider } from './fixtures/thread-providers.js';
 
 test.use({ initialConfig: { sponsorPromptDismissed: true } });
 
@@ -91,7 +92,7 @@ test('Design Docs agents report an unusable project harness instead of starting 
 });
 
 test('Design Docs agents run on the project harness and honor its AI-harness overrides', async ({ home }) => {
-  test.setTimeout(120_000);
+  test.setTimeout(180_000);
   const app = await launchApp(home, {
     // PATH is headed by a deterministic fake `claude`, so no live Claude runs.
     allowLiveClaude: true,
@@ -102,6 +103,9 @@ test('Design Docs agents run on the project harness and honor its AI-harness ove
     const win = app.window;
     await installDesignDocs(win);
     const { docId, projectId } = await projectDoc(win, join(home, 'dd-harness-default'), 'Default harness doc');
+    // The Claude thread provider joins the catalog only once harness-claude has
+    // loaded, which can trail design-docs on a slow start.
+    await waitForThreadProvider(win, 'claude-code', 90_000);
 
     // No overrides: the project harness provider with its default permission mode.
     const started = await win.evaluate((doc) => window.cc.pluginApps.callRpc('design-docs', 'askAgent', { doc, action: 'review' }), docId) as { threadId: string; projectId: string };
