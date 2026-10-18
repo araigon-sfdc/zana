@@ -59,6 +59,29 @@ describe('authorizeProjectRelPath', () => {
       hostId: 'host-2'
     });
   });
+
+  it('matches backslash paths under a Windows host checkout', () => {
+    const projects = [project({ id: 'win', name: 'win', path: 'C:\\code\\New MAR', hostId: 'host-1' })];
+    expect(authorizeProjectRelPath(projects, 'C:\\code\\New MAR\\force-app\\README.md')).toEqual({
+      root: 'C:\\code\\New MAR',
+      relPath: 'force-app/README.md',
+      hostId: 'host-1'
+    });
+    expect(authorizeProjectRelPath(projects, 'c:/code/new mar/README.md')).toEqual({
+      root: 'C:\\code\\New MAR',
+      relPath: 'README.md',
+      hostId: 'host-1'
+    });
+    expect(authorizeProjectRelPath(projects, 'C:\\code\\New MAR')?.relPath).toBe('');
+    expect(authorizeProjectRelPath(projects, 'C:\\code\\New MARX\\a.md')).toBeNull();
+  });
+
+  it('keeps backslashes literal under a POSIX host checkout', () => {
+    expect(authorizeProjectRelPath(
+      [project({ id: 'remote', name: 'box', path: '/home/dev/app', hostId: 'host-2' })],
+      '/home/dev/app\\..\\secret'
+    )).toBeNull();
+  });
 });
 
 describe('listProjectDir / readProjectFile', () => {

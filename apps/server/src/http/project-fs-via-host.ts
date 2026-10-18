@@ -62,6 +62,8 @@ function mapHostError(error: unknown): never {
   throw error;
 }
 
+const WINDOWS_ABSOLUTE_PATH = /^(?:[A-Za-z]:[\\/]|\\\\)/;
+
 /**
  * Map a renderer-supplied absolute path onto one registered local project.
  * Longest matching root wins. Lexical only — the host still realpath-confines.
@@ -76,11 +78,17 @@ export function authorizeProjectRelPath(
   for (const project of projects) {
     if (project.remote || !project.path) continue;
     if (project.hostId) {
-      const root = project.path.replace(/\/+$/, '') || '/';
-      const path = candidate.replace(/\/+$/, '') || '/';
+      // A Windows checkout's paths arrive with `\` separators and any letter
+      // case; only then fold them. On POSIX hosts `\` is a filename character.
+      const windowsRoot = WINDOWS_ABSOLUTE_PATH.test(project.path);
+      const normalize = (value: string) =>
+        (windowsRoot ? value.replace(/\\/g, '/') : value).replace(/\/+$/, '') || '/';
+      const fold = (value: string) => (windowsRoot ? value.toLowerCase() : value);
+      const root = normalize(project.path);
+      const path = normalize(candidate);
       let relPath: string | null = null;
-      if (path === root) relPath = '';
-      else if (path.startsWith(`${root}/`)) relPath = path.slice(root.length + 1);
+      if (fold(path) === fold(root)) relPath = '';
+      else if (fold(path).startsWith(`${fold(root)}/`)) relPath = path.slice(root.length + 1);
       if (relPath === null) continue;
       matchingHosts.add(project.hostId);
       if (!best || root.length > best.len) {
