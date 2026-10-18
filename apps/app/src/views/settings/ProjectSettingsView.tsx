@@ -25,6 +25,7 @@ import { HarnessOptionSelect } from '@/components/HarnessOptionSelect';
 import { PopoverPicklist } from '@/components/ui/PopoverPicklist';
 import { StencilForm, Skeleton } from '@/components/ui/Skeleton';
 import { profileIcon } from '@/lib/profileIcon';
+import { isMacShortcutPlatform } from '../../lib/platformShortcut.js';
 
 const USE_DEFAULT = { id: '', label: 'Use default' } as const;
 const CODEX_UI = providerUiSchema('codex');
@@ -1256,7 +1257,7 @@ function ProjectClaudeSettings({
     // product.claudeSettings undefined). Surfacing a clear hint beats
     // a hanging spinner.
     if (!hasDesktopBridge()) {
-      setBindingError('claudeSettings binding not loaded — quit (⌘Q) and relaunch the app.');
+      setBindingError(`claudeSettings binding not loaded — quit${isMacShortcutPlatform() ? ' (⌘Q)' : ''} and relaunch the app.`);
       return;
     }
     setBindingError(null);

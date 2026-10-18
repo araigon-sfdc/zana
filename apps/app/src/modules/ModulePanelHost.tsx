@@ -26,6 +26,7 @@ import { PluginSlotBoundary } from '../plugins/PluginSlotBoundary.js';
 import { useRouteState } from '../hooks/useRouteState.js';
 import { useHasPluginNavPanel } from '../plugins/PluginNavPanelHost.js';
 import { isSplitWorkspacePath } from '../lib/split-layout/splitThreadNavigation.js';
+import { platformShortcut } from '../lib/platformShortcut.js';
 
 function generationFor(pluginId: string): number {
   return listNavPanels().find((panel) => panel.pluginId === pluginId)?.generation ?? 0;
@@ -63,7 +64,7 @@ function ModulePanelBody({
         <div className="module-panel-slot module-no-panel" role="status">
           <p>{mod.title} has no view of its own.</p>
           <p className="module-no-panel-hint">
-            It contributes commands and badges — open the command palette (⌘K) to use them.
+            It contributes commands and badges — open the command palette ({platformShortcut('⌘K')}) to use them.
           </p>
         </div>
       </div>

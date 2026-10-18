@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { RefreshCw, Search, X } from 'lucide-react';
 import type { SshHostEntry } from '@zana-ai/zcc-domain/product';
 import { StencilList } from './ui/Skeleton.js';
+import { isMacShortcutPlatform } from '../lib/platformShortcut.js';
 
 interface AddRemoteProjectDialogProps {
   onClose: () => void;
@@ -39,7 +40,7 @@ export function AddRemoteProjectDialog({ onClose, onSubmit, onSuccess }: AddRemo
 
   const loadHosts = useCallback((sync: boolean) => {
     if (!hasDesktopBridge()) {
-      setError('SSH binding not loaded — quit (⌘Q) and relaunch the app.');
+      setError(`SSH binding not loaded — quit${isMacShortcutPlatform() ? ' (⌘Q)' : ''} and relaunch the app.`);
       setHosts([]);
       return;
     }
