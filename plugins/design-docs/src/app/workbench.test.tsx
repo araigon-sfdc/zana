@@ -40,6 +40,7 @@ describe('plugin app', () => {
     const app = collectTestPluginApp(module.default, 'design-docs', 1);
     expect(app.navPanels.map((slot) => slot.id)).toEqual(['design-docs']);
     expect(app.projectTabs.map((slot) => slot.id)).toEqual(['design']);
+    expect(app.projectTabs[0]!.detachable).toBe(true);
     expect(app.messageDirectives.map((slot) => slot.id)).toEqual(['design-doc']);
     expect(app.threadPanelActions.map((slot) => slot.id)).toEqual(['design-doc']);
     expect(app.messageActions.map((slot) => slot.id)).toEqual(['save-design-doc']);
