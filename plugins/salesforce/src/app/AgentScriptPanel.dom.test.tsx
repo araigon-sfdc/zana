@@ -321,7 +321,7 @@ describe('AgentScriptPanel', () => {
     await act(async () => el.querySelector<HTMLButtonElement>('[aria-label="Inspect lookup in start_agent.orders"]')!.click());
     expect(frame.style.display).toBe('');
     expect(el.querySelector('[aria-label="Action lookup"]')).toBeTruthy();
-    await act(async () => [...el.querySelectorAll<HTMLButtonElement>('.af-action-nav button')].find(b => b.textContent === 'Used by')!.click());
+    await act(async () => [...el.querySelectorAll<HTMLButtonElement>('.af-action-nav button')].find(b => b.textContent?.startsWith('Used by'))!.click());
     await act(async () => [...el.querySelectorAll<HTMLButtonElement>('button')].find(b => b.textContent?.includes('Go to action definition'))!.click());
     expect(frame.style.display).toBe(''); expect(post).toHaveBeenCalledWith(expect.objectContaining({ type: 'revealLine', line: actions[0].line }), location.origin);
     await dispatch({ type: 'openAction', id: actions[1].id });

@@ -11,7 +11,6 @@ import { createHttpRequestDrain } from './http-request-drain.js';
 import { createProductWebSocketServer, handleProductUpgrade } from './product-ws.js';
 import { createHostDaemonWebSocketServer, handleHostInternalHttp, handleHostInternalUpgrade } from './host-internal.js';
 import { handleInstallHttp } from './install-http.js';
-import { attachPairingRelay } from './pairing-relay-controller.js';
 import { startPairingForwarder, type PairingForwarder } from './pairing-forwarder.js';
 import type { LocalAppOriginArgs } from './local-app-origins.js';
 import { tryServePluginAsset } from './plugin-assets.js';
@@ -77,12 +76,10 @@ export async function startProductServer(options: StartProductServerOptions): Pr
   attachProductUpgrade(server, ctx, wss, hostWss);
 
   let unregister: (() => Promise<void>) | undefined;
-  let pairingRelay: ReturnType<typeof attachPairingRelay> | undefined;
   let pairingForwarder: PairingForwarder | undefined;
   let closing: Promise<void> | undefined;
   const close = () => closing ??= (async () => {
     requests.dispose();
-    pairingRelay?.stop();
     if (pairingForwarder && ctx.origins.pairingPort === pairingForwarder.port) delete ctx.origins.pairingPort;
     const forwarderClosed = pairingForwarder?.close();
     ctx.dispose();
@@ -120,7 +117,6 @@ export async function startProductServer(options: StartProductServerOptions): Pr
     const boundPort = address.port;
     ctx.origins.serverPort = boundPort;
     unregister = await registerBoundLocalPeerApp(server, ctx.dataDir, ctx.productInstanceId);
-    pairingRelay = attachPairingRelay(ctx, boundPort);
     // SSH reverse tunnels target this allowlist-only port. Without it, tunnel
     // installs and reopens fail closed; they never expose serverPort.
     try {

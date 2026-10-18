@@ -451,41 +451,11 @@ export interface CcApi {
      * is the fallback when that process is not running.
      */
     relaunchLocal(): Promise<{ ok: true } | { ok: false; message: string }>;
-    /**
-     * Laptop-side SSH pairing PTY. Main owns argv; the renderer only supplies a
-     * sanitized host plus the join tokens it already minted. `handoff: 'tunnel'`
-     * means main found no usable public origin and spawned nothing — the
-     * renderer continues with `bootstrapBySsh`.
-     */
-    pairing: {
-      start(req: {
-        sshHost: string;
-        joinCode: string;
-        hostId: string;
-        cols?: number;
-        rows?: number;
-      }): Promise<
-        | { ok: true; handoff: 'pty' }
-        | { ok: true; handoff: 'tunnel'; reason: 'relay_offline' | 'relay_unconfigured' | 'no_session' | 'no_public_origin' }
-        | { ok: false; message: string }
-      >;
-      write(data: string): Promise<void>;
-      resize(cols: number, rows: number): Promise<void>;
-      stop(): Promise<void>;
-      status(): Promise<{
-        running: boolean;
-        sshHost: string | null;
-        backlog: string;
-        exitCode: number | null;
-      }>;
-      onData(cb: (data: string) => void): () => void;
-      onExit(cb: (code: number) => void): () => void;
-    };
   };
   /**
-   * Zana Mobile gateway (a live main-process network listener, like
-   * `hosts.pairing`). Enable/disable rides the `mobileGatewayEnabled` AppConfig
-   * toggle; these calls read status and mint/read/revoke pairing state.
+   * Zana Mobile gateway (a live main-process network listener). Enable/disable
+   * rides the `mobileGatewayEnabled` AppConfig toggle; these calls read status
+   * and mint/read/revoke pairing state.
    */
   sharedClient: {
     list(): Promise<Array<{ id: string; instanceId: string; name: string; url: string; online: boolean }>>;
@@ -501,7 +471,6 @@ export interface CcApi {
     disconnectAccount(): Promise<void>;
     browserAddress(): Promise<string | null>;
     redeemComputerCode(address: string, code: string): Promise<void>;
-    configure(input: { mode: 'relay'; publicUrl?: string; relayToken?: string }): Promise<void>;
     status(): Promise<{
       running: boolean;
       publicUrl: string | null;
@@ -511,7 +480,7 @@ export interface CcApi {
       boundLan: boolean;
       /** Last start failure (e.g. port in use), else null. */
       error: string | null;
-      connection?: { mode: 'unconfigured' | 'relay' | 'connect'; publicUrl?: string; hasRelayToken: boolean; accountUrl?: string };
+      connection?: { mode: 'unconfigured' | 'connect'; publicUrl?: string; hasRelayToken: boolean; accountUrl?: string };
       relayState?: 'connecting' | 'connected' | 'reconnecting' | 'stopped';
       distribution?: { testFlightUrl: string | null };
       readySessions?: Array<{ id: string; label: string; platform: 'ios' | 'android'; appVersion: string; lastSeenAt: number }>;
@@ -519,27 +488,6 @@ export interface CcApi {
     pair(): Promise<{ version: number; serverUrl: string; code: string; expiresAt: number }>;
     devices(): Promise<Array<{ id: string; label: string; createdAt: number; expiresAt: number }>>;
     revoke(id: string): Promise<boolean>;
-  };
-  /**
-   * Outbound pairing-relay tunnel to the public origin (Heroku front door).
-   * Status only — the origin and token live in AppConfig / env.
-   */
-  relay: {
-    status(): Promise<{
-      state: 'connected' | 'offline' | 'unconfigured';
-      sessionId?: string;
-      joinUntil?: number;
-    }>;
-    renewJoinWindow(): Promise<{
-      state: 'connected' | 'offline' | 'unconfigured';
-      sessionId?: string;
-      joinUntil?: number;
-    }>;
-    onChanged(cb: (payload: {
-      state: 'connected' | 'offline' | 'unconfigured';
-      sessionId?: string;
-      joinUntil?: number;
-    }) => void): () => void;
   };
   /**
    * Thread control plane is HTTP to the product server (create/send/events).

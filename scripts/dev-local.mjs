@@ -188,10 +188,6 @@ export function prepareLocalDevEnv(processEnv = process.env, options = {}) {
     const publicAppUrl = fromDotenv || fromFile;
     if (publicAppUrl) env.ZCC_APP_URL = publicAppUrl.replace(/\/$/, '');
   }
-  if (!processEnv.ZCC_RELAY_TOKEN) {
-    const relayToken = readDotenvKey('ZCC_RELAY_TOKEN');
-    if (relayToken) env.ZCC_RELAY_TOKEN = relayToken;
-  }
   if (!processEnv.ZCC_POSTHOG_API_KEY) {
     const posthogKey = readDotenvKey('ZCC_POSTHOG_API_KEY');
     if (posthogKey) env.ZCC_POSTHOG_API_KEY = posthogKey;

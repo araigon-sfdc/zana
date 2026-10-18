@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { Bot, Check, ChevronDown, Circle, CopyPlus, ExternalLink, Hammer, PanelRight, Play, Rocket, Save, Search } from 'lucide-react';
+import { Bot, Check, ChevronDown, Circle, CloudDownload, CopyPlus, ExternalLink, Hammer, PanelRight, Play, Rocket, Save, Search } from 'lucide-react';
 import { breadcrumbSegments } from '../../lib/agent-script-file-tree.js';
 
 type DocumentBarProps = {
@@ -29,6 +29,8 @@ type DocumentBarProps = {
   onOpenInBuilder?: () => void;
   /** The builder is being opened. */
   openingBuilder?: boolean;
+  /** Fetch the saved agent and the Apex, Flows and prompt templates its actions call from the org. */
+  onFetch?: () => void;
   onQuickOpen?: () => void;
   /** Show the Cmd/Ctrl+S hint on the Save button (wide layout). */
   shortcutHint?: boolean;
@@ -62,6 +64,7 @@ export function AgentScriptDocumentBar(props: DocumentBarProps) {
       {props.follow}
       {props.headerActions}
       {props.onQuickOpen && <button type="button" className="icon-btn" title="Go to file (⌘P)" aria-label="Go to file" onClick={props.onQuickOpen}><Search size={15} aria-hidden="true" /></button>}
+      {props.onFetch && <button type="button" className="icon-btn" data-testid="salesforce-agent-script-fetch" aria-label="Fetch agent from org" title={props.dirty ? 'Save first: Fetch reads what the saved file uses' : 'Fetch this agent and what it uses from the org'} disabled={!props.path || props.dirty} onClick={props.onFetch}><CloudDownload size={15} aria-hidden="true" /></button>}
       {props.onCompile && <button type="button" className={`icon-btn af-document-compile${props.compiling ? ' is-busy' : ''}`} data-testid="salesforce-agent-script-compile" aria-label={props.compiling ? 'Compiling…' : 'Compile'} title={props.dirty ? 'Save first: Compile checks the file on disk' : props.compiling ? 'Compiling…' : 'Compile the saved file and show the result under Problems'} disabled={!props.path || props.dirty || props.compiling} onClick={props.onCompile}><Hammer size={15} aria-hidden="true" /></button>}
       {props.onOpenInBuilder && <button type="button" className={`icon-btn${props.openingBuilder ? ' is-busy' : ''}`} data-testid="salesforce-agent-script-open-builder" aria-label="Open in Agentforce Builder" title="Open in Agentforce Builder (Chrome)" disabled={!props.path || props.openingBuilder} onClick={props.onOpenInBuilder}><ExternalLink size={15} aria-hidden="true" /></button>}
       {props.orgPicker && <div className="af-document-org">{props.orgPicker}</div>}

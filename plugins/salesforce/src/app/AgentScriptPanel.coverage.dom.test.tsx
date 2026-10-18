@@ -561,3 +561,33 @@ describe('AgentScriptPanel Compile', () => {
     expect(status(el)).toBe('The compiler did not answer.');
   });
 });
+
+describe('AgentScriptPanel Fetch agent from org', () => {
+  const fetchButton = (el: HTMLElement) => el.querySelector<HTMLButtonElement>('[data-testid="salesforce-agent-script-fetch"]');
+
+  it('opens the fetch dialog on the open bundle, and offers nothing for a file outside a bundle', async () => {
+    vi.spyOn(HTMLDialogElement.prototype, 'showModal').mockImplementation(function (this: HTMLDialogElement) { this.setAttribute('open', ''); });
+    vi.spyOn(HTMLDialogElement.prototype, 'close').mockImplementation(function (this: HTMLDialogElement) { this.removeAttribute('open'); });
+    overrides['sync.check'] = () => ({ ok: true, data: { org: { alias: 'dev', orgId: '00D1' }, scope: 'all', checkedAt: 1, components: [], counts: { changed: 0, conflict: 0, unknown: 0, new: 0, deleted: 0, current: 0 }, truncated: false, agent: { name: 'QC', current: [], missing: [] } } });
+    const el = await mount('force-app/main/default/aiAuthoringBundles/QC/QC.agent');
+    await ready(el);
+    await click(fetchButton(el)!);
+    expect(rpc).toHaveBeenCalledWith('salesforce', 'sync.check', { projectId: 'proj-1', agent: 'QC' });
+    await flush();
+    expect(document.body.textContent).toContain('QC and what it uses are up to date.');
+    await click(byText(document.body, 'button', /^Cancel$/)!);
+    expect(document.querySelector('dialog.sf-sync')).toBeNull();
+  });
+
+  it('names only real bundle files', async () => {
+    const { bundleName } = await import('./AgentScriptPanel.js');
+    expect(bundleName('force-app/main/default/aiAuthoringBundles/Btnet_Agent/Btnet_Agent.agent')).toBe('Btnet_Agent');
+    expect(bundleName('QC/QC.agent')).toBe('QC');
+    expect(bundleName('force-app/bots/QC.agent')).toBeNull();
+    expect(bundleName('a/Other/QC.agent')).toBeNull();
+    expect(bundleName(null)).toBeNull();
+    const el = await mount('force-app/bots/QC.agent');
+    await ready(el);
+    expect(fetchButton(el)).toBeNull();
+  });
+});

@@ -97,7 +97,6 @@ import { EXTENSION_PROJECT_CATEGORY, store, scratchWorkspaceRoot, worktreeRoot, 
 import { electronZccDataDir } from '@zana-ai/zcc-server/electron-data-dir';
 import { PtyManager } from '@zana-ai/zcc-host-daemon/pty';
 import { AgentLivenessCache } from '@zana-ai/zcc-host-daemon/harness/agent-liveness';
-import { sshPairingSession } from '@zana-ai/zcc-host-daemon/ssh-pairing-pty';
 import { resolveMaxLiveSessions } from '@zana-ai/zcc-host-daemon/capacity';
 import { projectIdentityDigest, projectsForStoreRevision, revalidateLaunchCommit as revalidateCommonLaunchCommit } from '@zana-ai/zcc-server/services/launch/commit-revalidation';
 import { LaunchAuthorizationService } from '@zana-ai/zcc-server/services/launch/authorization';
@@ -2977,8 +2976,7 @@ let extensionsChangeDebounce: NodeJS.Timeout | null = null;
 let mcpServer: McpServerHandle | null = null;
 let controlPlane: ControlPlaneHandle | null = null;
 // Zana Mobile gateway — one instance (Rule 3): started/stopped from the config
-// reactor, closed on quit. File-backed device store shares the `mobile:serve`
-// CLI's path convention so devices paired either way are visible to both.
+// reactor, closed on quit.
 const mobileGateway = new MobileGatewayManager({
   dataDir: electronZccDataDir(),
   // Private E2E launches must not compete with the installed app's phone port.
@@ -8784,7 +8782,7 @@ async function bootstrapNormal() {
   // setProductionRendererOrigin(): the gateway resolves its loopback upstream
   // (productServerUrl) at start, and before that it falls back to :8780, which
   // makes peer/phone connections close with 1011 after an app restart. A start
-  // failure (e.g. port already held by `mobile:serve`) is recorded on the manager
+  // failure (e.g. port already held by another process) is recorded on the manager
   // and surfaced through `mobile:status`; it must never abort boot.
   if (store.getConfig().mobileGatewayEnabled === true) {
     mobileGateway.start().catch((err) => logMainError('mobileGateway.start', err));
@@ -9261,7 +9259,6 @@ app.on('before-quit', (event) => {
   // client naturally; explicitly killing it emits a false terminal exit that
   // marks Team lifecycle state dead before next launch can reattach.
   ptys.killAll({ preserveLocalTmux: true });
-  sshPairingSession.stop();
   desktopBrowserBrokerClient.stop();
   desktopBrowserBroker.dispose();
   desktopBrowserViewManager.destroyAll();

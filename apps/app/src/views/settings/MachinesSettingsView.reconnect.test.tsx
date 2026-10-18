@@ -10,8 +10,7 @@ const h = vi.hoisted(() => ({ hosts: [] as unknown[], appendLogs: vi.fn() }));
 
 vi.mock('../../lib/fetch-with-app-surface.js', () => ({ apiJson: async () => ({ connectMachines: false }) }));
 vi.mock('../../lib/product-client.js', () => ({ product: {
-  hosts: { repair: vi.fn(), updateSshIdentity: vi.fn(), providerCliStatus: vi.fn(async () => ({})) },
-  relay: { renewJoinWindow: vi.fn() }
+  hosts: { repair: vi.fn(), updateSshIdentity: vi.fn(), providerCliStatus: vi.fn(async () => ({})) }
 } }));
 vi.mock('../../hooks/useHosts.js', () => ({ useHosts: () => h.hosts }));
 vi.mock('@/store', () => ({
@@ -38,7 +37,6 @@ const offline = {
 
 function setup() {
   h.hosts = [offline];
-  vi.mocked(product.relay.renewJoinWindow).mockRejectedValue(new Error('relay unconfigured'));
   render(<MachinesSettingsView config={config} onConfigDraft={() => undefined} onUpdate={async () => undefined} />);
 }
 const reconnect = () => fireEvent.click(screen.getByTestId('machine-reconnect-h1'));

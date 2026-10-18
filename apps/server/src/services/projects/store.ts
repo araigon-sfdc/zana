@@ -869,6 +869,12 @@ export function normalizeConfig(input: Partial<AppConfig>): Partial<AppConfig> {
     const order = normalizeNavOrder(input.projectSidebarNavOrder);
     if (order) normalized.projectSidebarNavOrder = order;
   }
+  for (const key of ['sidebarNavHidden', 'projectSidebarNavHidden'] as const) {
+    if (key in input) {
+      const ids = normalizeNavOrder(input[key]);
+      if (ids) normalized[key] = ids;
+    }
+  }
   if (typeof input.sidebarWidth === 'number' && Number.isFinite(input.sidebarWidth)) {
     normalized.sidebarWidth = Math.max(256, Math.min(480, Math.round(input.sidebarWidth)));
   }
@@ -1291,22 +1297,6 @@ export function normalizeConfig(input: Partial<AppConfig>): Partial<AppConfig> {
       } catch {
         /* keep the previous value */
       }
-    }
-  }
-  if ('relayToken' in input) {
-    if (typeof input.relayToken !== 'string' || !input.relayToken.trim()) {
-      normalized.relayToken = undefined;
-    } else {
-      const trimmed = input.relayToken.trim();
-      if (trimmed.length <= 512) normalized.relayToken = trimmed;
-    }
-  }
-  if ('relaySessionId' in input) {
-    if (typeof input.relaySessionId !== 'string' || !input.relaySessionId.trim()) {
-      normalized.relaySessionId = undefined;
-    } else {
-      const trimmed = input.relaySessionId.trim();
-      if (/^zcrs_[A-Za-z0-9_-]{16,64}$/.test(trimmed)) normalized.relaySessionId = trimmed;
     }
   }
   if (Object.prototype.hasOwnProperty.call(input, 'windowBounds')) {

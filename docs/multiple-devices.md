@@ -312,68 +312,31 @@ pairing.
 
 ---
 
-## Legacy machine relay reachability
+## Machine reachability without Zana Connect
 
-The product server still binds **loopback** (`127.0.0.1`). Another computer
-cannot enroll against `http://127.0.0.1:<port>`. Official desktop builds carry
-the public Heroku origin and relay token (inlined at `electron-vite build` from
-`ZCC_APP_URL` and `ZCC_RELAY_TOKEN`). This laptop dials
-`wss://<origin>/_zcc/relay` — Heroku never inbound-connects to the laptop.
+The product server binds **loopback** (`127.0.0.1`). Another computer cannot
+enroll against `http://127.0.0.1:<port>`, so without Zana Connect a machine
+pairs through an **SSH reverse tunnel**. **Connect** in Add machine opens an
+`ssh -R` tunnel to the loopback pairing forwarder and installs there; ports are
+chosen automatically. As a fallback, pick an SSH host and copy the command under
+**Other ways to connect** (or on the **Installer command** tab). It runs in a
+terminal on this computer.
 
-Precedence: runtime env, then the values baked into that build, then
-**Settings → Machines → Relay pairing URL**, then the repo `public-app-url`
-file. `pnpm dev` seeds `ZCC_APP_URL` from that file when the env is unset.
-Do not commit the token; set the same `ZCC_RELAY_TOKEN` on Heroku and in
-the release/CI environment (GitHub secrets `ZCC_APP_URL` / `ZCC_RELAY_TOKEN`,
-or put them in gitignored `.env` for local `pnpm dev`). The public dual-arch
-build is produced by pushing a `vx.y.z` tag.
+Add machine never issues a bare remote-run command for a loopback-only computer.
+If no pairing address is available at all, Copy is disabled with *No public
+pairing address — use Connect via SSH*.
 
-The token authenticates a laptop to open a session. Isolation between laptops
-is the session URL (`/t/<sessionId>`), not a personal key. Join/enroll through
-that id stays open while this laptop’s relay is connected. The join hint
-renews in the background so Install / Fix never hit a closed window. Host
-websockets keep working until this app quits. If the laptop tunnel drops,
-join/enroll return `relay_offline` until Zana reconnects.
+The **Settings → Machines → Public app URL** field is the origin used in
+installer downloads and the **Host-header allowlist** on this computer (enroll,
+host websocket, `/install.sh`), for example a Docker gateway during local
+testing. It never makes pairing skip the SSH tunnel. Precedence:
+runtime env, then the build bake, then that field, then the repo
+`public-app-url` file. `pnpm dev` seeds `ZCC_APP_URL` from that file when the
+env is unset.
 
-Join commands use `https://<origin>/t/<sessionId>` so remotes route to the
-right laptop. The code and URL are issued together and the code only works
-through the session URL from the same issuance. The bare door
-(`https://<origin>/install.sh`, bare enroll) answers `503 session_required` by
-design; that is expected, not an outage. Do not retry a bare-origin command.
-
-When the relay is unavailable, Add machine never issues a bare remote-run
-command (the remote cannot reach this computer). Prefer **Connect** (SSH
-tunnel; ports are chosen automatically). As a fallback, pick an SSH host and
-copy the command under **Other ways to connect** (or on the **Installer
-command** tab): it is run in a terminal on this computer, opens an
-`ssh -R` reverse tunnel to the loopback pairing forwarder, and installs there.
-Only if the forwarder itself is down is Copy disabled with *Relay unavailable —
-use Connect via SSH*. If the relay reconnects, generate a fresh command; an
-older copied command is not valid for the new session.
-
-If the origin is baked/set but the tunnel is down, Install fails with
-`relay_offline` (keep Zana running). Dev builds without those env vars stay
-loopback; use SSH reverse-tunnel pairing.
-
-That origin is used in the join command and as the **Host-header allowlist**
-on the laptop (enroll, host websocket, `/install.sh`).
-
-The Heroku dyno has a separate **path allowlist** (`website/relay/allowlist.json`,
-mirrored in the product server): `/install.sh`, `/install/version`,
-`/install/zcc-host.tgz`, enroll, interactive-request (and interrupt), and
-`/internal/hosts/ws`. Other product HTTP — including `/internal/hosts/tool-call`
-— is not relayed.
-
-Operator detail for the front door (`ZCC_RELAY_TOKEN`, `node relay/front-door.mjs`)
-is in [`website/README.md`](../website/README.md).
-
-Keep the product server on loopback and use the authenticated pairing relay.
-Exposing its port directly would put an unauthenticated control plane on a network.
-
-The machine-pairing URL serves enrollment and host traffic. Use Zana Connect
-through **Remote access** for authenticated browser and phone access at your
-personal address. SSH reverse-tunnel copy-paste (below) remains the offline
-fallback for machine enrollment.
+Keep the product server on loopback. Exposing its port directly would put an
+unauthenticated control plane on a network. Use Zana Connect through **Remote
+access** for authenticated browser and phone access at your personal address.
 
 ---
 
@@ -383,8 +346,8 @@ fallback for machine enrollment.
 2. Copy the one-line installer. It looks like:
 
 ```bash
-curl -fL ${publicAppUrl}/t/<sessionId>/install.sh | sh -s -- \
-  --join-code <zcde_...> --host-id <id> --server ${publicAppUrl}/t/<sessionId>
+curl -fL ${publicAppUrl}/install.sh | sh -s -- \
+  --join-code <zcde_...> --host-id <id> --server ${publicAppUrl}
 ```
 
 3. Run it on the computer that should execute work. The join code expires in
@@ -483,17 +446,14 @@ docker exec -it zcc-docker bash
 zcc-join --join-code <zcde_...> --host-id <id> --server <url>
 ```
 
-Or mint and enroll in one step (`pnpm dev` must be running). If the laptop
-relay is connected, this uses `https://<origin>/t/<sessionId>`; otherwise it
-publishes a loopback proxy so Docker can reach `127.0.0.1`:
+Or mint and enroll in one step (`pnpm dev` must be running). This publishes a
+loopback proxy so Docker can reach `127.0.0.1`:
 
 ```bash
 pnpm docker:host-daemon
 ```
 
-Force a door with `--relay` or `--local`. Prove a Linux box can enroll through
-the session join URL with `pnpm test:docker:pairing` (needs Docker). Stop with
-`pnpm docker:remote-machine down`.
+Stop with `pnpm docker:remote-machine down`.
 
 Settings → Machines should show hostname `zcc-docker`. Add a project at
 `/home/zcc/workspace` (sample app is in the repo under

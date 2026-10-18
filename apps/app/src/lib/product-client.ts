@@ -42,17 +42,15 @@ export interface PreferredJoinCode {
   hostId: string;
   expiresAt: number;
   installCommand?: string;
-  /** URL this code redeems against; bound to the same issuance as the code. */
+  /** Loopback forwarder this code redeems against, which the remote reaches via `ssh -R`. */
   pairingServerUrl?: string;
-  /** `tunnel`: no relay; the URL is a loopback forwarder the remote reaches via `ssh -R`. */
-  pairingMode?: 'relay' | 'tunnel';
 }
 
 export type PreferredJoinCodeResult =
   | { ok: true; join: PreferredJoinCode }
-  | { ok: false; error: 'relay_unavailable' | 'relay_changed'; reason?: string };
+  | { ok: false; error: 'pairing_unavailable' };
 
-/** Mint a join code; 409 relay refusals come back as a typed result instead of an opaque throw. */
+/** Mint a join code; a 409 pairing refusal comes back as a typed result instead of an opaque throw. */
 export async function requestPreferredJoinCode(): Promise<PreferredJoinCodeResult> {
   const response = await fetchWithAppSurface('/api/v1/hosts/join-codes/preferred', {
     method: 'POST',
@@ -60,10 +58,8 @@ export async function requestPreferredJoinCode(): Promise<PreferredJoinCodeResul
     body: '{}'
   });
   if (response.status === 409) {
-    const body = await response.json().catch(() => ({})) as { error?: string; reason?: string };
-    if (body.error === 'relay_unavailable' || body.error === 'relay_changed') {
-      return { ok: false, error: body.error, ...(typeof body.reason === 'string' ? { reason: body.reason } : {}) };
-    }
+    const body = await response.json().catch(() => ({})) as { error?: string };
+    if (body.error === 'pairing_unavailable') return { ok: false, error: body.error };
     throw Object.assign(new Error(body.error ?? '409'), { status: 409, code: body.error });
   }
   if (!response.ok) {
@@ -141,7 +137,6 @@ function httpProduct(): Pick<
   | 'app'
   | 'voice'
   | 'hosts'
-  | 'relay'
   | 'marketplaces'
   | 'cliSkills'
 > {
@@ -650,34 +645,8 @@ function httpProduct(): Pick<
       relaunchLocal: async () => apiJson<{ ok: true } | { ok: false; message: string }>(
         '/hosts/relaunch-local',
         { method: 'POST', body: '{}' }
-      ),
-      pairing: {
-        start: async () => ({ ok: false as const, message: 'SSH pairing requires the desktop app' }),
-        write: async () => undefined,
-        resize: async () => undefined,
-        stop: async () => undefined,
-        status: async () => ({ running: false, sshHost: null, backlog: '', exitCode: null }),
-        onData: () => () => {},
-        onExit: () => () => {}
-      }
+      )
     } as CcApi['hosts'],
-    relay: {
-      status: async () => apiJson<{
-        state: 'connected' | 'offline' | 'unconfigured';
-        sessionId?: string;
-        joinUntil?: number;
-      }>('/relay'),
-      renewJoinWindow: async () => apiJson<{
-        state: 'connected' | 'offline' | 'unconfigured';
-        sessionId?: string;
-        joinUntil?: number;
-      }>('/relay/renew-join', { method: 'POST', body: '{}' }),
-      onChanged: (cb) => subscribeProductEvent<{
-        state: 'connected' | 'offline' | 'unconfigured';
-        sessionId?: string;
-        joinUntil?: number;
-      }>('relay:changed', cb)
-    } as CcApi['relay'],
     marketplaces: {
       list: async () => {
         const body = await apiJson<{ catalogs?: Awaited<ReturnType<CcApi['marketplaces']['list']>> }>('/marketplaces');
@@ -1444,8 +1413,7 @@ export const product: CcApi = new Proxy({} as CcApi, {
         const desktop = (window.cc as unknown as CcApi).hosts;
         return withStubs('hosts', {
           ...http,
-          relaunchLocal: desktop?.relaunchLocal ?? http.relaunchLocal,
-          pairing: desktop?.pairing ?? http.pairing
+          relaunchLocal: desktop?.relaunchLocal ?? http.relaunchLocal
         });
       }
       return withStubs('hosts', http);
@@ -1478,7 +1446,6 @@ export const product: CcApi = new Proxy({} as CcApi, {
       if (hasDesktopBridge()) return (window.cc as unknown as CcApi).mobile;
       return {
         status: async () => ({ running: false, publicUrl: null, host: null, port: null, boundLan: false, error: null }),
-        configure: async () => { throw new Error('Configure phone connections in the desktop app'); },
         enroll: async () => { throw new Error('Connect this computer from the desktop app'); },
         pollEnrollment: async () => { throw new Error('Connect this computer from the desktop app'); },
         cancelEnrollment: async () => {},
@@ -1490,7 +1457,7 @@ export const product: CcApi = new Proxy({} as CcApi, {
         revoke: async () => false
       } satisfies CcApi['mobile'];
     }
-    if (name === 'threads' || name === 'environments' || name === 'relay' || name === 'cliSkills') {
+    if (name === 'threads' || name === 'environments' || name === 'cliSkills') {
       const http = httpProduct() as unknown as Record<string, unknown>;
       return withStubs(name, http[name] as object);
     }

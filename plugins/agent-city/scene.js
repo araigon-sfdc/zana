@@ -1,6 +1,8 @@
-import { floors, buildingHeight as heightForCount, cityLayout, projectPoint, BLOCK } from './model.js';
+import { floors, buildingHeight as heightForCount, roofHeight, cityLayout, projectPoint, BLOCK } from './model.js';
 import { cityCommuters, commuterPosition, commuterBus, busStop, harnessStyle } from './commuters.js';
 import { drawInterior } from './interior-scene.js';
+import { createThemeArt } from './theme-scene.js';
+import { CITY_THEMES } from './themes.js';
 /** Canvas-only artwork; all meaning and keyboard interaction are supplied by React. */
 export function createCityRenderer(canvas, root) {
   const ctx = canvas.getContext('2d');
@@ -10,7 +12,7 @@ export function createCityRenderer(canvas, root) {
   let layout = cityLayout([]), originU = 0, originV = 0;
   let commuterBuildings, commuters = [];
   let interiorKey = '', enteredAt = 0, roomEnteredAt = 0, inside = false;
-  let backdrop, backdropCanvas;
+  let backdrop, backdropCanvas, theme = 'classic', art;
   function refreshPalette() {
     backdrop = undefined;
     const probe = document.createElement('span');
@@ -41,8 +43,11 @@ export function createCityRenderer(canvas, root) {
   function round(x, y, w, h, r, c) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); ctx.fillStyle = C(c); ctx.fill(); }
   function groundShadow(u, v, w, d) { ctx.save(); ctx.filter = 'blur(5px)'; plane(u + 8, v + 9, w + 13, d + 10, 0, alpha('shadow', .16)); ctx.restore(); }
   function ovalGround(u, v, w, d, color) { const c = P(u, v); ctx.save(); ctx.translate(...c); ctx.transform(.72, .35, -.72, .35, 0, 0); ellipse(0, 0, w, d, color); ctx.restore(); }
-  function tree(u, v, s = 1, z = 0) { const [x, y] = P(u, v, z); if (z === 0)
-    ovalGround(u + 7, v + 6, 17 * s, 15 * s, alpha('shadow', .17)); round(x - 2 * s, y - 28 * s, 5 * s, 31 * s, 2 * s, 'bark'); ellipse(x, y - 37 * s, 19 * s, 24 * s, 'treedark'); ellipse(x - 5 * s, y - 43 * s, 17 * s, 20 * s, 'tree'); ellipse(x - 8 * s, y - 48 * s, 11 * s, 11 * s, 'treebright'); ellipse(x + 10 * s, y - 35 * s, 11 * s, 15 * s, 'tree'); }
+  function tree(u, v, s = 1, z = 0, kind = 'round') { const [x, y] = P(u, v, z); if (z === 0)
+    ovalGround(u + 7, v + 6, 17 * s, 15 * s, alpha('shadow', .17));
+    if (kind === 'cypress') { round(x - 2 * s, y - 14 * s, 4 * s, 15 * s, 2, 'bark'); ellipse(x, y - 34 * s, 10 * s, 26 * s, 'treedark'); ellipse(x - 3 * s, y - 38 * s, 6 * s, 18 * s, 'tree'); return; }
+    if (kind === 'palm') { path([[x, y], [x + 3 * s, y - 22 * s], [x + 2 * s, y - 44 * s]], 'bark', 3 * s); for (let i = 0; i < 7; i++) { const a = i / 7 * Math.PI * 2; ctx.beginPath(); ctx.moveTo(x + 2 * s, y - 44 * s); ctx.quadraticCurveTo(x + 2 * s + Math.cos(a) * 12 * s, y - 50 * s + Math.sin(a) * 4 * s, x + 2 * s + Math.cos(a) * 18 * s, y - 40 * s + Math.sin(a) * 6 * s); ctx.strokeStyle = C(i % 2 ? 'tree' : 'treedark'); ctx.lineWidth = 3 * s; ctx.stroke(); } return; }
+    round(x - 2 * s, y - 28 * s, 5 * s, 31 * s, 2 * s, 'bark'); ellipse(x, y - 37 * s, 19 * s, 24 * s, 'treedark'); ellipse(x - 5 * s, y - 43 * s, 17 * s, 20 * s, 'tree'); ellipse(x - 8 * s, y - 48 * s, 11 * s, 11 * s, 'treebright'); ellipse(x + 10 * s, y - 35 * s, 11 * s, 15 * s, 'tree'); }
   function bush(u, v, w = 20, d = 12, z = 0) { prism(u, v, w, d, 5, z, 'curb', 'bark', 'bark'); for (let i = 0; i < 3; i++) {
     const p = P(u + 5 + i * w / 3, v + d / 2, z + 8);
     ellipse(p[0], p[1], 7, 7, i % 2 ? 'tree' : 'treedark');
@@ -104,6 +109,12 @@ export function createCityRenderer(canvas, root) {
     if (selected === p.id)
       plane(u - 9, v - 9, w + 18, d + 18, 1, alpha(p.color, .20), alpha(p.color, .75), 2);
     prism(u - 2, v - 2, w + 4, d + 4, 6, 0, 'path', 'curb', 'curb');
+    if (art) {
+      art.building[p.form](p, h);
+      const top = roofHeight(p, theme) + 12, pts = [P(u, v, top), P(u + w, v, top), P(u + w, v + d, 0), P(u, v + d, 0)];
+      hitAreas.push({ id: p.id, x: Math.min(...pts.map(p => p[0])), y: Math.min(...pts.map(p => p[1])), w: Math.max(...pts.map(p => p[0])) - Math.min(...pts.map(p => p[0])), h: Math.max(...pts.map(p => p[1])) - Math.min(...pts.map(p => p[1])) });
+      return;
+    }
     if (p.form === 'house') { projectHouse(p); return; }
     prism(u, v, w, d, h, 6, 'roof', p.variant === 2 ? 'sand' : 'facade', p.variant === 1 ? 'glasslight' : 'facadeside');
     for (let n = 0; n < f; n++) {
@@ -226,6 +237,8 @@ export function createCityRenderer(canvas, root) {
     if (n < 2)
       prism(x - 6, v + 8, 6, 7, 3, 13, 'black', 'black', 'black');
   } }
+  // Themed civic landmarks report their footprint; the hit area covers it up to the tallest spire.
+  function landmark(id, box) { const a = P(box.u, box.v, box.top), b = P(box.u + box.w, box.v + box.d); hitAreas.push({ id, x: P(box.u, box.v + box.d)[0], y: a[1], w: (box.w + box.d) * .72, h: b[1] - a[1] + 15 }); }
   function tinyText(s, u, v, z, color = 'black', size = 11) { if (scale * layout.scale < .46)
     return; const p = P(u, v, z); ctx.font = (size / (scale * layout.scale)) + 'px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif'; ctx.fillStyle = C(color); ctx.textAlign = 'center'; ctx.fillText(s, ...p); ctx.textAlign = 'start'; }
   function renderCity() {
@@ -236,12 +249,15 @@ export function createCityRenderer(canvas, root) {
     ctx.translate(layout.x, layout.y);
     ctx.scale(layout.scale, layout.scale);
     hitAreas = [];
+    art?.backdrop(layout);
     ctx.save(); ctx.filter = 'blur(17px)';
     plane(0, 8, layout.width + 7, layout.depth + 2, -28, alpha('shadow', .18));
     ctx.restore();
     prism(0, 0, layout.width, layout.depth, 15, -15, 'ground', 'groundfront', 'groundside');
-    roads(); rails();
-    at(35, -265, parkGround);
+    roads(); art?.tracks(layout); rails();
+    const objects = [];
+    if (art) art.commons(objects);
+    else at(35, -265, parkGround);
     for (const p of projects) {
       plane(p.u - 10, p.v - 10, 218, 211, 1, 'path');
       plane(p.u - 5, p.v - 5, 208, 201, 2, p.lot % 2 ? 'lawn' : 'grass');
@@ -255,16 +271,15 @@ export function createCityRenderer(canvas, root) {
       plane(door - 7, p.v + p.d + 14, 14, stop - p.v - p.d - 14, 4, 'path');
       plane(door - 28, stop - 3, 55, 12, 5, 'sand');
     }
-    const objects = [];
     for (const p of projects)
       objects.push({ depth: p.u + p.v + (p.w + p.d) * .5, fn: () => projectBuilding(p) });
     objects.push(
-      { depth: 155 + layout.frontage + 110, fn: () => at(-180, layout.frontage - 337, station) },
-      { depth: 415 + layout.frontage + 105, fn: () => at(-240, layout.frontage - 280, library) }
+      { depth: 155 + layout.frontage + 110, fn: () => art ? landmark('station', art.station(80, layout.frontage + 72)) : at(-180, layout.frontage - 337, station) },
+      { depth: 415 + layout.frontage + 105, fn: () => art ? landmark('library', art.library(360, layout.frontage + 72)) : at(-240, layout.frontage - 280, library) }
     );
-    for (const [u, v, size] of [[82, 82, 1], [277, 94, .9], [85, 200, .85], [274, 210, .8]]) objects.push({ depth: u + v, fn: () => tree(u, v, size) });
+    if (!art) for (const [u, v, size] of [[82, 82, 1], [277, 94, .9], [85, 200, .85], [274, 210, .8]]) objects.push({ depth: u + v, fn: () => tree(u, v, size) });
     for (const p of projects) {
-      for (const [u, v] of [[p.u + 197, p.v + 40], [p.u + 197, p.v + 155]]) objects.push({ depth: u + v, fn: () => tree(u, v, .8) });
+      for (const [u, v] of [[p.u + 197, p.v + 40], [p.u + 197, p.v + 155]]) objects.push({ depth: u + v, fn: () => tree(u, v, .8, 0, art?.treeKind(p, v < p.v + 100)) });
       objects.push({ depth: p.u + p.v + 222, fn: () => lamp(p.u + 30, p.v + 192) });
     }
     let citizenCount = 0;
@@ -276,14 +291,14 @@ export function createCityRenderer(canvas, root) {
         const citizenIndex = citizenCount - 1;
         const u = done ? 365 + (citizenIndex % 8) * 13 : idle ? 105 + (citizenIndex % 8) * 19 : p.u + 18 + (i % 5) * 23;
         const v = done ? layout.frontage + 165 + (Math.floor(citizenIndex / 8) % 2) * 6 : idle ? 110 + (Math.floor(citizenIndex / 8) % 6) * 22 : p.v + p.d + 30 + Math.floor(i / 5) * 17;
-        const walking = member.status === 'working';
+        const walking = member.status === 'working', z = idle && !done ? art?.commonsZ ?? 0 : 0;
         const uu = u + (walking ? Math.sin(time * .65 + i) * 9 : 0);
         objects.push({ depth: uu + v, fn: () => {
-            person(uu, v, harnessStyle(member.harness).color, walking && motion, 0, .9);
-            const q = P(uu, v);
+            person(uu, v, harnessStyle(member.harness).color, walking && motion, z, .9);
+            const q = P(uu, v, z);
             if (member.status === 'needs-you') {
               round(q[0] - 4, q[1] - 35, 8, 10, 3, 'warm');
-              tinyText('!', uu, v, 27, 'black', 9);
+              tinyText('!', uu, v, z + 27, 'black', 9);
             }
             hitAreas.push({ id: member.key, x: q[0] - 7, y: q[1] - 27, w: 14, h: 29 });
           } });
@@ -302,28 +317,35 @@ export function createCityRenderer(canvas, root) {
       } });
       const bus = commuterBus(p, layout, time);
       objects.push({ depth: bus.u + bus.v + 25, fn: () => {
+        if (art) { art.bus(bus); return; }
         car(bus.u, bus.v, 'blue', true);
         if (bus.stopped) plane(bus.u + 20, bus.v + 23, 11, 6, 5, 'warm');
       } });
     }
     for (let row = 0; row <= layout.rows; row++) {
-      const span = layout.width - 90, u = 10 + (time * 24 + row * 217) % span, v = row * BLOCK + 17;
-      objects.push({ depth: u + v + 25, fn: () => car(u, v, row % 2 ? 'mint' : 'coral') });
+      const span = layout.width - (art ? 130 : 90), u = 10 + (time * 24 + row * 217) % span, v = row * BLOCK + 17;
+      objects.push({ depth: u + v + 25, fn: () => art ? art.streetcar(u, v) : car(u, v, row % 2 ? 'mint' : 'coral') });
     }
+    art?.edges(objects, layout);
     objects.sort((a, b) => a.depth - b.depth);
     for (const o of objects)
       o.fn();
-    train(230 + (time * 40) % Math.max(500, layout.width));
-    tinyText('THE COMMONS', 185, 242, 0, 'treedark', 11);
+    const trainAt = 230 + (time * 40) % Math.max(500, layout.width);
+    if (art) { art.train(trainAt, layout); art.weather(layout); }
+    else train(trainAt);
+    tinyText(CITY_THEMES[theme].commons, 185, 242, art?.commonsZ ?? 0, 'treedark', 11);
     tinyText('SCHEDULER', 170, layout.frontage + 168, 4, 'black', 11);
     tinyText('DONE', 410, layout.frontage + 168, 5, 'black', 11);
     ctx.restore();
   }
   refreshPalette();
+  const themes = createThemeArt({ ctx, P, C, alpha, polygon, path, plane, prism, ellipse, round, ovalGround, groundShadow, person, tree, car, now: () => ({ time, motion, layout }) });
   return {
     refreshPalette,
     dispose() { if (backdropCanvas) backdropCanvas.width = backdropCanvas.height = 0; backdropCanvas = undefined; backdrop = undefined; },
-    draw(buildings, selection, elapsed, animate, interior) {
+    draw(buildings, selection, elapsed, animate, interior, cityTheme = 'classic') {
+      // The theme attribute is already on the root; re-read its palette once per switch.
+      if (cityTheme !== theme) { theme = Object.hasOwn(themes, cityTheme) ? cityTheme : 'classic'; art = themes[theme]; refreshPalette(); }
       projects = buildings;
       selected = selection;
       time = elapsed;
@@ -331,7 +353,7 @@ export function createCityRenderer(canvas, root) {
       width = canvas.clientWidth || 1120;
       height = canvas.clientHeight || width * 775 / 1120;
       scale = 1;
-      layout = cityLayout(buildings, width, height);
+      layout = cityLayout(buildings, width, height, theme);
       if (commuterBuildings !== buildings) {
         commuters = cityCommuters(buildings, layout);
         commuterBuildings = buildings;
@@ -342,7 +364,7 @@ export function createCityRenderer(canvas, root) {
         canvas.height = Math.round(height * dpr);
       }
       // The exterior is a still backdrop indoors, not a second animated city.
-      if (interior && backdrop?.buildings === buildings && backdrop.selection === selection && backdrop.width === width && backdrop.height === height && backdrop.dpr === dpr) {
+      if (interior && backdrop?.buildings === buildings && backdrop.selection === selection && backdrop.width === width && backdrop.height === height && backdrop.dpr === dpr && backdrop.theme === theme) {
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, width, height);
         ctx.drawImage(backdropCanvas, 0, 0, width, height);
       } else {
@@ -351,7 +373,7 @@ export function createCityRenderer(canvas, root) {
           backdropCanvas ??= document.createElement('canvas');
           backdropCanvas.width = canvas.width; backdropCanvas.height = canvas.height;
           const copy = backdropCanvas.getContext('2d');
-          if (copy) { copy.drawImage(canvas, 0, 0); backdrop = { buildings, selection, width, height, dpr }; }
+          if (copy) { copy.drawImage(canvas, 0, 0); backdrop = { buildings, selection, width, height, dpr, theme }; }
         } else {
           backdrop = undefined;
           if (backdropCanvas) { backdropCanvas.width = backdropCanvas.height = 0; backdropCanvas = undefined; }

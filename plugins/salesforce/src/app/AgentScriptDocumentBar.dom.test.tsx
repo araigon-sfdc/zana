@@ -132,6 +132,20 @@ describe('Agent Script document toolbar', () => {
     expect(screen.queryByRole('button', { name: 'Preview', exact: true })).toBeNull();
   });
 
+  it('fetches the saved agent from the org, but not with unsaved edits', () => {
+    const onFetch = vi.fn();
+    const { rerender } = render(<AgentScriptDocumentBar {...defaults} onFetch={onFetch} />);
+    const fetch = () => screen.getByRole('button', { name: 'Fetch agent from org' }) as HTMLButtonElement;
+    expect(fetch().title).toBe('Fetch this agent and what it uses from the org');
+    fireEvent.click(fetch());
+    expect(onFetch).toHaveBeenCalledOnce();
+    rerender(<AgentScriptDocumentBar {...defaults} dirty onFetch={onFetch} />);
+    expect(fetch().disabled).toBe(true);
+    expect(fetch().title).toMatch(/^Save first/);
+    rerender(<AgentScriptDocumentBar {...defaults} />);
+    expect(screen.queryByRole('button', { name: 'Fetch agent from org' })).toBeNull();
+  });
+
   it('opens the saved agent in Agentforce Builder, but not an unsaved one or while opening', () => {
     const onOpenInBuilder = vi.fn();
     const { rerender } = render(<AgentScriptDocumentBar {...defaults} onOpenInBuilder={onOpenInBuilder} />);

@@ -157,18 +157,16 @@ describe('ThreadCommandComposer pairing copy', () => {
     expect(source).not.toContain('navigator.clipboard');
   });
 
-  it('renews pairing in place and never detours to Add a machine', () => {
+  it('installs or repairs in place and never detours to Add a machine', () => {
     const source = readFileSync(new URL('../ThreadCommandComposer.tsx', import.meta.url), 'utf8');
     const chip = readFileSync(new URL('../ComposerHostActionChip.tsx', import.meta.url), 'utf8');
     expect(source).toContain('runHostInstallWithDrawer');
     expect(source).toContain('setHostInstallDrawerOpen');
-    expect(source).toContain('Renewing pairing…');
     expect(source).toContain('Installing…');
+    expect(source).toContain('Reconnecting…');
     expect(source).toContain('composerBootstrapErrorMessage');
-    expect(source).toContain('product.relay.renewJoinWindow');
-    expect(source.indexOf('product.hosts.repair')).toBeGreaterThan(
-      source.indexOf('product.relay.renewJoinWindow')
-    );
+    expect(source).toContain('product.hosts.repair');
+    expect(source).not.toContain('product.relay');
     expect(source).not.toContain('Add a machine');
     expect(source).not.toContain('/settings/machines');
     expect(chip).toContain('Copy install command');

@@ -424,7 +424,7 @@ body:has(.app-shell[data-mobile='true']) .thread-detail-overflow-menu > button {
 .app-shell[data-mobile='true'] .mobile-nav-dialog .sidebar-utility-bar { flex: 0 0 auto; margin-top: 8px; padding-top: 8px; gap: 4px; }
 .app-shell[data-mobile='true'] .mobile-nav-dialog .sidebar-utility-button { min-width: 44px; min-height: 44px; border-radius: 12px; }
 .app-shell[data-mobile='true'] .mobile-nav-dialog .sidebar-utility-button--settings { font-size: 14px; padding: 0 12px; }
-.app-shell[data-mobile='true'] .mobile-nav-dialog .sidebar-utility-button:not(.sidebar-utility-button--settings) { display: none; }
+.app-shell[data-mobile='true'] .mobile-nav-dialog .sidebar-utility-button:not(.sidebar-utility-button--settings, .sidebar-utility-button--more) { display: none; }
 .app-shell[data-mobile='true'] .mobile-nav-dialog :is(.project-menu, .sidebar-projects-add-menu, .sidebar-projects-organize-menu) {
   max-width: calc(100vw - 32px);
   max-height: calc(var(--mobile-viewport-height, 100dvh) - 32px);

@@ -52,7 +52,7 @@ describe('desktop browser automation host', () => {
       threadId: 'thr-1',
       url: 'https://example.com',
       presentation: 'reveal',
-      profile: { kind: 'automation', id: result.tabId }
+      profile: { kind: 'automation', id: 'thread:thr-1' }
     }));
   });
 

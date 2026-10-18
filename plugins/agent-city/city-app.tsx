@@ -8,6 +8,7 @@ import { commuterCounts, harnessLegend, withThreadHarnesses } from './commuters.
 import { buildingInterior, interiorTier, reconcileSeats, workerLocation } from './interior.js';
 import { readViewState, saveViewState, type CityViewState } from './view-state.js';
 import { InteriorDetails } from './interior-view.js';
+import { CITY_THEMES, isCityTheme, type CityTheme } from './themes.js';
 const PAGE_SIZE = 40;
 export function AgentCity(props: PluginAgentsViewProps) {
   return <CityView key={props.projectId ?? 'global'} {...props}/>;
@@ -41,6 +42,7 @@ function CityView(props: PluginAgentsViewProps) {
   }, [buildings]);
   const locations = useMemo(() => new Map(buildings.flatMap((b) => [...seatsByBuilding.get(b.id)!.seats].map(([key, seat]) => [key, { building: b.id, ...workerLocation(b, seat) }] as const))), [buildings, seatsByBuilding]);
   const { camera, dragging, zoomBy, fit, handlers } = useCityCamera(saved.camera);
+  const [theme, setTheme] = useState<CityTheme>(saved.theme);
   const [paused, setPaused] = useState(saved.paused), [search, setSearch] = useState(saved.search), [pageChoice, setPage] = useState(saved.page);
   const place = selected === 'all' || selected === 'station' || selected === 'library' || selected === 'attention' ? selected
     : projects.some((p) => p.id === selected) ? selected : 'all';
@@ -68,8 +70,8 @@ function CityView(props: PluginAgentsViewProps) {
     document.addEventListener('keydown', escape);
     return () => document.removeEventListener('keydown', escape);
   }, [interiorId]);
-  const snapshot = (focus = focusedKey): CityViewState => ({ selected, inside, floor: interior?.floor.id ?? floorChoice, deskPage: interior?.page ?? deskPage, inspecting, filter, search, page: pageChoice, paused, camera, focusedKey: focus });
-  useEffect(() => { saveViewState(scope, snapshot()); }, [scope, selected, inside, floorChoice, deskPage, inspecting, filter, search, pageChoice, paused, camera, focusedKey]);
+  const snapshot = (focus = focusedKey): CityViewState => ({ selected, inside, floor: interior?.floor.id ?? floorChoice, deskPage: interior?.page ?? deskPage, inspecting, filter, search, page: pageChoice, paused, camera, focusedKey: focus, theme });
+  useEffect(() => { saveViewState(scope, snapshot()); }, [scope, selected, inside, floorChoice, deskPage, inspecting, filter, search, pageChoice, paused, camera, focusedKey, theme]);
   useEffect(() => {
     if (focusedKey && !document.querySelector('[role="dialog"], [role="alertdialog"], dialog[open]') && interior?.workers.some((w) => w.occupant.item.key === focusedKey)) root.current?.querySelector<HTMLElement>('.city-workstation[data-highlighted=true]')?.focus({ preventScroll: true });
   }, [focusedKey, interiorId, interior?.floor.id, interior?.page]);
@@ -102,8 +104,8 @@ function CityView(props: PluginAgentsViewProps) {
     else
       inspect(key);
   }
-  const { available, reduced, viewport } = useCityCanvas(root, canvas, buildings, place, paused, select, interior, setHovered);
-  const layout = cityLayout(buildings, viewport.width, viewport.height);
+  const { available, reduced, viewport } = useCityCanvas(root, canvas, buildings, place, paused, select, interior, setHovered, theme);
+  const layout = cityLayout(buildings, viewport.width, viewport.height, theme);
   const counts = useMemo(() => props.members.reduce((acc, m) => ({ ...acc, [m.status]: acc[m.status] + 1 }), { working: 0, 'needs-you': 0, idle: 0, done: 0, error: 0, unknown: 0 }), [props.members]);
   const requests = projectedMembers.filter((m) => m.live && m.status === 'needs-you');
   const attention = requests.length + population.executions.filter((e) => e.needsAttention).length;
@@ -125,12 +127,15 @@ function CityView(props: PluginAgentsViewProps) {
       ...jobs.map((e) => ({ key: e.key, title: e.title, status: e.needsAttention ? 'needs-you' : 'unknown', detail: `Team run · ${e.state.toLowerCase()}`, meta: 'Execution' }))];
   const pages = Math.max(1, Math.ceil(roster.length / PAGE_SIZE)), page = Math.min(pageChoice, pages - 1);
   const title = place === 'all' ? 'All agents' : place === 'station' ? 'Scheduler station' : place === 'library' ? 'Done pavilion' : place === 'attention' ? 'Needs you' : project?.name ?? 'Your city';
-  return <section className="agent-city" ref={root} aria-label="Agent City" data-testid="agent-city">
+  return <section className="agent-city" ref={root} aria-label="Agent City" data-testid="agent-city" data-city-theme={theme}>
   <style>{cityStyles}</style>
   <div className="city-toolbar">
    <h2>Your agents, a little more alive.</h2>
    <select className="city-control city-project-select" aria-label="Find a project building" value={project?.id ?? ''} onChange={(e) => select(e.target.value)}>
     <option value="" disabled>Find a project…</option>{projects.map((p) => <option key={p.id} value={p.id}>{p.name} · {p.count} live{p.schedules.length ? ` · ${p.schedules.length} planned` : ''}</option>)}
+   </select>
+   <select className="city-control city-theme-select" aria-label="City theme" value={theme} onChange={(e) => { if (isCityTheme(e.target.value)) setTheme(e.target.value); }}>
+    {Object.entries(CITY_THEMES).map(([id, t]) => <option key={id} value={id}>{t.label}</option>)}
    </select>
    <button type="button" className="city-control" onClick={() => setPaused(!paused)} aria-pressed={paused || reduced} disabled={reduced}>{reduced ? 'Reduced motion' : paused ? 'Resume motion' : 'Pause motion'}</button>
   </div>
@@ -146,7 +151,7 @@ function CityView(props: PluginAgentsViewProps) {
        <button type="button" ref={back} className="city-control" onClick={leaveBuilding}>← Back to city</button>
        <div><h3>{interior.building.name}</h3><span>{interior.workers.length} on this floor{interior.pages > 1 ? ' page' : ''} · {interior.building.count} live {interior.building.count === 1 ? 'agent' : 'agents'} in building{interior.building.schedules.filter((s) => !s.running).length > 0 ? ` · ${interior.building.schedules.filter((s) => !s.running).length} planned` : ''}</span></div>
        {buildingRequests.length > 0 && <button type="button" className="city-control city-request-jump" onClick={() => { const index = buildingRequests.findIndex((m) => m.key === focusedKey); findWorker(buildingRequests[(index + 1) % buildingRequests.length].key); }}>Find next request · {buildingRequests.length}</button>}
-     </div> : <div className="city-maphead">A living view of your projects<strong>{projects.length} projects · one city</strong></div>}
+     </div> : <div className="city-maphead">A living view of your projects<strong>{projects.length} projects · {CITY_THEMES[theme].tagline}</strong></div>}
      <div className="city-maplayer" style={{ transform: interior ? 'none' : `translate(${camera.x}%, ${camera.y}%) scale(${camera.zoom})` }}>
       <canvas ref={canvas} aria-hidden="true"/>
       {!interior && buildings.map((p, i) => <button type="button" key={p.id} data-project-id={p.id} data-search-match={!query || matchingProjects.has(p.id)} data-needs-you={p.needs > 0} data-building-form={p.form} data-commuters={crowds[i]} className={`city-label${buildings.length > 6 ? ' city-label-compact' : ''}`} style={labelPosition(p, layout)} onClick={() => select(p.id)} aria-pressed={place === p.id} aria-label={`${p.name}, ${p.count} live agents, ${p.needs} need you${p.schedules.length ? `, ${p.schedules.length} scheduled plans` : ''}`}>

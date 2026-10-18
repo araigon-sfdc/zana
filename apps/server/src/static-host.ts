@@ -11,7 +11,6 @@ import { createProductWebSocketServer, handleProductUpgrade } from './http/produ
 import { createHostDaemonWebSocketServer, handleHostInternalHttp, handleHostInternalUpgrade } from './http/host-internal.js';
 import { handleInstallHttp } from './http/install-http.js';
 import { startPairingForwarder, type PairingForwarder } from './http/pairing-forwarder.js';
-import { attachPairingRelay } from './http/pairing-relay-controller.js';
 import { PLUGIN_ASSET_PATH, tryServePluginAsset } from './http/plugin-assets.js';
 import { videoByteRange } from './http/video-preview.js';
 import { diagnosticRouteLabel, type RuntimeDiagnostics } from './services/diagnostics/runtime-stalls.js';
@@ -316,12 +315,10 @@ export async function startStaticHost(options: StartStaticHostOptions): Promise<
 
   const preferredPort = options.port ?? 0;
   let unregister: (() => Promise<void>) | undefined;
-  let pairingRelay: ReturnType<typeof attachPairingRelay> | undefined;
   let pairingForwarder: PairingForwarder | undefined;
   let closing: Promise<void> | undefined;
   const close = () => closing ??= (async () => {
     requests.dispose();
-    pairingRelay?.stop();
     if (options.product && pairingForwarder && options.product.origins.pairingPort === pairingForwarder.port) {
       delete options.product.origins.pairingPort;
     }
@@ -367,7 +364,6 @@ export async function startStaticHost(options: StartStaticHostOptions): Promise<
     if (options.product) {
       options.product.origins.serverPort = address.port;
       unregister = await registerBoundLocalPeerApp(server, options.product.dataDir, options.product.productInstanceId);
-      pairingRelay = attachPairingRelay(options.product, address.port);
       // SSH reverse tunnels target this allowlist-only port. Without it, tunnel
       // installs and reopens fail closed; they never expose serverPort.
       try {

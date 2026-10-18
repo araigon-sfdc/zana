@@ -30,7 +30,7 @@ const baseRpc = async (_p: string, method: string, args?: any): Promise<unknown>
   if (method === 'orgs') return { ok: true, selectedAlias: 'dev', orgs: [] };
   if (method === 'agentFiles.read') return { ok: true, file: { path: args?.path, content: SOURCE, sha256: SHA } };
   if (method === 'agentFiles.write') return { ok: true, file: { path: args?.path, sha256: 'sha2' } };
-  if (method === 'studio.explorer') return { ok: true, nodes: [{ kind: 'agent', path: 'force-app/bots/QC.agent', apiName: 'QC' }, { kind: 'apex', apiName: 'Foo', path: 'force-app/classes/Foo.cls' }, { kind: 'scenario', path: 'tests/a.scenario.json', apiName: 'a' }, { kind: 'org-agent', apiName: 'OrgBot' }] };
+  if (method === 'studio.explorer') return { ok: true, nodes: [{ kind: 'agent', path: 'force-app/bots/QC.agent', apiName: 'QC' }, { kind: 'apex', apiName: 'Foo', path: 'force-app/classes/Foo.cls', usedBy: ['force-app/bots/QC.agent'] }, { kind: 'scenario', path: 'tests/a.scenario.json', apiName: 'a' }, { kind: 'org-agent', apiName: 'OrgBot' }] };
   if (method === 'studio.suites.list') return { ok: true, suites: [{ id: 's', path: 'tests/a.scenario.json', cases: [], lastResults: { x: { outcome: 'fail', runId: 'r', at: 1 } } }] };
   if (method === 'studio.comments.list') return { ok: true, comments: [] };
   if (method === 'studio.comments.add') return { ok: true };
@@ -258,6 +258,20 @@ describe('AgentScriptPanel studio layout', () => {
     expect(apex).toBeTruthy();
     await act(async () => { fireEvent.click(apex!); });
     expect(el.querySelector('[data-testid="studio-target-view"]')).toBeTruthy();
+    // The agent's document bar belongs to the agent tab; the strip keeps the workspace controls.
+    expect(el.querySelector('[data-testid="salesforce-agent-script-publish"]')).toBeNull();
+    const goTo = el.querySelector<HTMLButtonElement>('.sf-etabs-actions [aria-label="Go to file"]');
+    expect(goTo).toBeTruthy();
+    await act(async () => { fireEvent.click(goTo!); });
+    expect(document.querySelector('[role="dialog"], [role="listbox"], [role="option"]')).toBeTruthy();
+    await act(async () => { fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' }); });
+    const back = el.querySelector<HTMLButtonElement>('.af-backlink');
+    expect(back?.textContent).toBe('← QC.agent');
+    await act(async () => { fireEvent.click(back!); });
+    expect(el.querySelector('[data-testid="studio-target-view"]')).toBeNull();
+    expect(el.querySelector('[data-testid="salesforce-agent-script-publish"]')).toBeTruthy();
+    await act(async () => { fireEvent.click(el.querySelector('[aria-label="Browse org agents"]')!); });
+    await act(async () => { fireEvent.click(apex!); });
     const scenario = [...el.querySelectorAll('.sf-as-explorer button')].find(n => n.textContent?.includes('a.scenario') || n.textContent?.trim().startsWith('a'));
     if (scenario) await act(async () => { fireEvent.click(scenario); });
   });
@@ -323,6 +337,41 @@ describe('AgentScriptPanel studio layout', () => {
     await flush();
     expect(rpc).toHaveBeenCalledWith('salesforce', 'agentFiles.read', expect.objectContaining({ path: 'force-app/bots/QC.agent' }));
     expect(el.querySelector('[data-testid="studio-target-view"]')).toBeNull();
+  });
+
+  it('opens every implementation view on the last Project / Org choice', async () => {
+    const first = await mount('force-app/bots/QC.agent');
+    await ready(first);
+    await openReferences(first);
+    const apex = [...first.querySelectorAll('.sf-as-explorer button')].find(n => n.textContent?.includes('Foo'))!;
+    await act(async () => { fireEvent.click(apex); });
+    await flush();
+    const orgButton = (root: ParentNode) => root.querySelector<HTMLButtonElement>('[aria-label="Implementation source"] button:last-child')!;
+    expect(orgButton(first).getAttribute('aria-pressed')).toBe('false');
+    await act(async () => { fireEvent.click(orgButton(first)); });
+    await flush();
+    expect(rpc).toHaveBeenCalledWith('salesforce', 'agentActions.source', expect.objectContaining({ target: 'apex://Foo', origin: 'org', orgAlias: 'dev' }));
+    nodes.splice(0).forEach(fn => fn());
+    rpc.mockClear();
+    const el = await mount();
+    await ready(el);
+    await flush();
+    expect(orgButton(el).getAttribute('aria-pressed')).toBe('true');
+    expect(rpc).toHaveBeenCalledWith('salesforce', 'agentActions.source', expect.objectContaining({ target: 'apex://Foo', origin: 'org' }));
+  });
+
+  it('closes editor tabs from the tab context menu', async () => {
+    const el = await mount('force-app/bots/QC.agent');
+    await ready(el);
+    await openReferences(el);
+    const apex = [...el.querySelectorAll('.sf-as-explorer button')].find(n => n.textContent?.includes('Foo'))!;
+    await act(async () => { fireEvent.click(apex); });
+    const tabs = () => [...el.querySelectorAll('[aria-label="Open files"] [role="tab"]')].map(n => n.textContent);
+    expect(tabs()).toHaveLength(2);
+    await act(async () => { fireEvent.contextMenu([...el.querySelectorAll('[aria-label="Open files"] [role="tab"]')].find(n => n.textContent?.includes('Foo'))!); });
+    await act(async () => { fireEvent.click([...el.querySelectorAll('[role="menuitem"]')].find(n => n.textContent === 'Close others')!); });
+    expect(tabs()).toEqual([expect.stringContaining('Foo')]);
+    expect(el.querySelector('[data-testid="studio-target-view"]')).toBeTruthy();
   });
 
   it('reloads comments when the active file is opened again', async () => {

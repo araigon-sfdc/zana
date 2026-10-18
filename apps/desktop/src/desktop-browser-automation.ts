@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import type {
-  DesktopBrowserCommand,
-  DesktopBrowserResult
+import {
+  automationProfileForThread,
+  type DesktopBrowserCommand,
+  type DesktopBrowserResult
 } from '@zana-ai/zcc-host-daemon-contract';
 import { isAllowedBrowserUrl } from './desktop-browser-policy.js';
 import {
@@ -93,7 +94,7 @@ export function createDesktopBrowserAutomationHost(
           threadId,
           tabId,
           url: url.length > 0 ? url : 'about:blank',
-          profile: { kind: 'automation', id: tabId },
+          profile: automationProfileForThread(threadId),
           presentation: visible ? 'reveal' : 'hidden'
         });
         return { targetId: tabId, tabId };

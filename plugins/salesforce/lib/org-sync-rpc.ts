@@ -23,7 +23,8 @@ export function registerOrgSync(input: {
     if (states && !states.every(state => SYNC_STATES.includes(state as SyncState))) throw Error(`Choose states from ${SYNC_STATES.join(', ')}.`);
     const limit = input.limit === undefined ? undefined : Number(input.limit);
     if (limit !== undefined && (!Number.isInteger(limit) || limit < 1)) throw Error('Choose a positive whole-number limit.');
-    const check = await service.check(await projectRoot(), scope);
+    const agent = text(args, 'agent');
+    const check = agent ? await service.checkAgent(await projectRoot(), agent) : await service.check(await projectRoot(), scope);
     // Counts always describe the whole check; states and limit only narrow the listed rows.
     const rows = states ? check.components.filter(row => states.includes(row.state)) : check.components;
     const components = limit === undefined ? rows : rows.slice(0, limit);

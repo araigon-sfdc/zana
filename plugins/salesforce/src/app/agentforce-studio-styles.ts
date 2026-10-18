@@ -162,6 +162,16 @@ button.af-agent-row-main { cursor:pointer; }button.af-agent-row-main:disabled { 
 .sf-etab-close { display:inline-flex; border:0; background:transparent; color:var(--sf-muted); cursor:pointer; padding:6px; border-radius:4px; }
 .sf-etab-close:hover { color:var(--sf-text); }
 .sf-etab-label:focus-visible, .sf-etab-close:focus-visible { outline:2px solid var(--sf-accent); outline-offset:-2px; }
+.sf-etab-menu { position:fixed; z-index:50; display:flex; flex-direction:column; min-width:170px; padding:4px; border:1px solid var(--sf-border); border-radius:6px; background:var(--sf-bg); box-shadow:0 6px 20px rgba(0,0,0,.25); }
+.sf-etab-menu button { border:0; background:transparent; color:var(--sf-text); font:inherit; font-size:12px; text-align:left; padding:6px 10px; border-radius:4px; cursor:pointer; }
+.sf-etab-menu button:hover:not(:disabled), .sf-etab-menu button:focus-visible { background:color-mix(in srgb,var(--sf-accent) 14%,transparent); outline:0; }
+.sf-etab-menu button:disabled { color:var(--sf-muted); cursor:default; }
+.sf-etabs-bar { display:flex; align-items:stretch; flex-shrink:0; min-width:0; border-bottom:1px solid var(--sf-border); background:var(--sf-bg); }
+.sf-etabs-bar > .sf-etabs { flex:1; min-width:0; border-bottom:0; }
+.sf-etabs-actions { display:flex; align-items:center; flex-shrink:0; gap:4px; padding:0 8px; border-left:1px solid var(--sf-border); }
+.sf-etabs-actions .af-document-org { max-width:200px; }
+.sf-etabs-actions .af-document-org .sf-org-switcher { height:26px; }
+@container af-editor (max-width:780px) { .sf-etabs-actions .af-document-org { max-width:120px; } .sf-etabs-actions .sf-follow-label { display:none; } }
 .sf-etab-view { flex:1; min-height:0; overflow:auto; display:flex; flex-direction:column; }
 .sf-kbd { margin-left:6px; padding:0 4px; border:1px solid var(--sf-border); border-radius:4px; font:inherit; font-size:10px; color:var(--sf-muted); }
 .sf-bottom { display:flex; flex-direction:column; flex-shrink:0; border-top:1px solid var(--sf-border); background:var(--sf-bg); color:var(--sf-text); }

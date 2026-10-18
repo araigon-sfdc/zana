@@ -2,7 +2,9 @@ import type { ActionParameter } from '../../lib/agent-action-model.js';
 
 export interface FlowNode { id: string; label: string; kind: string; target?: string; detail: Record<string, unknown> }
 export interface FlowEdge { from: string; to: string; label: string; fault: boolean }
-export interface FlowModel { nodes: FlowNode[]; edges: FlowEdge[]; inputs: ActionParameter[]; outputs: ActionParameter[]; truncated: boolean }
+/** Flow-level metadata shown in the header; absent when the source does not declare it. */
+export interface FlowMeta { processType?: string; triggerType?: string; runInMode?: string; status?: string }
+export interface FlowModel { nodes: FlowNode[]; edges: FlowEdge[]; inputs: ActionParameter[]; outputs: ActionParameter[]; truncated: boolean; meta?: FlowMeta }
 const NODE_TYPES: Record<string, string> = { start: 'Start', decisions: 'Decision', recordLookups: 'Get records', recordCreates: 'Create records', recordUpdates: 'Update records', recordDeletes: 'Delete records', assignments: 'Assignment', loops: 'Loop', subflows: 'Subflow', actionCalls: 'Action', screens: 'Screen', waits: 'Wait', collectionProcessors: 'Collection', transforms: 'Transform' };
 function list(value: unknown): any[] { return value == null ? [] : Array.isArray(value) ? value : [value]; }
 function rec(value: any): Record<string, any> { return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; }
@@ -54,7 +56,62 @@ export function flowModel(metadata: Record<string, unknown>): FlowModel {
   }
   const variables = list(metadata.variables).map(rec);
   const params = (flag: string): ActionParameter[] => variables.filter(v => v[flag] === true || v[flag] === 'true').slice(0, 250).map(v => ({ name: String(v.name ?? ''), type: `${v.dataType || 'unknown'}${v.isCollection === true || v.isCollection === 'true' ? '[]' : ''}`, description: String(v.description ?? ''), required: false }));
-  return { nodes: nodes.slice(0, 120), edges: edges.slice(0, 300), inputs: params('isInput'), outputs: params('isOutput'), truncated: nodes.length > 120 || edges.length > 300 };
+  const text = (value: unknown) => typeof value === 'string' && value ? value : undefined;
+  const start = rec(metadata.start);
+  const meta: FlowMeta = {};
+  for (const [key, value] of [['processType', metadata.processType], ['triggerType', start.triggerType], ['runInMode', metadata.runInMode], ['status', metadata.status]] as const) {
+    const found = text(value);
+    if (found) meta[key] = found;
+  }
+  return { nodes: nodes.slice(0, 120), edges: edges.slice(0, 300), inputs: params('isInput'), outputs: params('isOutput'), truncated: nodes.length > 120 || edges.length > 300, meta };
+}
+
+const PROCESS_TYPES: Record<string, string> = { AutoLaunchedFlow: 'Autolaunched', Flow: 'Screen flow', Workflow: 'Process Builder', InvocableProcess: 'Process Builder', CustomEvent: 'Process Builder', Orchestrator: 'Orchestration', RoutingFlow: 'Omni-Channel routing' };
+const TRIGGER_TYPES: Record<string, string> = { RecordBeforeSave: 'Record-triggered', RecordAfterSave: 'Record-triggered', RecordBeforeDelete: 'Record-triggered', Scheduled: 'Scheduled', PlatformEvent: 'Platform event' };
+const RUN_MODES: Record<string, string> = { DefaultMode: 'User or system context (default)', SystemModeWithSharing: 'System context with sharing', SystemModeWithoutSharing: 'System context without sharing' };
+
+/** A short type label: the trigger wins over the process type, since every record-triggered Flow is also "autolaunched". */
+export function flowTypeLabel(meta: FlowMeta | undefined): string | undefined {
+  if (!meta) return undefined;
+  return (meta.triggerType && TRIGGER_TYPES[meta.triggerType]) || (meta.processType && (PROCESS_TYPES[meta.processType] ?? meta.processType)) || undefined;
+}
+export function flowRunModeLabel(meta: FlowMeta | undefined): string | undefined {
+  return meta?.runInMode ? RUN_MODES[meta.runInMode] ?? meta.runInMode : undefined;
+}
+
+export interface FlowCall { label: string; target?: string }
+export interface FlowTouches { reads: string[]; writes: string[]; calls: FlowCall[] }
+const WRITE_KINDS = new Set(['Create records', 'Update records', 'Delete records']);
+
+/** What a Flow reads, writes and invokes, from its drawn elements. Record writes through a variable name the variable, not an object. */
+export function flowTouches(model: FlowModel): FlowTouches {
+  const reads = new Set<string>(), writes = new Set<string>();
+  const calls = new Map<string, FlowCall>();
+  for (const node of model.nodes) {
+    const object = typeof node.detail.object === 'string' && node.detail.object ? node.detail.object : undefined;
+    const variable = typeof node.detail.inputReference === 'string' && node.detail.inputReference ? `{!${node.detail.inputReference}}` : undefined;
+    if (node.kind === 'Get records' && object) reads.add(object);
+    else if (WRITE_KINDS.has(node.kind) && (object || variable)) writes.add((object ?? variable)!);
+    else if (node.target) calls.set(node.target, { label: node.target.split('://')[1] ?? node.target, target: node.target });
+    else if (node.kind === 'Action' && typeof node.detail.actionName === 'string') {
+      const type = typeof node.detail.actionType === 'string' ? node.detail.actionType : 'action';
+      calls.set(`${type}:${node.detail.actionName}`, { label: `${node.detail.actionName} (${type})` });
+    }
+  }
+  return { reads: [...reads].sort(), writes: [...writes].sort(), calls: [...calls.values()] };
+}
+
+/**
+ * Project XML and the org's Tooling JSON spell the same Flow differently (string vs boolean flags, element order),
+ * so drift compares the projected structure: elements, connectors and the variable contract.
+ */
+export function flowSignature(model: FlowModel): string {
+  return JSON.stringify([
+    model.nodes.map(node => `${node.id}|${node.kind}|${node.label}|${node.target ?? ''}`).sort(),
+    model.edges.map(edge => `${edge.from}>${edge.to}|${edge.label}|${edge.fault}`).sort(),
+    model.inputs.map(param => `${param.name}:${param.type}`).sort(),
+    model.outputs.map(param => `${param.name}:${param.type}`).sort()
+  ]);
 }
 
 /** Breadth-first levels keep cycles bounded and branches side by side. */

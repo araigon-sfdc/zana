@@ -11,8 +11,7 @@ const openDrawer = vi.hoisted(() => vi.fn());
 vi.mock('../store.js', () => ({ useUi: { getState: () => ({ setHostInstallDrawerOpen: openDrawer }) } }));
 vi.mock('../hooks/usePublicAppUrl.js', () => ({ usePublicAppUrl: () => 'https://machine.example' }));
 vi.mock('../lib/product-client.js', () => ({ product: {
-  hosts: { repair: vi.fn(), bootstrap: vi.fn(), updateSshIdentity: vi.fn() },
-  relay: { renewJoinWindow: vi.fn() }
+  hosts: { repair: vi.fn(), bootstrap: vi.fn(), updateSshIdentity: vi.fn() }
 } }));
 vi.mock('../lib/host-install-run.js', () => ({ runHostInstallWithDrawer: vi.fn() }));
 vi.mock('./HostSshIdentityDialog.js', () => ({ HostSshIdentityDialog: ({ onSubmit, onClose }: any) => <>
@@ -33,7 +32,6 @@ afterEach(() => { cleanup(); vi.resetAllMocks(); });
 
 it('repairs only the bound remote and refreshes the project after successful connection', async () => {
   const f = setup();
-  vi.mocked(product.relay.renewJoinWindow).mockRejectedValue(new Error('Legacy relay unconfigured'));
   fireEvent.click(screen.getByTestId('composer-host-action'));
   await waitFor(() => expect(f.onConnected).toHaveBeenCalledOnce());
   expect(product.hosts.repair).toHaveBeenCalledWith('remote', expect.any(Function));

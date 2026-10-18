@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import type { PluginDatabase } from '@zana-ai/zcc-plugin-sdk/server';
 import {
   isDocStatus,
+  type CommentExcerpt,
   type CommentStatus,
   type DesignDocComment,
   type DesignDocDetail,
@@ -178,6 +179,7 @@ interface DocRow {
   file_count?: number;
   open_comments?: number;
   head?: string | null;
+  last_comment?: string | null;
 }
 
 interface FileRow {
@@ -229,11 +231,18 @@ interface ThreadRow {
 
 const ROLE_RANK: Record<ThreadRole, number> = { assistant: 1, reviewer: 2, editor: 3, author: 4 };
 
+/** Characters of the newest open comment carried in each summary. */
+const COMMENT_EXCERPT_LENGTH = 160;
+
 const SUMMARY_COLUMNS = `d.*,
   (SELECT h.head_id FROM sync_doc_heads h WHERE h.doc_id = d.id
     AND h.repo_id = (SELECT repo_id FROM sync_repositories ORDER BY created_at LIMIT 1)) AS head,
   (SELECT COUNT(*) FROM doc_files f WHERE f.doc_id = d.id) AS file_count,
-  (SELECT COUNT(*) FROM doc_comments c WHERE c.doc_id = d.id AND c.status = 'open' AND c.parent_id IS NULL) AS open_comments`;
+  (SELECT COUNT(*) FROM doc_comments c WHERE c.doc_id = d.id AND c.status = 'open' AND c.parent_id IS NULL) AS open_comments,
+  (SELECT json_object('body', substr(c.body, 1, ${COMMENT_EXCERPT_LENGTH}), 'author', c.author, 'at', c.created_at)
+    FROM doc_comments c LEFT JOIN doc_comments p ON p.id = c.parent_id
+    WHERE c.doc_id = d.id AND COALESCE(p.status, c.status) = 'open'
+    ORDER BY c.created_at DESC, c.rowid DESC LIMIT 1) AS last_comment`;
 
 export interface DesignDocStoreOptions {
   now?: () => number;
@@ -1426,6 +1435,13 @@ function parseTags(raw: string): string[] {
   }
 }
 
+function parseExcerpt(raw: string | null | undefined): CommentExcerpt | null {
+  if (!raw) return null;
+  // `raw` is built by SQLite json_object() over TEXT columns: always valid JSON with string body/author.
+  const value = JSON.parse(raw) as { body: string; author: string; at: unknown };
+  return { body: value.body, author: parseActor(value.author), createdAt: Number(value.at) || 0 };
+}
+
 function toSummary(row: DocRow): DesignDocSummary {
   return {
     id: row.id,
@@ -1438,6 +1454,7 @@ function toSummary(row: DocRow): DesignDocSummary {
     entryPath: row.entry_path,
     fileCount: Number(row.file_count ?? 0),
     openComments: Number(row.open_comments ?? 0),
+    lastComment: parseExcerpt(row.last_comment),
     pinnedAt: row.pinned_at ?? null,
     alternativeTo: row.alternative_to ?? null,
     revision: row.revision,

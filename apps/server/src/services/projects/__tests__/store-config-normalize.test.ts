@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { AppConfig } from '@zana-ai/zcc-domain/product';
 
 // store.ts reads `app.getPath('home')` at module-load time; mock electron to a
 // throwaway tmp HOME before importing it (mirrors store.test.ts).
@@ -107,6 +108,20 @@ describe('normalizeConfig — sidebar chrome', () => {
       sidebarNavOrder: ['home', 'inbox'],
       projectSidebarNavOrder: ['agents']
     }));
+  });
+
+  it('normalizes and bounds hidden destinations independently for each rail', () => {
+    expect(normalizeConfig({
+      sidebarNavHidden: [' plugin/main ', '', 'plugin/main', 42, 'x'.repeat(257)] as string[],
+      projectSidebarNavHidden: ['feed']
+    })).toMatchObject({ sidebarNavHidden: ['plugin/main'], projectSidebarNavHidden: ['feed'] });
+    expect(normalizeConfig({ sidebarNavHidden: [], projectSidebarNavHidden: [] })).toMatchObject({
+      sidebarNavHidden: [], projectSidebarNavHidden: []
+    });
+    expect(normalizeConfig({ sidebarNavHidden: 'invalid' as never })).not.toHaveProperty('sidebarNavHidden');
+    expect(normalizeConfig({})).not.toHaveProperty('projectSidebarNavHidden');
+    const ids = Array.from({ length: 250 }, (_, index) => `item-${index}`);
+    expect(normalizeConfig({ projectSidebarNavHidden: ids }).projectSidebarNavHidden).toHaveLength(200);
   });
 });
 
@@ -785,7 +800,7 @@ describe('normalizeConfig — tmuxScope (tri-state, mirrors overseerMode)', () =
   });
 });
 
-describe('normalizeConfig — publicAppUrl / relayToken', () => {
+describe('normalizeConfig — publicAppUrl and retired relay fields', () => {
   it('trims a public origin and strips a trailing slash', () => {
     expect(normalizeConfig({ publicAppUrl: ' https://zcc.herokuapp.com/ ' }).publicAppUrl).toBe(
       'https://zcc.herokuapp.com'
@@ -798,32 +813,24 @@ describe('normalizeConfig — publicAppUrl / relayToken', () => {
     expect(normalizeConfig({ publicAppUrl: 'not a url' }).publicAppUrl).toBeUndefined();
   });
 
-  it('persists a relay token and clears a blank one', () => {
-    expect(normalizeConfig({ relayToken: '  secret-token-secret  ' }).relayToken).toBe(
-      'secret-token-secret'
-    );
-    expect(normalizeConfig({ relayToken: '' }).relayToken).toBeUndefined();
-    expect(normalizeConfig({ relayToken: 'x'.repeat(513) }).relayToken).toBeUndefined();
+  it('drops the retired machine-relay token and session id', () => {
+    const legacy = { relayToken: 'secret-token-secret', relaySessionId: 'zcrs_abcdefghijklmnopqr1234' };
+    const normalized = normalizeConfig(legacy as Partial<AppConfig>);
+    expect(normalized).not.toHaveProperty('relayToken');
+    expect(normalized).not.toHaveProperty('relaySessionId');
   });
 
-  it('persists a relay session id and drops a malformed one', () => {
-    expect(normalizeConfig({ relaySessionId: ' zcrs_abcdefghijklmnopqr1234 ' }).relaySessionId).toBe(
-      'zcrs_abcdefghijklmnopqr1234'
-    );
-    expect(normalizeConfig({ relaySessionId: 'not-a-session' }).relaySessionId).toBeUndefined();
-    expect(normalizeConfig({ relaySessionId: '' }).relaySessionId).toBeUndefined();
-  });
-
-  it('round-trips publicAppUrl and relayToken through setConfig', () => {
+  it('round-trips publicAppUrl through setConfig and never persists the retired relay fields', () => {
     store.setConfig({
       publicAppUrl: 'https://zcc.herokuapp.com/',
-      relayToken: ' relay-token-relay '
-    });
+      relayToken: 'relay-token-relay',
+      relaySessionId: 'zcrs_abcdefghijklmnopqr1234'
+    } as Partial<AppConfig>);
     expect(store.getConfig().publicAppUrl).toBe('https://zcc.herokuapp.com');
-    expect(store.getConfig().relayToken).toBe('relay-token-relay');
-    store.setConfig({ publicAppUrl: undefined, relayToken: '' });
+    expect(store.getConfig()).not.toHaveProperty('relayToken');
+    expect(store.getConfig()).not.toHaveProperty('relaySessionId');
+    store.setConfig({ publicAppUrl: undefined });
     expect(store.getConfig().publicAppUrl).toBeUndefined();
-    expect(store.getConfig().relayToken).toBeUndefined();
   });
 });
 

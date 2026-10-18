@@ -5,10 +5,10 @@ import type { MobileReadySession } from './readiness.js';
 import { ConnectEnrollment, ConnectRequestError, connectRequest, type ConnectFetch } from './connect-account.js';
 import { startMobileGateway } from './gateway.js';
 import type { MobileDeviceStore } from './device-store.js';
-import { MobileConnectionStore, RemovedMobileConnectionError, validateMobileConnection, type MobileConnectionView } from './connection.js';
+import { MobileConnectionStore, RemovedMobileConnectionError, type MobileConnectionView } from './connection.js';
 import { connectRelay, type RelayState } from '../../../../services/mobile-relay/client.mjs';
 
-/** Fixed port the phone and the `mobile:serve` CLI both expect. */
+/** Fixed loopback port of the phone gateway behind the Connect tunnel. */
 export const MOBILE_GATEWAY_PORT = 8785;
 
 export interface MobileBinding {
@@ -45,7 +45,7 @@ type GatewayHandle = Awaited<ReturnType<typeof startMobileGateway>>;
 
 export interface MobileGatewayManagerDeps {
   dataDir?: string;
-  /** File-backed device store (shared with the `mobile:serve` CLI). */
+  /** File-backed device store. */
   devices: MobileDeviceStore;
   /** Loopback product-server origin the gateway proxies to. */
   upstream: string | (() => string);
@@ -94,7 +94,7 @@ export class MobileGatewayManager {
     try {
       const connection = this.connections.read();
       if (connection.mode === 'unconfigured') throw new Error('Connect this computer in Settings → Remote access before enabling phone access.');
-      const gatewayCredential = connection.mode === 'connect' ? randomBytes(32).toString('base64url') : undefined;
+      const gatewayCredential = randomBytes(32).toString('base64url');
       const binding = {
         host: '127.0.0.1', publicUrl: connection.publicUrl!, boundLan: false
       };
@@ -102,21 +102,21 @@ export class MobileGatewayManager {
         upstream: typeof this.deps.upstream === 'function' ? this.deps.upstream() : this.deps.upstream, publicUrl: binding.publicUrl,
         host: binding.host, port: this.port, devices: this.deps.devices,
         signQueuedSend: this.deps.signQueuedSend,
-        ...(gatewayCredential ? { connectGatewayCredential: gatewayCredential } : {}),
-        ...(gatewayCredential && this.deps.dataDir ? { connectInstanceId: readProductInstanceId(this.deps.dataDir) } : {})
+        connectGatewayCredential: gatewayCredential,
+        ...(this.deps.dataDir ? { connectInstanceId: readProductInstanceId(this.deps.dataDir) } : {})
       });
       this.binding = binding;
       this.lastError = null;
-      if (connection.mode === 'relay' || connection.mode === 'connect') this.relay = (this.deps.connectRelay ?? connectRelay)({
-        publicUrl: connection.publicUrl!, token: connection.relayToken!, gatewayPort: this.handle.port,
-        ...(gatewayCredential ? { gatewayCredential, ...(this.deps.dataDir ? { productInstanceId: readProductInstanceId(this.deps.dataDir) } : {}) } : {})
+      this.relay = (this.deps.connectRelay ?? connectRelay)({
+        publicUrl: connection.publicUrl!, token: connection.relayToken!, gatewayPort: this.handle.port, gatewayCredential,
+        ...(this.deps.dataDir ? { productInstanceId: readProductInstanceId(this.deps.dataDir) } : {})
       });
     } catch (error) {
       if (this.handle) await this.handle.close();
       this.handle = null;
       this.binding = null;
       this.lastError = (error as NodeJS.ErrnoException)?.code === 'EADDRINUSE'
-        ? `Port ${this.port} is already in use — is \`pnpm mobile:serve\` running? Stop it, then enable phone access again.`
+        ? `Port ${this.port} is already in use by another process. Stop it, then enable phone access again.`
         : error instanceof Error ? error.message : 'Failed to start the mobile gateway';
       throw new Error(this.lastError);
     }
@@ -134,19 +134,6 @@ export class MobileGatewayManager {
     this.lastError = null;
     if (handle) await handle.close();
     return this.status();
-  }
-
-  configure(input: unknown, enabled: boolean): Promise<MobileGatewayStatus> {
-    return this.serialize(async () => {
-      // A damaged file must not prevent saving a fresh, fully validated setup.
-      let previous;
-      try { previous = this.connections.read(); } catch { /* no secret to preserve */ }
-      const next = validateMobileConnection(input, previous);
-      this.enrollment.cancel();
-      await this.connections.write(next);
-      await this.stopNow();
-      return enabled ? this.startNow() : this.status();
-    });
   }
 
   enroll(address: unknown) { return this.serialize(() => this.enrollment.start(address)); }
@@ -233,14 +220,14 @@ export class MobileGatewayManager {
 
   pair(): MobilePairingPayload | Promise<MobilePairingPayload> {
     if (!this.handle) throw new Error('Enable phone access before pairing a device');
-    if (this.relay && this.relay.state() !== 'connected') throw new Error('Wait for the relay connection before pairing');
+    if (this.relay && this.relay.state() !== 'connected') throw new Error('Wait for the Zana Connect tunnel before pairing');
     const connection = this.connections.read();
     if (connection.mode === 'connect') return connectRequest(connection.accountUrl!, '/machine-code', connection.relayToken, {}, this.deps.connectFetch).then(result => {
       if (this.connections.read() !== connection || !this.handle) throw new Error('Connection changed. Generate a fresh pairing code.');
       if (result.version !== 1 || result.serverUrl !== connection.publicUrl || !/^[\w-]{22}$/.test(result.code) || !Number.isFinite(result.expiresAt) || result.expiresAt <= Date.now()) throw new Error('Invalid pairing response');
       return result as MobilePairingPayload;
     });
-    return this.handle.pair();
+    throw new Error('Connect this computer in Settings → Remote access before pairing a device');
   }
 
   /** Paired devices, secrets already stripped. Readable even while stopped. */
@@ -253,7 +240,7 @@ export class MobileGatewayManager {
         return { id: device.id, label: device.label, createdAt: device.createdAt, expiresAt: 0 };
       });
     });
-    return this.handle ? this.handle.devices() : this.deps.devices.list();
+    return this.deps.devices.list();
   }
 
   /** Revoke a paired device; works whether or not the gateway is running. */
@@ -261,7 +248,7 @@ export class MobileGatewayManager {
     if (typeof id !== 'string' || id.length > 80) throw new Error('Invalid device');
     const connection = this.connections.read();
     if (connection.mode === 'connect') return connectRequest(connection.accountUrl!, '/revoke', connection.relayToken, { kind: 'device', id }, this.deps.connectFetch).then(result => result.revoked === true);
-    return this.handle ? this.handle.revoke(id) : this.deps.devices.revoke(id);
+    return this.deps.devices.revoke(id);
   }
 
   async close(): Promise<void> {

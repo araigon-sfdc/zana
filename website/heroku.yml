@@ -1,10 +1,7 @@
-# Optional Heroku Container Registry deployment for the Zana website + pairing
-# relay. The `web` process MUST run the front door (`node relay/front-door.mjs`),
-# not Next's `server.js` — that override would skip pairing and let
-# `trailingSlash` 308 `/install.sh`.
-#
-# Set ZCC_RELAY_TOKEN in Heroku config (never in the image). The laptop dials
-# `wss://<origin>/_zcc/relay` with the same token.
+# Optional Heroku Container Registry deployment for the Zana website and Zana
+# Connect. The `web` process MUST run the front door (`node relay/front-door.mjs`),
+# not Next's `server.js`: the front door routes Connect laptop hosts and answers
+# retired relay paths such as `/install.sh` without Next's `trailingSlash` 308.
 #
 # Deploy with the Container Registry (recommended — builds locally) OR with
 # `heroku stack:set container` + git push (Heroku builds from this file).
@@ -22,11 +19,9 @@ build:
 run:
   web: node relay/front-door.mjs
 
-# Optional phone access in this same container: set MOBILE_RELAY_TOKEN and
-# MOBILE_RELAY_PUBLIC_URL as runtime config vars, never build args. The mobile
-# token is independent of ZCC_RELAY_TOKEN. Requires one always-on web dyno.
-# Shared account/laptop routing is opt-in with CONNECT_DOMAIN, DATABASE_URL,
-# GitHub OAuth and SESSION_SECRET. It uses this same front door and web dyno;
-# see ../docs/mobile-connect.md for wildcard DNS/TLS and deployment checks.
-# Set PGSSLMODE for the attached Postgres certificate chain; the raw add-on URL
-# alone does not enable TLS in node-postgres. See the TLS section in that doc.
+# Shared account/laptop routing (Zana Connect) is opt-in with CONNECT_DOMAIN,
+# DATABASE_URL, GitHub OAuth and SESSION_SECRET. It uses this same front door and
+# one always-on web dyno; see ../docs/mobile-connect.md for wildcard DNS/TLS and
+# deployment checks. Set PGSSLMODE for the attached Postgres certificate chain;
+# the raw add-on URL alone does not enable TLS in node-postgres. See the TLS
+# section in that doc.

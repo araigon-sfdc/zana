@@ -33,7 +33,6 @@ export const SECTION_SOURCES: Record<SearchSection, readonly string[]> = {
     'views/settings/MachineCard.tsx',
     'views/settings/AddMachineDialog.tsx',
     'views/settings/ConnectCodePairing.tsx',
-    'views/settings/PairingTerminal.tsx',
     'views/settings/RemoteMachineDefaultsList.tsx'
   ],
   connectivity: ['views/settings/ConnectivityView.tsx'],

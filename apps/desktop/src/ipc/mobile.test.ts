@@ -4,7 +4,7 @@ import { IPC } from '@zana-ai/zcc-desktop-contract';
 const fixture = vi.hoisted(() => ({
   handlers: new Map<string, { invoke: (...args: any[]) => any; fallback: (...args: any[]) => any }>(),
   enabled: false,
-  gateway: Object.fromEntries(['enroll', 'pollEnrollment', 'cancelEnrollment', 'disconnectAccount', 'browserAddress', 'redeemComputerCode', 'configure', 'status', 'pair', 'devices', 'revoke'].map(name => [name, vi.fn()]))
+  gateway: Object.fromEntries(['enroll', 'pollEnrollment', 'cancelEnrollment', 'disconnectAccount', 'browserAddress', 'redeemComputerCode', 'status', 'pair', 'devices', 'revoke'].map(name => [name, vi.fn()]))
 }));
 vi.mock('./ctx.js', () => ({ ctx: {
   mobileGateway: fixture.gateway,
@@ -35,9 +35,6 @@ it('registers each mobile operation once and forwards to the main-owned gateway'
     expect(fixture.gateway.pollEnrollment).toHaveBeenLastCalledWith(enabled);
     await fixture.handlers.get(IPC.mobile.disconnectAccount)!.invoke();
     expect(fixture.gateway.disconnectAccount).toHaveBeenLastCalledWith(enabled);
-    const input = { mode: 'relay' };
-    await fixture.handlers.get(IPC.mobile.configure)!.invoke(input);
-    expect(fixture.gateway.configure).toHaveBeenLastCalledWith(input, enabled);
   }
 });
 
@@ -47,7 +44,7 @@ it('returns safe status/read fallbacks and preserves mutation errors', () => {
   expect(fixture.handlers.get(IPC.mobile.devices)!.fallback()).toEqual([]);
   expect(fixture.handlers.get(IPC.mobile.revoke)!.fallback()).toBe(false);
   const error = new Error('gateway unavailable');
-  for (const name of ['enroll', 'pollEnrollment', 'cancelEnrollment', 'disconnectAccount', 'browserAddress', 'redeemComputerCode', 'configure', 'pair'] as const) {
+  for (const name of ['enroll', 'pollEnrollment', 'cancelEnrollment', 'disconnectAccount', 'browserAddress', 'redeemComputerCode', 'pair'] as const) {
     expect(() => fixture.handlers.get(IPC.mobile[name])!.fallback(error)).toThrow(error);
   }
 });

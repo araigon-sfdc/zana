@@ -6,7 +6,6 @@ import { resolve } from 'node:path';
 import { zccBrowserBootstrapPlugin } from './apps/app/vite-plugin-browser-bootstrap';
 import { pluginAssetDevProxyPlugin, productDevProxy } from './apps/app/vite-product-proxy';
 import { DEFAULT_SERVER_PORT, serverPortFromEnv } from './apps/server/src/http/ports';
-import { assertRelayBake, isReleaseBuild } from './scripts/relay-bake';
 
 function pairingEnvFile(): Record<string, string> {
   return loadEnv(process.env.NODE_ENV === 'production' ? 'production' : 'development', __dirname, '');
@@ -26,10 +25,6 @@ function bundledAppUrl(): string {
     /* operator file is optional */
   }
   return '';
-}
-
-function bundledRelayToken(): string {
-  return process.env.ZCC_RELAY_TOKEN?.trim() || pairingEnvFile().ZCC_RELAY_TOKEN?.trim() || '';
 }
 
 function bundledPosthogApiKey(): string {
@@ -165,19 +160,17 @@ const mainOutput = {
 };
 
 export default defineConfig(({ command }) => {
-  assertRelayBake({ releaseBuild: isReleaseBuild(), appUrl: bundledAppUrl(), relayToken: bundledRelayToken() });
   // Dev watchers and production/E2E builds must never empty each other's output.
   const out = process.env.ZCC_BUILD_OUT_DIR || resolve(__dirname, command === 'serve' ? 'out-dev' : 'out');
   return {
   main: {
-    // Official releases set ZCC_APP_URL + ZCC_RELAY_TOKEN + ZCC_POSTHOG_API_KEY
-    // in the build env so packaged laptops can dial the Heroku pairing door and
-    // default PostHog without Settings. Local/dev falls back to .env then the
+    // Official releases set ZCC_APP_URL + ZCC_POSTHOG_API_KEY in the build env
+    // so packaged laptops know their public origin and default PostHog without
+    // Settings. Local/dev falls back to .env then the
     // repo public-app-url file. Runtime process.env still wins. Never define
     // these on the renderer.
     define: {
       __ZCC_BUNDLED_APP_URL__: JSON.stringify(bundledAppUrl()),
-      __ZCC_BUNDLED_RELAY_TOKEN__: JSON.stringify(bundledRelayToken()),
       __ZCC_BUNDLED_POSTHOG_API_KEY__: JSON.stringify(bundledPosthogApiKey()),
       __ZCC_BUNDLED_INSTALL_SCRIPT__: JSON.stringify(readFileSync(resolve(__dirname, 'apps/server/src/assets/install-machine.sh'), 'utf8'))
     },

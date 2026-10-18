@@ -18,11 +18,6 @@ export function registerMobileIpc(): void {
   ctx.safeHandle(IPC.mobile.browserAddress, () => ctx.mobileGateway.browserAddress(), err => { throw err; });
   ctx.safeHandle(IPC.mobile.redeemComputerCode, (address: unknown, code: unknown) => ctx.mobileGateway.redeemComputerCode(address, code), err => { throw err; });
   ctx.safeHandle(
-    IPC.mobile.configure,
-    async (input: unknown) => { await ctx.mobileGateway.configure(input, store.getConfig().mobileGatewayEnabled === true); },
-    (err) => { throw err; }
-  );
-  ctx.safeHandle(
     IPC.mobile.status,
     () => ctx.mobileGateway.status(),
     () => ({ running: false, publicUrl: null, host: null, port: null, boundLan: false, error: null })

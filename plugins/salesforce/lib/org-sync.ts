@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { lstat, mkdir, readdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { diffStats, lineDiff } from './line-diff.js';
+import { cliResult, removeTemp, retrieveInto, sourceApiVersion, tempProject, type RetrievedFile } from './org-retrieve.js';
 import {
-  SCOPE_TYPES, SYNC_FETCH_MAX, SYNC_TYPES,
-  type SyncCheck, type SyncComponent, type SyncDiff, type SyncJob, type SyncPlanFile, type SyncScope, type SyncState, type SyncType,
+  SCOPE_TYPES, SYNC_FETCH_MAX, SYNC_TYPES, TARGET_TYPES,
+  type SyncAgent, type SyncCheck, type SyncComponent, type SyncDiff, type SyncJob, type SyncPlanFile, type SyncScope, type SyncState, type SyncType,
 } from './org-sync-contract.js';
 import type { PublicOrgView, SalesforceDeps } from './types.js';
 
@@ -21,13 +21,29 @@ export interface OrgSyncDeps {
   now?(): number;
 }
 
-/** Where each type lives inside a package directory, and whether a component is a folder. */
+/**
+ * Where each listed type lives inside a package directory, and whether a component is a folder. Only `check` uses it,
+ * to tell which org components the project already has; a fetch places files from the CLI's own retrieve result.
+ */
 const LAYOUT: Record<SyncType, { folder: string; bundle: boolean; ext?: string }> = {
   AiAuthoringBundle: { folder: 'aiAuthoringBundles', bundle: true },
   ApexClass: { folder: 'classes', bundle: false, ext: '.cls' },
   ApexTrigger: { folder: 'triggers', bundle: false, ext: '.trigger' },
   LightningComponentBundle: { folder: 'lwc', bundle: true },
+  Flow: { folder: 'flows', bundle: false, ext: '.flow' },
+  GenAiPromptTemplate: { folder: 'genAiPromptTemplates', bundle: false, ext: '.genAiPromptTemplate' },
 };
+/** Types only the Metadata API lists; the rest come from SOQL. */
+const LISTED = new Set<SyncType>(['AiAuthoringBundle', 'GenAiPromptTemplate']);
+/** How SOQL lists a type: the object, its name field, and whether `LastModifiedBy` is already the name. */
+const SOQL: Partial<Record<SyncType, { from: string; field: string; tooling?: boolean; byText?: boolean }>> = {
+  ApexClass: { from: 'ApexClass', field: 'Name' },
+  ApexTrigger: { from: 'ApexTrigger', field: 'Name' },
+  LightningComponentBundle: { from: 'LightningComponentBundle', field: 'DeveloperName', tooling: true },
+  Flow: { from: 'FlowDefinitionView', field: 'ApiName', byText: true },
+};
+/** Most components one agent check names per type, so its SOQL `IN` lists stay short. */
+const AGENT_REFS = 500;
 const NAME = /^[A-Za-z][A-Za-z0-9_]{0,254}$/;
 const VERSIONED = /^(.*?)_([1-9][0-9]*)$/;
 const BATCH = 1000;
@@ -44,6 +60,7 @@ type Mark = { at: string | null; files: Record<string, string> };
 type Marks = Record<string, Mark>;
 type OrgRow = { name: string; at: string | null; by: string | null };
 type Local = { folder: string };
+type Only = Map<SyncType, Set<string>>;
 type PlanEntry = SyncPlanFile & { source: string; target: string; localSha: string | null; orgSha: string };
 type Job = {
   root: string;
@@ -100,6 +117,16 @@ export function componentName(type: SyncType, rest: string): string | null {
   return NAME.test(bare) ? bare : null;
 }
 
+/** `Type:Name` keys of the components an agent script's actions call, in first-seen order. */
+export function agentReferences(source: string): string[] {
+  const keys = new Set<string>();
+  for (const [, scheme, name] of source.matchAll(/\b([A-Za-z]+):\/\/([A-Za-z][A-Za-z0-9_]*)/g)) {
+    const type = TARGET_TYPES[scheme!];
+    if (type && NAME.test(name!)) keys.add(`${type}:${name}`);
+  }
+  return [...keys];
+}
+
 /** Agent bundle versions are `<Agent>_<n>`; the bare name is the local working copy. */
 export function agentVersion(name: string): { base: string; version: number } {
   const match = name.match(VERSIONED);
@@ -129,22 +156,7 @@ export function renameBundle(rest: string, from: string, to: string): string {
   return [to, ...more, file.startsWith(`${from}.`) ? to + file.slice(from.length) : file].join('/');
 }
 
-export function manifest(keys: string[], apiVersion: string): string {
-  const byType = new Map<string, string[]>();
-  for (const key of keys) {
-    const [type, name] = key.split(':') as [string, string];
-    byType.set(type, [...(byType.get(type) ?? []), name]);
-  }
-  const types = [...byType].map(([type, names]) => `  <types>\n${names.map(name => `    <members>${name}</members>`).join('\n')}\n    <name>${type}</name>\n  </types>`).join('\n');
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<Package xmlns="http://soap.sforce.com/2006/04/metadata">\n${types}\n  <version>${apiVersion}</version>\n</Package>\n`;
-}
-
-function cliResult(result: Awaited<ReturnType<SalesforceDeps['execSf']>>, fallback: string): unknown {
-  let payload: Record<string, unknown>;
-  try { payload = record(JSON.parse(result.stdout)); } catch { throw Error('Salesforce CLI returned incomplete output. Check the CLI connection and retry.'); }
-  if (result.code !== 0 || payload.status !== 0) throw Error(typeof payload.message === 'string' ? payload.message.slice(0, 400) : fallback);
-  return payload.result;
-}
+export { manifest } from './org-retrieve.js';
 
 /**
  * Fetch latest. A check compares org modification dates with the last fetch recorded here.
@@ -165,32 +177,66 @@ export class OrgSyncService {
 
   async check(projectRoot: string, scope: SyncScope, signal?: AbortSignal): Promise<SyncCheck> {
     const root = await this.root(projectRoot);
-    const types = SCOPE_TYPES[scope];
     const org = await this.deps.connect();
-    const [local, listed] = await Promise.all([this.localIndex(root, types), Promise.all(types.map(type => this.list(type, org, signal)))]);
+    return this.compare(root, org, scope, SCOPE_TYPES[scope], undefined, signal);
+  }
+
+  /**
+   * One agent and what it depends on: the bundle, the newest org version of it when that is newer than every
+   * local version, and the Apex, Flows and prompt templates its actions call. References come from the local file.
+   */
+  async checkAgent(projectRoot: string, agent: string, signal?: AbortSignal): Promise<SyncCheck> {
+    if (!NAME.test(agent)) throw Error('Choose an agent bundle name.');
+    const root = await this.root(projectRoot);
+    const bundles = (await this.localIndex(root, ['AiAuthoringBundle'])).get('AiAuthoringBundle')!;
+    const local = bundles.get(agent);
+    if (!local) throw Error(`${agent} is not in this project. Open a local agent to fetch what it uses.`);
+    const source = (await readOptional(join(local.folder, agent, `${agent}.agent`)))?.toString('utf8') ?? '';
+    const org = await this.deps.connect();
+    const only: Only = new Map();
+    for (const key of agentReferences(source)) {
+      const [type, name] = key.split(':') as [SyncType, string];
+      const names = only.get(type) ?? new Set<string>();
+      if (names.size < AGENT_REFS) only.set(type, names.add(name));
+    }
+    only.set('AiAuthoringBundle', new Set([agent]));
+    return this.compare(root, org, 'all', SYNC_TYPES.filter(type => only.has(type)), only, signal, agent);
+  }
+
+  /** Org rows against local files and the last fetch. `only` narrows each type to names; `agent` also keeps its newest org version. */
+  private async compare(root: string, org: PublicOrgView, scope: SyncScope, types: readonly SyncType[], only: Only | undefined, signal: AbortSignal | undefined, agent?: string): Promise<SyncCheck> {
+    const [local, listed] = await Promise.all([this.localIndex(root, types), Promise.all(types.map(type => this.list(type, org, signal, only?.get(type))))]);
     const components: SyncComponent[] = [];
+    const current: SyncAgent['current'] = [];
     const counts: SyncCheck['counts'] = { changed: 0, conflict: 0, unknown: 0, new: 0, deleted: 0, current: 0 };
     const dates = new Map<string, string | null>();
+    const seen = new Set<string>();
     const add = (type: SyncType, row: OrgRow, state: SyncState, latest = false) => {
       counts[state]++;
       components.push({ key: `${type}:${row.name}`, type, fullName: row.name, state, modifiedAt: row.at, modifiedBy: row.by, ...(latest ? { latest } : {}) });
     };
     for (const [index, type] of types.entries()) {
-      const rows = listed[index]!;
       const marks = await this.marks(org.orgId, type);
       const here = local.get(type)!;
       const inOrg = new Set<string>();
-      const newest = type === 'AiAuthoringBundle' ? newestVersions(rows, here) : new Set<string>();
+      const newest = type === 'AiAuthoringBundle' ? newestVersions(listed[index]!, here) : new Set<string>();
+      const wanted = only?.get(type);
+      const base = agent === undefined ? undefined : agentVersion(agent).base;
+      const rows = listed[index]!.filter(row => !wanted || wanted.has(row.name) || (newest.has(row.name) && agentVersion(row.name).base === base));
       for (const row of rows) {
         inOrg.add(row.name);
+        seen.add(`${type}:${row.name}`);
         dates.set(`${type}:${row.name}`, row.at);
         const mark = marks[row.name];
         if (!here.has(row.name)) add(type, row, 'new', newest.has(row.name));
         else if (!mark) add(type, row, 'unknown');
-        else if (mark.at && row.at && Date.parse(row.at) <= Date.parse(mark.at)) counts.current++;
+        else if (mark.at && row.at && Date.parse(row.at) <= Date.parse(mark.at)) {
+          counts.current++;
+          if (only) current.push({ key: `${type}:${row.name}`, type, fullName: row.name, modifiedAt: row.at, modifiedBy: row.by });
+        }
         else add(type, row, await locallyChanged(root, mark) ? 'conflict' : 'changed');
       }
-      for (const name of Object.keys(marks)) if (!inOrg.has(name) && here.has(name)) add(type, { name, at: null, by: null }, 'deleted');
+      for (const name of Object.keys(marks)) if (!inOrg.has(name) && here.has(name) && (!wanted || wanted.has(name))) add(type, { name, at: null, by: null }, 'deleted');
     }
     const key = `${root}\0${org.orgId}`;
     this.checks.delete(key);
@@ -198,7 +244,11 @@ export class OrgSyncService {
     while (this.checks.size > CHECK_CACHE) this.checks.delete(this.checks.keys().next().value!);
     const rank: Record<SyncState, number> = { conflict: 0, changed: 1, new: 2, unknown: 3, deleted: 4 };
     components.sort((a, b) => rank[a.state] - rank[b.state] || Number(b.latest ?? false) - Number(a.latest ?? false) || (b.modifiedAt ?? '').localeCompare(a.modifiedAt ?? '') || a.key.localeCompare(b.key));
-    return { org: { alias: org.alias, orgId: org.orgId }, scope, checkedAt: (this.deps.now ?? Date.now)(), components: components.slice(0, RESULT_ROWS), counts, truncated: components.length > RESULT_ROWS };
+    const result: SyncCheck = { org: { alias: org.alias, orgId: org.orgId }, scope, checkedAt: (this.deps.now ?? Date.now)(), components: components.slice(0, RESULT_ROWS), counts, truncated: components.length > RESULT_ROWS };
+    if (agent === undefined || !only) return result;
+    const missing = [...only].filter(([type]) => type !== 'AiAuthoringBundle')
+      .flatMap(([type, names]) => [...names].filter(name => !seen.has(`${type}:${name}`) && !local.get(type)!.has(name)).map(name => `${type}:${name}`));
+    return { ...result, agent: { name: agent, current, missing } };
   }
 
   async start(projectRoot: string, input: unknown): Promise<{ jobId: string }> {
@@ -287,30 +337,20 @@ export class OrgSyncService {
 
   private async fetch(job: Job, keys: string[]): Promise<SyncJob> {
     const { signal } = job.controller;
-    const temporary = job.temporary = await mkdtemp(join(tmpdir(), 'zcc-sf-sync-'));
-    let version: unknown;
-    try { version = record(JSON.parse(await readFile(join(job.root, 'sfdx-project.json'), 'utf8'))).sourceApiVersion; } catch { /* the org's version */ }
-    const apiVersion = typeof version === 'string' && /^[0-9]{2,3}\.0$/.test(version) ? version : job.org.apiVersion;
-    await mkdir(join(temporary, 'force-app'));
-    await writeFile(join(temporary, 'sfdx-project.json'), JSON.stringify({ packageDirectories: [{ path: 'force-app', default: true }], sourceApiVersion: apiVersion }), { mode: 0o600 });
+    let text: string | undefined;
+    try { text = await readFile(join(job.root, 'sfdx-project.json'), 'utf8'); } catch { /* the org's version */ }
+    const apiVersion = sourceApiVersion(text) ?? job.org.apiVersion;
+    const temporary = job.temporary = await tempProject(apiVersion, 'zcc-sf-sync-');
+    const files: RetrievedFile[] = [];
     for (let index = 0; index < keys.length; index += BATCH) {
       const batch = keys.slice(index, index + BATCH);
-      await writeFile(join(temporary, 'package.xml'), manifest(batch, apiVersion), { mode: 0o600 });
       signal.throwIfAborted();
-      const result = record(cliResult(await this.deps.execSf(
-        ['project', 'retrieve', 'start', '--manifest', 'package.xml', '--target-org', job.org.alias, '--json', '--wait', '15'],
-        { cwd: temporary, timeoutMs: RETRIEVE_TIMEOUT, signal },
-      ), 'Salesforce could not retrieve the metadata. Check your org access and retry.'));
-      signal.throwIfAborted();
-      if (result.success === false || result.done === false) throw Error('Salesforce did not complete the retrieval. Retry after it finishes.');
-      for (const row of Array.isArray(result.fileProperties) ? result.fileProperties.map(record) : []) {
-        const key = `${row.type}:${String(row.fullName ?? '').split('/')[0]}`;
-        const at = iso(row.lastModifiedDate);
-        if (at && !job.dates.get(key)) job.dates.set(key, at);
-      }
+      const result = await retrieveInto(this.deps.execSf, temporary, batch, { alias: job.org.alias, apiVersion, timeoutMs: RETRIEVE_TIMEOUT, signal });
+      files.push(...result.files);
+      for (const [key, at] of result.modified) if (at && !job.dates.get(key)) job.dates.set(key, at);
       if (job.result.state === 'running') job.result = { ...job.result, done: Math.min(keys.length, index + batch.length) };
     }
-    const plan = await this.plan(job, new Set(keys), join(temporary, 'force-app', 'main', 'default'));
+    const plan = await this.plan(job, new Set(keys), files);
     signal.throwIfAborted();
     job.plan = plan;
     const found = new Set(plan.map(file => file.key));
@@ -323,25 +363,32 @@ export class OrgSyncService {
     };
   }
 
-  private async plan(job: Job, keys: Set<string>, retrieved: string): Promise<PlanEntry[]> {
-    const types = [...new Set([...keys].map(key => key.split(':')[0] as SyncType))];
-    const local = await this.localIndex(job.root, types);
+  /** Each retrieved file goes where the project already keeps that component, else under the default package directory. */
+  private async plan(job: Job, keys: Set<string>, files: RetrievedFile[]): Promise<PlanEntry[]> {
+    const aliases = bareVersions(files.filter(file => file.type === 'AiAuthoringBundle').map(file => file.fullName), keys);
+    const byKey = new Map<string, Array<{ source: string; rest: string }>>();
+    for (const file of files) {
+      let name = file.fullName.split('/')[0]!;
+      let rest = file.rest;
+      const alias = file.type === 'AiAuthoringBundle' ? aliases.get(name) : undefined;
+      if (alias) {
+        const [folder, ...more] = rest.split('/');
+        rest = `${folder}/${renameBundle(more.join('/'), name, alias)}`;
+        name = alias;
+      }
+      const key = `${file.type}:${name}`;
+      if (keys.has(key)) byKey.set(key, [...(byKey.get(key) ?? []), { source: file.path, rest }]);
+    }
+    const locate = await localLocator(job.root);
     const target = await defaultFolder(job.root);
     const plan: PlanEntry[] = [];
     let measured = 0;
-    for (const type of types) {
+    for (const [key, parts] of byKey) {
+      const [type, name] = key.split(':') as [SyncType, string];
       const marks = await this.marks(job.org.orgId, type);
-      const folder = join(retrieved, LAYOUT[type].folder);
-      const files = (await listFiles(folder)).map(source => ({ source, rest: posix(folder, source) }));
-      const aliases = type === 'AiAuthoringBundle' ? bareVersions(files.map(file => componentName(type, file.rest)), keys) : new Map<string, string>();
-      for (const { source, rest: retrieved } of files) {
-        let rest = retrieved;
-        let name = componentName(type, rest);
-        const alias = name ? aliases.get(name) : undefined;
-        if (name && alias) { rest = renameBundle(rest, name, alias); name = alias; }
-        const key = `${type}:${name}`;
-        if (!name || !keys.has(key)) continue;
-        const destination = resolve(local.get(type)!.get(name)?.folder ?? join(target, LAYOUT[type].folder), rest);
+      const base = locate(parts.map(part => part.rest)) ?? target;
+      for (const { source, rest } of parts) {
+        const destination = resolve(base, rest);
         if (!destination.startsWith(job.root + sep)) continue;
         const path = posix(job.root, destination);
         // An unreadable local file (a symlink) is a conflict; apply refuses to write through it.
@@ -403,24 +450,28 @@ export class OrgSyncService {
     return index;
   }
 
-  private async list(type: SyncType, org: PublicOrgView, signal?: AbortSignal): Promise<OrgRow[]> {
-    if (type === 'AiAuthoringBundle') {
-      const rows = cliResult(await this.deps.execSf(['org', 'list', 'metadata', '--metadata-type', type, '--target-org', org.alias, '--json'], { timeoutMs: 60_000, signal }), 'Salesforce could not list agents. Check your org access and retry.');
+  private async list(type: SyncType, org: PublicOrgView, signal?: AbortSignal, names?: Set<string>): Promise<OrgRow[]> {
+    if (names && !names.size) return [];
+    if (LISTED.has(type)) {
+      const rows = cliResult(await this.deps.execSf(['org', 'list', 'metadata', '--metadata-type', type, '--target-org', org.alias, '--json'], { timeoutMs: 60_000, signal }), `Salesforce could not list ${type === 'AiAuthoringBundle' ? 'agents' : 'prompt templates'}. Check your org access and retry.`);
       return (Array.isArray(rows) ? rows : []).slice(0, LIST_ROWS).map(record)
         .filter(row => !row.namespacePrefix && row.manageableState !== 'installed' && typeof row.fullName === 'string' && NAME.test(row.fullName))
         .map(row => ({ name: String(row.fullName), at: iso(row.lastModifiedDate), by: typeof row.lastModifiedByName === 'string' ? row.lastModifiedByName : null }));
     }
     // SOQL takes seconds where listMetadata takes a minute on orgs with many managed classes.
-    const field = type === 'LightningComponentBundle' ? 'DeveloperName' : 'Name';
-    let page = await this.deps.query(`SELECT ${field}, LastModifiedDate, LastModifiedBy.Name FROM ${type} WHERE NamespacePrefix = null ORDER BY ${field}`, { tooling: type === 'LightningComponentBundle', signal });
+    const { from, field, tooling = false, byText = false } = SOQL[type]!;
+    const by = byText ? 'LastModifiedBy' : 'LastModifiedBy.Name';
+    // Names passed NAME, so they are safe inside the quoted IN list.
+    const filter = names ? ` AND ${field} IN (${[...names].map(name => `'${name}'`).join(', ')})` : '';
+    let page = await this.deps.query(`SELECT ${field}, LastModifiedDate, ${by} FROM ${from} WHERE NamespacePrefix = null${filter} ORDER BY ${field}`, { tooling, signal });
     const rows = [...(page.records ?? [])];
     while (!page.done && page.nextRecordsUrl && rows.length < LIST_ROWS) {
       page = await this.deps.queryMore(page.nextRecordsUrl, { signal });
       rows.push(...(page.records ?? []));
     }
     return rows.slice(0, LIST_ROWS).filter(row => typeof row[field] === 'string' && NAME.test(row[field] as string)).map(row => {
-      const by = record(row.LastModifiedBy).Name;
-      return { name: row[field] as string, at: iso(row.LastModifiedDate), by: typeof by === 'string' ? by : null };
+      const name = byText ? row.LastModifiedBy : record(row.LastModifiedBy).Name;
+      return { name: row[field] as string, at: iso(row.LastModifiedDate), by: typeof name === 'string' ? name : null };
     });
   }
 
@@ -472,7 +523,7 @@ export class OrgSyncService {
     const temporary = job.temporary;
     job.temporary = undefined;
     job.plan = undefined;
-    if (temporary) await rm(temporary, { recursive: true, force: true });
+    await removeTemp(temporary);
   }
 }
 
@@ -499,27 +550,47 @@ async function locallyChanged(root: string, mark: Mark): Promise<boolean> {
   return false;
 }
 
+/**
+ * Finds where the project keeps a component from its retrieved paths (`classes/Foo.cls`, `lwc/card/card.js`):
+ * the first package-directory file ending in one of them, default package first. Type-agnostic, so new metadata
+ * types need no folder table.
+ */
+export async function localLocator(root: string): Promise<(rests: string[]) => string | undefined> {
+  const byName = new Map<string, string[]>();
+  let entries = 0;
+  const walk = async (dir: string, depth: number): Promise<void> => {
+    if (depth > 16) return;
+    let children;
+    try { children = await readdir(dir, { withFileTypes: true }); } catch { return; }
+    for (const child of children) {
+      if (++entries > WALK_ENTRIES) throw Error('This project has too many files to compare. Narrow its package directories.');
+      if (child.name.startsWith('.') || child.name === 'node_modules') continue;
+      const path = join(dir, child.name);
+      if (child.isDirectory()) await walk(path, depth + 1);
+      else if (child.isFile()) byName.set(child.name, [...(byName.get(child.name) ?? []), path]);
+    }
+  };
+  for (const dir of packageDirectories(await readFile(join(root, 'sfdx-project.json'), 'utf8'))) {
+    let real: string;
+    try { real = await realpath(resolve(root, dir)); } catch { continue; }
+    if (!inside(root, real)) throw Error('A package directory is outside this project.');
+    await walk(real, 0);
+  }
+  return rests => {
+    for (const rest of rests) {
+      const tail = sep + rest.split('/').join(sep);
+      const match = byName.get(basename(rest))?.find(path => path.endsWith(tail));
+      if (match) return match.slice(0, -tail.length);
+    }
+    return undefined;
+  };
+}
+
 async function defaultFolder(root: string): Promise<string> {
   const [first] = packageDirectories(await readFile(join(root, 'sfdx-project.json'), 'utf8'));
   const path = resolve(root, first!);
   if (!path.startsWith(root + sep)) throw Error('The default package directory is outside this project.');
   return join(path, 'main', 'default');
-}
-
-async function listFiles(dir: string): Promise<string[]> {
-  const out: string[] = [];
-  const walk = async (path: string, depth: number) => {
-    if (depth > 8) return;
-    let children;
-    try { children = await readdir(path, { withFileTypes: true }); } catch { return; }
-    for (const child of children) {
-      const next = join(path, child.name);
-      if (child.isDirectory()) await walk(next, depth + 1);
-      else if (child.isFile()) out.push(next);
-    }
-  };
-  await walk(dir, 0);
-  return out;
 }
 
 /** Atomic replace inside the project: unique temp file, then rename over the destination. */

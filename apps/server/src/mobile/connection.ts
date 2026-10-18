@@ -1,7 +1,7 @@
 import { readFileSync, statSync } from 'node:fs';
 import { writeSecretFile } from '@zana-ai/zcc-secret-storage';
 
-export type MobileConnectionMode = 'unconfigured' | 'relay' | 'connect';
+export type MobileConnectionMode = 'unconfigured' | 'connect';
 export interface MobileConnectionInput { mode: MobileConnectionMode; publicUrl?: string; relayToken?: string; accountUrl?: string; serverId?: string }
 export interface MobileConnectionView { mode: MobileConnectionMode; publicUrl?: string; hasRelayToken: boolean; accountUrl?: string }
 
@@ -11,28 +11,29 @@ export class RemovedMobileConnectionError extends Error {
   }
 }
 
-export function validateMobileConnection(input: unknown, previous?: MobileConnectionInput, managed = false): MobileConnectionInput {
+/** A connection saved by the retired Heroku phone relay; it loads as unconfigured. */
+export class RetiredRelayConnectionError extends Error {
+  constructor() {
+    super('Heroku relay connections are no longer supported. Sign in to Zana Connect in Settings → Remote access.');
+  }
+}
+
+export function validateMobileConnection(input: unknown): MobileConnectionInput {
   if (!input || typeof input !== 'object') throw new Error('Choose a phone connection method');
   const oldMode = (input as { mode?: unknown }).mode;
   if (oldMode === 'tailscale' || oldMode === 'local') throw new RemovedMobileConnectionError(oldMode);
+  if (oldMode === 'relay') throw new RetiredRelayConnectionError();
   const candidate = input as MobileConnectionInput;
-  if (managed && candidate.mode === 'unconfigured') return { mode: 'unconfigured' };
-  if (!['relay', ...(managed ? ['connect'] : [])].includes(candidate.mode)) throw new Error('Unknown phone connection method');
+  if (candidate.mode === 'unconfigured') return { mode: 'unconfigured' };
+  if (candidate.mode !== 'connect') throw new Error('Unknown phone connection method');
   if (typeof candidate.publicUrl !== 'string' || candidate.publicUrl.length > 2048) throw new Error('Enter a valid HTTPS server address');
   let url: URL;
   try { url = new URL(candidate.publicUrl ?? ''); } catch { throw new Error('Enter a valid HTTPS server address'); }
   if (url.origin.length > 2048 || url.protocol !== 'https:' || url.username || url.password || url.pathname !== '/' || url.search || url.hash) throw new Error('Use an HTTPS origin without a path or credentials');
-  const publicUrl = url.origin;
-  if (candidate.mode === 'connect') {
-    const account = new URL(candidate.accountUrl ?? '');
-    if (account.protocol !== 'https:' || account.origin !== candidate.accountUrl || !/^[\w-]{1,64}$/.test(candidate.serverId ?? '') || !/^[\w-]{43}$/.test(candidate.relayToken ?? '')) throw new Error('Invalid Connect enrollment');
-    return { mode: 'connect', publicUrl, relayToken: candidate.relayToken, accountUrl: account.origin, serverId: candidate.serverId };
-  }
-  const relayToken = candidate.relayToken === undefined || candidate.relayToken === ''
-    ? previous?.mode === 'relay' && previous.publicUrl === publicUrl ? previous.relayToken : undefined
-    : candidate.relayToken;
-  if (typeof relayToken !== 'string' || !/^[A-Za-z0-9_-]{43,128}$/.test(relayToken)) throw new Error('Enter the relay secret (43–128 URL-safe characters)');
-  return { mode: 'relay', publicUrl, relayToken };
+  let account: URL;
+  try { account = new URL(candidate.accountUrl ?? ''); } catch { throw new Error('Invalid Connect enrollment'); }
+  if (account.protocol !== 'https:' || account.origin !== candidate.accountUrl || !/^[\w-]{1,64}$/.test(candidate.serverId ?? '') || !/^[\w-]{43}$/.test(candidate.relayToken ?? '')) throw new Error('Invalid Connect enrollment');
+  return { mode: 'connect', publicUrl: url.origin, relayToken: candidate.relayToken, accountUrl: account.origin, serverId: candidate.serverId };
 }
 
 /** Small private main-owned file; never included in AppConfig or status projections. */
@@ -44,10 +45,11 @@ export class MobileConnectionStore {
     if (this.path) {
       try {
         if (statSync(this.path).size > 4096) throw new Error('Phone connection configuration is too large');
-        this.value = validateMobileConnection(JSON.parse(readFileSync(this.path, 'utf8')), undefined, true);
+        this.value = validateMobileConnection(JSON.parse(readFileSync(this.path, 'utf8')));
         return this.value;
       } catch (error) {
         if (error instanceof RemovedMobileConnectionError) throw error;
+        if (error instanceof RetiredRelayConnectionError) return { mode: 'unconfigured' };
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new Error('Could not read phone connection configuration');
       }
     }

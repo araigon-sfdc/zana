@@ -51,6 +51,7 @@ import { HOST_ACTIVE_WORK_DISCONNECT_GRACE_MS } from '../services/threads/conver
 import { retryDueConversationSends, wakeLapsedEditHolds } from '../services/threads/conversation-deferred-messages.js';
 import { startDeferredRetryLoop } from '../services/threads/deferred-retry-loop.js';
 import { disposeLocalHostDaemon } from '../services/hosts/host-relaunch.js';
+import { disposeEnvironmentRetireTimers } from '../services/environments/environment-cleanup.js';
 import { createHostHubRemoteEnvironment, type RemoteEnvironmentService } from '../services/hosts/remote-environment.js';
 import { startConversationHistoryMaintenance } from '../services/threads/conversation-history-maintenance.js';
 import { PersistentTerminalSessions } from './persistent-terminal-sessions.js';
@@ -140,7 +141,6 @@ export interface ProductHttpContext {
   peerLinkDirectory?: import('../services/hosts/peer-link-view.js').PeerLinkDirectory;
   /** Plugin-reported per-link state notes shown by the core Peers hub. In memory, bounded. */
   peerLinkNotes?: PluginLinkNotes;
-  pairingRelay?: import('./pairing-relay-controller.js').PairingRelayHandle;
   /**
    * Optional host-injected Team verbs. Product HTTP validates bounded wire
    * shape; Electron main authorizes team/project/persona and mutations.
@@ -587,6 +587,7 @@ export function createProductHttpContext(
       options.peerKeyProvider?.dispose?.();
       closeThreadReads(dataDir); closeQueuedMessages(dataDir);
       disposePreviews(ctx);
+      disposeEnvironmentRetireTimers(ctx);
       stopHistoryMaintenance();
       ctx.cliCallbacks?.dispose();
       stopRetries();

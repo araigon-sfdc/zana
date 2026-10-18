@@ -138,13 +138,11 @@ export function createConfigStore(
         delete next[key];
       }
     }
-    for (const key of ['publicAppUrl', 'relayToken', 'relaySessionId'] as const) {
-      if (Object.prototype.hasOwnProperty.call(patch, key) && !patch[key]) {
-        delete next[key];
-      }
-      if (Object.prototype.hasOwnProperty.call(normalizedPatch, key) && !normalizedPatch[key]) {
-        delete next[key];
-      }
+    if (Object.prototype.hasOwnProperty.call(patch, 'publicAppUrl') && !patch.publicAppUrl) {
+      delete next.publicAppUrl;
+    }
+    if (Object.prototype.hasOwnProperty.call(normalizedPatch, 'publicAppUrl') && !normalizedPatch.publicAppUrl) {
+      delete next.publicAppUrl;
     }
     if (next.defaultHarness && !deps.harnessEnabled(next, next.defaultHarness)) {
       delete next.defaultHarness;

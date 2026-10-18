@@ -1,52 +1,24 @@
-# Zana Mobile Relay on Heroku
+# Mobile relay transport
 
-A standalone Node service for **one computer per Heroku app, on exactly one web dyno**. It forwards HTTP and WebSockets to Zana's authenticated mobile gateway through an outbound desktop connection. The computer still runs all agents and owns pairing credentials. It must stay awake and online.
+Shared tunnel modules for [Zana Connect](../../docs/mobile-connect.md). The computer opens one outbound, authenticated WebSocket to the Connect gateway. HTTP and WebSocket traffic for the phone gateway and shared previews is multiplexed over it. The phone gateway and the product server stay on loopback.
 
-The relay terminates HTTPS and can see traffic. Use an app/account you trust. This is not end-to-end encryption. No prompts, cookies, tokens, request paths or bodies are logged by this service. Heroku's router still produces its normal access logs.
+This directory is not a deployable service. The one-computer Heroku relay that `MOBILE_RELAY_TOKEN` authenticated has been retired; saved desktop connections to it load as unconfigured until the computer signs in to Zana Connect.
 
-This is a legacy backend compatibility service. Current Zana Mobile uses GitHub
-sign-in through [Zana Connect](../../docs/mobile-connect.md); desktop Phone
-settings no longer offer manual relay URLs or QR pairing.
+| Module | Used by |
+| --- | --- |
+| `client.mjs` | Desktop tunnel (`apps/server/src/mobile/manager.ts`) and the host-daemon preview tunnel |
+| `protocol.mjs` | Frame encoding and transfer limits on both ends of the tunnel |
+| `machine-routes.mjs` | Routes the gateway accepts or blocks for machine traffic ([shared-instance contracts](../../docs/shared-instance-contracts.md)) |
+| `preview-policy.mjs`, `protected-ports.mjs` | Header filtering and port rules for [shared previews](../../docs/shared-previews.md) |
+| `server.mjs` | The relay end of the tunnel. Tests here and `e2e/mobile-relay-upload.spec.ts` use it as the in-process peer of `client.mjs`. `website/scripts/sync-mobile-relay.mjs` still copies it into the website front door until that deployment is cleaned up. |
 
-## Deploy
+## Transport behavior
 
-For the existing Zana website/Heroku app, use the integrated deployment in
-[website/README.md](../../website/README.md#mobile-relay-in-this-docker-app).
-It keeps the website and host pairing service on the same container. The
-standalone deployment below remains available for a separate app.
-
-This directory is independently deployable: it has its own package lock, Procfile and container. It needs no Zana checkout or build at runtime.
-
-1. Create a Heroku app in the account/region you intend to use. Obtain its exact `https://…herokuapp.com` URL; modern Heroku app hostnames can include a suffix.
-2. In its Settings → Config Vars, set `MOBILE_RELAY_PUBLIC_URL` to that origin (no path) and `MOBILE_RELAY_TOKEN` to a freshly generated secret. `openssl rand -hex 32` generates a suitable value. Keep the secret out of shell arguments, commits, URLs and screenshots.
-3. Deploy this directory as the Git root with the Heroku Node.js buildpack, or use Heroku Container Registry from this directory:
-
-```sh
-heroku container:login
-heroku container:push web --app YOUR_APP
-heroku container:release web --app YOUR_APP
-heroku ps:scale web=1 --app YOUR_APP
-```
-
-Select one **Basic or higher, always-on web dyno**. Do not enable horizontal scaling or Preboot: separate dynos do not share the desktop socket. Multi-computer hosting and a cross-dyno routing backplane are future work. Provisioning and running Heroku resources incurs the account's normal charges.
-
-4. For backend compatibility testing, supply the same `MOBILE_RELAY_TOKEN` securely in the environment and run `pnpm mobile:serve --connection relay --public-url https://YOUR_APP.herokuapp.com` from the repository root with desktop running. The local gateway binds only to loopback.
-5. Its pairing output supports older clients and transport tests. Current Zana Mobile must instead use the account service; do not use this utility as its installation or sign-in flow.
-
-`GET /_relay/health` reports only service version and whether the computer is connected. Other requests require the desktop gateway's normal pairing/session authorization. `/_relay/connect` requires the tunnel secret and accepts only one desktop at a time. Rotate the secret in both Heroku and the gateway environment if compromised; revoke individual phones in desktop settings.
-
-## Heroku behavior
-
-- Bind to `0.0.0.0:$PORT`; Heroku terminates TLS. The relay requires the router's `X-Forwarded-Proto: https` and the configured Host. Plain HTTP requests are refused; use the HTTPS health URL too.
-- 20-second WebSocket ping traffic stays below Heroku's 55-second idle window. Dead peers are disconnected.
-- Reconnect the desktop with capped backoff after a dyno restart. Pairing remains on the computer, so restarting only the relay does not require re-pairing.
-- Pending HTTP requests fail on disconnect and are **never automatically replayed**. Check whether the action completed before manually retrying a send.
-- Bounded transfers: 64 concurrent streams, 32 MiB request bodies, 64 MiB responses, 1 MiB application WebSocket messages, and 4 MiB outbound buffer ceilings. Slow peers are disconnected rather than accumulating unbounded memory.
-- The relay fails HTTP requests after 25 seconds without response traffic, before Heroku's initial response deadline. Long operations should acknowledge promptly and stream updates over the application's existing WebSocket.
-- SIGTERM closes tunnels and active connections. Nothing is persisted to the dyno filesystem; no database is required for this single-computer version.
-
-References: [HTTP routing](https://devcenter.heroku.com/articles/http-routing), [Dyno restarts](https://devcenter.heroku.com/articles/dyno-restarts), [Node deployment](https://devcenter.heroku.com/articles/getting-started-with-nodejs).
+- Heartbeats keep the tunnel below proxy idle windows, and the client reconnects with capped backoff.
+- Pending HTTP requests fail on disconnect and are **never automatically replayed**. Check whether an action completed before retrying a send.
+- Transfers are bounded: 64 concurrent streams, 32 MiB request bodies, 64 MiB responses, 1 MiB application WebSocket messages and 4 MiB outbound buffer ceilings. Slow peers are disconnected rather than buffered without limit.
+- Requests fail after 25 seconds without response traffic. Long operations should acknowledge promptly and stream updates over the application's WebSocket.
 
 ## Verification
 
-From the Zana repository root, run `pnpm exec vitest run services/mobile-relay` for protocol and real HTTP/WebSocket gateway tests. The built-Electron phone connection regression lives in `e2e/phone-network-connections.spec.ts`. A local regression does not establish a live Heroku deployment or physical-phone internet access.
+From the repository root, run `pnpm exec vitest run services/mobile-relay --exclude '.pnpm-store/**'` for protocol and real HTTP/WebSocket tests, and `pnpm test:e2e -- e2e/phone-connect-account.spec.ts e2e/mobile-relay-upload.spec.ts` for the built-Electron Connect path.

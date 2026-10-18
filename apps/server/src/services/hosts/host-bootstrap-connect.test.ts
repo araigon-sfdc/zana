@@ -54,6 +54,15 @@ it('repairs through Connect on the primary host while preserving the remote iden
   expect(getHost(f.ctx.db, f.remote.id)?.sshHost).toBe('devbox');
 });
 
+it('forgets a stored SSH tunnel route once Connect reinstalls the machine', async () => {
+  const f = fixture();
+  const store = { record: vi.fn(), remove: vi.fn(), get: vi.fn(), list: vi.fn(() => []) };
+  (f.ctx as { tunnelHosts?: unknown }).tunnelHosts = store;
+  expect((await repairHost(f.ctx, f.remote.id)).at(-1)).toEqual({ type: 'done', hostId: f.remote.id });
+  expect(store.remove).toHaveBeenCalledWith(f.remote.id);
+  expect(store.record).not.toHaveBeenCalled();
+});
+
 it('binds a remote project after Connect repairs its existing host', async () => {
   const f = fixture();
   expect((await bootstrapHostForProject(f.ctx, 'project')).at(-1)).toEqual({ type: 'done', hostId: f.remote.id });

@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { once } from 'node:events';
 import type { Page } from '@playwright/test';
 
-// Track A at the built Electron boundary: no relay token and no public URL, so
+// Track A at the built Electron boundary: no public URL, so
 // every install takes the primary-owned persistent SSH tunnel. The fake `ssh`
 // is the harness from remote-ssh-tunnel-recovery.spec.ts: it forwards TCP for
 // `-R` like OpenSSH and runs the real unpack/install scripts in a separate HOME.
@@ -420,7 +420,7 @@ test('a remote project with no public URL installs from the composer over the tu
     await expect.poll(() => capturedDrawerLogs(win), { timeout: 30_000 }).toContain('connecting through SSH');
     const drawerLogText = await capturedDrawerLogs(win);
     expect(drawerLogText).not.toContain('public_url_required');
-    expect(drawerLogText).not.toContain('relay_offline');
+    expect(drawerLogText).not.toMatch(/relay_/);
     expect(drawerLogText).not.toMatch(JOIN_CODE_RE);
     const [machine] = await remoteHosts(win);
     expect(machine?.status).toBe('connected');

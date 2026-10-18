@@ -33,7 +33,6 @@
     "test:watch": "vitest",
     "test:e2e": "node scripts/run-electron-e2e.mjs --build",
     "test:e2e:docker": "bash scripts/e2e-docker.sh",
-    "test:docker:pairing": "ZCC_DOCKER_E2E=1 vitest run docker/remote-machine/pairing-session.e2e.test.ts",
     "test:docker:live": "bash scripts/docker-machine-live-scenarios.sh",
     "docker:host-daemon": "bash scripts/docker-remote-machine.sh --join",
     "docker:remote-machine": "bash scripts/docker-remote-machine.sh",
@@ -67,7 +66,6 @@
     "mobile:dev": "pnpm --filter @zana-ai/zcc-mobile dev",
     "mobile:ios": "pnpm --filter @zana-ai/zcc-mobile ios",
     "mobile:android": "pnpm --filter @zana-ai/zcc-mobile android",
-    "mobile:serve": "node --import tsx scripts/mobile-serve.ts",
     "mobile:test": "vitest run packages/mobile-bridge/test apps/mobile/src apps/server/src/mobile apps/app/src/lib/native-shell.test.ts apps/app/src/components/MobileShellChrome.test.tsx apps/app/src/components/composer/ThreadComposerToolbar.test.tsx apps/app/src/components/thread/ThreadTimeline.scroll.test.tsx apps/app/src/components/thread/timeline/thread-message-sent.test.ts"
   },
   "dependencies": {

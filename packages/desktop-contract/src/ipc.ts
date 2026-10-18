@@ -52,14 +52,7 @@ export const IPC = {
     syncHosts: 'ssh:syncHosts'
   },
   hosts: {
-    relaunchLocal: 'hosts:relaunchLocal',
-    pairingStart: 'hosts:pairingStart',
-    pairingWrite: 'hosts:pairingWrite',
-    pairingResize: 'hosts:pairingResize',
-    pairingStop: 'hosts:pairingStop',
-    pairingStatus: 'hosts:pairingStatus',
-    pairingOnData: 'hosts:pairingOnData',
-    pairingOnExit: 'hosts:pairingOnExit'
+    relaunchLocal: 'hosts:relaunchLocal'
   },
   mobile: {
     enroll: 'mobile:enroll',
@@ -68,7 +61,6 @@ export const IPC = {
     disconnectAccount: 'mobile:disconnectAccount',
     browserAddress: 'mobile:browserAddress',
     redeemComputerCode: 'mobile:redeemComputerCode',
-    configure: 'mobile:configure',
     status: 'mobile:status',
     pair: 'mobile:pair',
     devices: 'mobile:devices',

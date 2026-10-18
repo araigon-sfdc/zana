@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Deep Docker remote-machine scenarios:
-#   1. pairing-session E2E (/t/<session> install.sh + enroll + zcc-join)
-#   2. isolated loopback join (install.sh → connected host)
-#   3. live join against pnpm dev on :8780 (directory RPC, key forwarding,
+#   1. isolated loopback join (install.sh → connected host)
+#   2. live join against pnpm dev on :8780 (directory RPC, key forwarding,
 #      optional OpenCode turn when OPENAI_API_KEY is set)
 #
 # Never prints secret values.
@@ -92,17 +91,8 @@ else
   export ZCC_INSTALL_OPENCODE=${ZCC_INSTALL_OPENCODE:-0}
 fi
 
-if [[ "$SCENARIOS" == all || "$SCENARIOS" == pairing ]]; then
-  printf '\n== 1. pairing session E2E (/t/<session>) ==\n'
-  if ZCC_DOCKER_E2E=1 pnpm exec vitest run docker/remote-machine/pairing-session.e2e.test.ts --reporter=dot; then
-    pass 'pairing session install.sh + enroll + zcc-join'
-  else
-    fail 'pairing session E2E'
-  fi
-fi
-
 if [[ "$SCENARIOS" == all || "$SCENARIOS" == isolated ]]; then
-  printf '\n== 2. isolated loopback join ==\n'
+  printf '\n== 1. isolated loopback join ==\n'
   if bash "$ROOT/scripts/docker-machine-join-test.sh"; then
     pass 'isolated docker join reports connected'
   else
@@ -118,7 +108,7 @@ if [[ "$SCENARIOS" != all && "$SCENARIOS" != live ]]; then
   exit 0
 fi
 
-printf '\n== 3. live join against product HTTP :%s ==\n' "$SERVER_PORT"
+printf '\n== 2. live join against product HTTP :%s ==\n' "$SERVER_PORT"
 WORKDIR=$(mktemp -d "${TMPDIR:-/tmp}/zcc-docker-live-XXXXXX")
 cleanup_work() { rm -rf "$WORKDIR"; }
 trap cleanup_work EXIT

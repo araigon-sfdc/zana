@@ -506,24 +506,13 @@ export function ThreadCommandComposer({
       ? (remote.user ? `${remote.user}@${remote.host}` : remote.host)
       : (hosts.find((row) => row.id === targetHostId)?.name ?? 'remote machine');
     try {
-      if (kind === 'install' || kind === 'fix') setHostBusy('Renewing pairing…');
+      setHostBusy(kind === 'install' ? 'Installing…' : 'Reconnecting…');
       await runHostInstallWithDrawer({
         kind,
         target,
-        startLogs: ['Renewing pairing…'],
+        startLogs: [kind === 'install' ? 'Installing…' : 'Reconnecting…'],
         run: async (onEvent) => {
-          try {
-            await product.relay.renewJoinWindow();
-          } catch {
-            // Bootstrap/repair still auto-renew; the chip stays the retry.
-          }
-          if (kind === 'install') {
-            useUi.getState().appendHostInstallLogs(['Installing…']);
-            setHostBusy('Installing…');
-            return product.hosts.bootstrap(project!.id, onEvent);
-          }
-          useUi.getState().appendHostInstallLogs(['Reconnecting…']);
-          setHostBusy('Reconnecting…');
+          if (kind === 'install') return product.hosts.bootstrap(project!.id, onEvent);
           return product.hosts.repair(targetHostId!, onEvent);
         },
         // Replayed by the drawer's Retry too, so a retried success still binds the host.

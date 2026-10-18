@@ -39,7 +39,7 @@ const h = vi.hoisted(() => {
     hostAction: { kind: 'ready' } as Record<string, unknown>,
     hosts: [] as Array<{ id: string; name?: string }>,
     drawer: vi.fn(), appendLogs: vi.fn(), setDrawerOpen: vi.fn(),
-    renew: vi.fn(async () => undefined), bootstrap: vi.fn(async () => []), repair: vi.fn(async () => []),
+    bootstrap: vi.fn(async () => []), repair: vi.fn(async () => []),
     updateSsh: vi.fn(async () => undefined)
   };
 });
@@ -55,7 +55,6 @@ vi.mock('../lib/host-install-run.js', () => ({ runHostInstallWithDrawer: h.drawe
 vi.mock('../thread-store.js', () => ({ useThreads: (select: (state: unknown) => unknown) => select({ threads: h.threads, upsert: h.upsert }) }));
 vi.mock('../lib/product-client.js', () => ({ product: {
   hosts: { bootstrap: h.bootstrap, repair: h.repair, updateSshIdentity: h.updateSsh },
-  relay: { renewJoinWindow: h.renew },
   threads: { send: h.send, create: h.create, promptHistory: async () => ({ entries: [] }), compact: vi.fn(), stop: vi.fn() }
 } }));
 vi.mock('../hooks/useHosts.js', () => ({ defaultHostId: () => 'host1', useHosts: () => h.hosts }));
@@ -376,10 +375,9 @@ describe('Peer daemon install and repair from the composer', () => {
     expect(h.loadProjects).toHaveBeenCalled();
   });
 
-  it('uses user@host for a remote project target and tolerates a failing renew', async () => {
+  it('uses user@host for a remote project target', async () => {
     h.project = { id: 'p1', name: 'P', path: '/x', remote: { host: 'devbox', user: 'me' } } as unknown as Project;
     h.hostAction = { kind: 'install', reason: 'r' };
-    h.renew.mockRejectedValueOnce(new Error('relay down'));
     settle([], true);
     mockedOutcome().mockReturnValue({ ok: true, hostId: 'h1' });
     render(composer({ project: h.project }));

@@ -2003,6 +2003,10 @@ export interface AppConfig {
   sidebarNavOrder?: string[];
   /** Project-window sidebar destination order. */
   projectSidebarNavOrder?: string[];
+  /** Hidden global sidebar destinations; hiding does not disable a plugin. */
+  sidebarNavHidden?: string[];
+  /** Hidden project sidebar destinations, independent of the global rail. */
+  projectSidebarNavHidden?: string[];
   /** Nav sidebar width in px. Absent ⇒ CSS default (256). Clamped [256, 480]. */
   sidebarWidth?: number;
   windowBounds?: { x?: number; y?: number; width: number; height: number };
@@ -2761,22 +2765,13 @@ export interface AppConfig {
    */
   cloneRoot?: string;
   /**
-   * Public origin remotes use to enroll (Heroku pairing relay).
-   * Pairing prefers runtime `ZCC_APP_URL` or the compile-time bake, then this
-   * field, then the repo `public-app-url` file. `presentAppConfig` overlays the
-   * resolved origin for the renderer and never includes the relay token.
+   * Public origin remotes download the installer from.
+   * `presentAppConfig` overlays the resolved origin (runtime `ZCC_APP_URL`, the
+   * compile-time bake, this field, then the repo `public-app-url` file) for the
+   * renderer. Remotes never join through it; pairing without Zana Connect
+   * always uses an SSH reverse tunnel.
    */
   publicAppUrl?: string;
-  /**
-   * Persisted leftover. Pairing uses runtime `ZCC_RELAY_TOKEN` or the
-   * compile-time bake. Never presented to the renderer.
-   */
-  relayToken?: string;
-  /**
-   * Routing id for this laptop's pairing-relay session (`/t/<id>`). Persisted so
-   * enrolled daemons can reconnect after Zana restarts. Not a Settings field.
-   */
-  relaySessionId?: string;
   /**
    * Absolute directory that inbox "Download as PDF" writes into. Absent ⇒ the
    * OS Downloads folder. The export saves straight there (no save dialog),
