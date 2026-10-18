@@ -47,6 +47,10 @@ describe('authorizeProjectRelPath', () => {
       [project({ id: 'zcc', name: 'zcc', path: '/Users/me/proj' })],
       '/Users/me/proj/../.ssh'
     )).toBeNull();
+    expect(authorizeProjectRelPath(
+      [project({ id: 'zcc', name: 'zcc', path: '/Users/me/proj' })],
+      'Q:\\Users\\me\\proj'
+    )).toBeNull();
   });
 
   it('matches a remote-host checkout without resolving the path on this machine', () => {

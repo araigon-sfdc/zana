@@ -72,7 +72,9 @@ export function authorizeProjectRelPath(
   projects: Project[],
   candidate: string
 ): { root: string; relPath: string; hostId?: string } | null {
-  if (typeof candidate !== 'string' || !isAbsolute(candidate)) return null;
+  // `isAbsolute` follows this server's OS; a Windows host's paths must still
+  // pass when the server runs on POSIX. Local projects re-check below.
+  if (typeof candidate !== 'string' || !(isAbsolute(candidate) || WINDOWS_ABSOLUTE_PATH.test(candidate))) return null;
   let best: { root: string; relPath: string; hostId?: string; len: number } | null = null;
   const matchingHosts = new Set<string | undefined>();
   for (const project of projects) {
@@ -96,6 +98,7 @@ export function authorizeProjectRelPath(
       }
       continue;
     }
+    if (!isAbsolute(candidate)) continue;
     const resolved = resolve(candidate);
     const root = resolve(project.path);
     const rel = relative(root, resolved);
