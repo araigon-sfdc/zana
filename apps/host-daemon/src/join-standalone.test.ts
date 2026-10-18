@@ -253,6 +253,15 @@ describe('generated standalone bundle', () => {
       expect(await readFile(new URL('./join-standalone.mjs', import.meta.url), 'utf8')).toContain("from '../dist/join-standalone.mjs'");
     } finally { await rm(out, { recursive: true, force: true }); }
   }, 60_000);
+  it('the source shim re-exports the generated bundle and stays inert when imported', async () => {
+    // The shim imports ../dist; build the default (gitignored) output it points at.
+    const build = spawnSync(process.execPath, ['apps/host-daemon/scripts/build-join.mjs'],
+      { cwd: new URL('../../../', import.meta.url), timeout: 60_000, encoding: 'utf8' });
+    expect(build.status, build.stderr).toBe(0);
+    const shim = await import('./join-standalone.mjs');
+    expect(shim.PROTOCOL_VERSION).toBe(HOST_RPC_PROTOCOL_VERSION);
+    expect(typeof shim.runJoinStandalone).toBe('function');
+  }, 60_000);
   it('built Node-only helper forwards and controls independent app, denies scoped execution', async () => {
     const full = await fixture({ run });
     expect(await full.result(full.send(full.command))).toMatchObject({ ok: true, result: { body: full.command.body } });
