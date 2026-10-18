@@ -68,4 +68,7 @@ it('labels the home launcher submit button with Ctrl+Enter on Windows', () => {
     />
   );
   expect(screen.getByRole('button', { name: 'Launch' }).getAttribute('title')).toBe('Launch (Ctrl+Enter)');
+  cleanup();
+  render(<PromptComposer value="hi" onChange={noop} onSubmit={noop} submitLabel="Launch" attachments={[]} onAddAttachments={noop} onRemoveAttachment={noop} />);
+  expect(screen.queryByTitle('Launch (Ctrl+Enter)')).toBeNull();
 });
