@@ -1,18 +1,16 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { foldDiff, lineDiff } from '../../lib/line-diff.js';
-import {
-  SCOPE_LABELS, SYNC_FETCH_MAX, SYNC_RPC, SYNC_SCOPES, TYPE_LABELS,
-  type SyncCheck, type SyncComponent, type SyncDiff, type SyncJob, type SyncPlanFile, type SyncScope, type SyncState, type SyncType,
-} from '../../lib/org-sync-contract.js';
+import { SYNC_RPC, type SyncCheck, type SyncDiff, type SyncJob, type SyncPlanFile } from '../../lib/org-sync-contract.js';
 import { requireResult } from './components/client.js';
 import { SALESFORCE_STYLES } from './components/styles.js';
+import { OrgSyncPicker, PICKER_STYLES, type PickerPreset } from './OrgSyncPicker.js';
+import { PICK_TYPES, modeKeys, needsAttention, pickRows, readMemory, selectable, typeMode, writeMemory, type PickMemory } from './org-sync-picker.js';
 
 type Call = (method: string, args?: Record<string, unknown>) => Promise<unknown>;
 type Ready = Extract<SyncJob, { state: 'ready' }>;
 type Applied = Extract<SyncJob, { state: 'applied' }>;
-type Group = { id: string; title: string; hint: string; preselect: boolean; action: string; rows: SyncComponent[] };
 
-/** Rows rendered per group; selection still covers the whole group. */
+/** Rows rendered per plan list. */
 const VISIBLE_ROWS = 100;
 const POLL_MS = 1000;
 const MARK = { add: '+', del: '−', same: ' ' } as const;
@@ -21,7 +19,6 @@ const STYLES = `
 /* Header and footer stay put; only the lists scroll, so Fetch and Write are always in reach. */
 .sf-sync[open] { display:flex; flex-direction:column; }
 .sf-sync .sf-login-body { gap:14px; flex:1 1 auto; min-height:0; overflow:auto; grid-template-columns:minmax(0,1fr); }
-.sf-sync-scope { display:flex; gap:6px; flex-wrap:wrap; }
 .sf-sync-group { border:1px solid var(--border); border-radius:8px; }
 .sf-sync-group > header { display:flex; align-items:center; gap:8px; padding:8px 10px; background:var(--bg-base); border-radius:8px 8px 0 0; }
 .sf-sync-group > header small, .sf-sync-row small { color:var(--text-muted); }
@@ -38,71 +35,58 @@ const STYLES = `
 .sf-sync-line { display:flex; white-space:pre; padding-right:8px; }
 .sf-sync-line.is-add { background:color-mix(in srgb,var(--success, #2e844a) 14%,transparent); }
 .sf-sync-line.is-del { background:color-mix(in srgb,var(--danger) 14%,transparent); }
-.sf-sync-summary { display:grid; gap:8px; }
-.sf-sync-card { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:12px; align-items:center; border:1px solid var(--border); border-radius:8px; padding:10px 12px; }
-.sf-sync-card.is-first { border-color:var(--accent); }
-.sf-sync-card small { color:var(--text-muted); }
-.sf-sync-card > div:last-child { display:flex; gap:6px; }
-.sf-sync-filter { width:100%; }
-.sf-sync-pill { flex:none; font-size:11px; font-weight:600; padding:1px 7px; border-radius:999px; background:var(--bg-base); color:var(--text-muted); }
-.sf-sync-pill.is-changed, .sf-sync-pill.is-latest { background:color-mix(in srgb,var(--success, #2e844a) 14%,transparent); color:var(--success, #2e844a); }
-.sf-sync-pill.is-new { background:color-mix(in srgb,var(--accent) 14%,transparent); color:var(--accent); }
-.sf-sync-pill.is-conflict, .sf-sync-pill.is-deleted { background:color-mix(in srgb,var(--danger) 14%,transparent); color:var(--danger); }
-.sf-sync-row.is-current { color:var(--text-muted); }
 .sf-sync-line.is-gap { color:var(--text-muted); font-style:italic; }
 .sf-sync-ln { flex:0 0 22px; text-align:center; color:var(--text-muted); user-select:none; }
 @media (prefers-reduced-motion:reduce) { .sf-sync-progress > span { transition:none; } }
 `;
 
 const plural = (count: number, word: string) => `${count.toLocaleString('en-US')} ${word}${count === 1 ? '' : 's'}`;
-const when = (at: string | null) => at ? new Date(at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' }) : '';
 /** `force-app/main/default/classes/A.cls` → `classes/A.cls`; the full path stays in the tooltip. */
 const short = (path: string) => path.replace(/^(?:.*\/)?main\/default\//, '');
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
-
-/** Splits a check into the groups the user picks from; agent versions they already work on come first. */
-export function syncGroups(check: SyncCheck): Group[] {
-  const by = (test: (row: SyncComponent) => boolean) => check.components.filter(test);
-  return [
-    { id: 'conflict', title: 'Changed in both', hint: 'Local edits since the last fetch. You choose per file before anything is written.', preselect: true, action: 'Review', rows: by(row => row.state === 'conflict') },
-    { id: 'changed', title: 'Changed in org', hint: 'Untouched locally, so taking the org version is safe.', preselect: true, action: 'Update', rows: by(row => row.state === 'changed') },
-    { id: 'latest', title: 'Newer agent versions', hint: 'The newest org version of agents in this project.', preselect: true, action: 'Update', rows: by(row => row.state === 'new' && Boolean(row.latest)) },
-    { id: 'new', title: 'Only in org', hint: 'Not in this project yet.', preselect: false, action: 'Add', rows: by(row => row.state === 'new' && !row.latest) },
-    { id: 'unknown', title: 'Not compared yet', hint: 'Never fetched here. Fetching compares contents and only changed files are offered.', preselect: false, action: 'Compare', rows: by(row => row.state === 'unknown') },
-  ].filter(group => group.rows.length);
-}
-
-/** What an agent check shows per state; up-to-date rows come from `check.agent.current`. */
-const STATE_LABELS: Record<SyncState | 'latest' | 'current', string> = {
-  changed: 'Changed in org', conflict: 'Edited in both', unknown: 'Not compared', new: 'Not in project', latest: 'Newer version', deleted: 'Gone from org', current: 'Up to date',
-};
-const AGENT_SECTIONS: Array<[string, SyncType]> = [['Agent', 'AiAuthoringBundle'], ['Apex', 'ApexClass'], ['Flows', 'Flow'], ['Prompt templates', 'GenAiPromptTemplate']];
-
-/** The groups a scope check recommends: conflicts, org changes and newer agent versions. */
-const defaultSelection = (check: SyncCheck) => new Set(syncGroups(check).filter(group => group.preselect).flatMap(group => group.rows.map(row => row.key)));
+const names = (keys: string[]) => `${keys.slice(0, 20).map(key => key.slice(key.indexOf(':') + 1)).join(', ')}${keys.length > 20 ? ` and ${keys.length - 20} more` : ''}`;
 
 /** Everything an agent check found except deletions; fetching compares contents, so unchanged files are dropped. */
 export const agentSelection = (check: SyncCheck) => new Set(check.components.filter(row => row.state !== 'deleted').map(row => row.key));
 
+/** What opens selected: the agent and what it uses, the remembered type modes, or everything that needs attention. */
+export function initialSelection(check: SyncCheck, agentCheck: SyncCheck | null, memory: PickMemory | null): Set<string> {
+  if (agentCheck) return agentSelection(agentCheck);
+  const rows = pickRows(check);
+  if (memory) return new Set(PICK_TYPES.flatMap(([type]) => memory[type] ? modeKeys(type, memory[type]!, rows.get(type) ?? []) : []));
+  return new Set([...rows.values()].flat().filter(needsAttention).map(row => row.key));
+}
+
+/** The whole-type modes worth remembering; a hand-picked type is left out. */
+export function memoryOf(check: SyncCheck, selected: Set<string>): PickMemory {
+  const rows = pickRows(check);
+  const modes: PickMemory = {};
+  for (const [type] of PICK_TYPES) {
+    const mode = typeMode(type, rows.get(type) ?? [], selected);
+    if (mode !== 'custom' && mode !== 'none') modes[type] = mode;
+  }
+  return modes;
+}
+
 /**
- * Fetch latest. With `agent`, it covers that agent and what its actions call; otherwise a scope opens on a
- * summary of what changed, with one action per group and a full list behind Choose.
+ * Fetch from org. Every metadata type is checked at once and picked by type or by component; with `agent`, the
+ * agent and what its actions and types use open selected. Nothing is written until the plan is reviewed.
  */
-export function OrgSyncDialog({ call, scope: initialScope, agent, onClose }: { call: Call; scope: SyncScope; agent?: string; onClose(): void }) {
+export function OrgSyncDialog({ call, agent, rememberKey, onClose }: { call: Call; agent?: string; rememberKey?: string; onClose(): void }) {
   const ref = useRef<HTMLDialogElement>(null);
   const title = useId();
   const alive = useRef(true);
   const job = useRef('');
-  const [scope, setScope] = useState(initialScope);
   const [check, setCheck] = useState<SyncCheck | null>(null);
+  const [agentCheck, setAgentCheck] = useState<SyncCheck | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [remember, setRemember] = useState(true);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [plan, setPlan] = useState<Ready | null>(null);
   const [take, setTake] = useState<Set<string>>(new Set());
   const [result, setResult] = useState<Applied | null>(null);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState('');
-  const [choosing, setChoosing] = useState(false);
 
   const cancelJob = () => {
     const id = job.current;
@@ -129,19 +113,41 @@ export function OrgSyncDialog({ call, scope: initialScope, agent, onClose }: { c
 
   useEffect(() => {
     let current = true;
-    setBusy(true); setError(''); setCheck(null); setChoosing(false);
-    call(SYNC_RPC.check, agent ? { agent } : { scope }).then(value => {
-      const data = requireResult<{ data: SyncCheck }>(value).data;
+    setBusy(true); setError('');
+    const load = (args: Record<string, unknown>) => call(SYNC_RPC.check, args).then(value => requireResult<{ data: SyncCheck }>(value).data);
+    Promise.all([load({ scope: 'all', current: true }), agent ? load({ agent }) : Promise.resolve(null)]).then(([full, related]) => {
       if (!current) return;
-      setCheck(data);
-      setSelected(agent ? agentSelection(data) : defaultSelection(data));
+      setCheck(full);
+      setAgentCheck(related);
+      setSelected(initialSelection(full, related, agent ? null : readMemory(rememberKey)));
     }).catch(e => { if (current) setError(message(e)); })
       .finally(() => { if (current) setBusy(false); });
     return () => { current = false; };
-  }, [agent, call, scope]);
+  }, [agent, call, rememberKey]);
+
+  const presets = useMemo<PickerPreset[]>(() => {
+    if (!check) return [];
+    const rows = [...pickRows(check).values()].flat();
+    const attention = rows.filter(needsAttention).map(row => row.key);
+    const open = rows.filter(selectable).map(row => row.key);
+    return [
+      { label: 'All changes', count: attention.length, keys: attention },
+      ...(agentCheck ? [{ label: `${agentCheck.agent?.name ?? agent} + what it uses`, keys: [...agentSelection(agentCheck)] }] : []),
+      { label: 'Everything', count: open.length, keys: open },
+    ];
+  }, [agent, agentCheck, check]);
+  const notes = useMemo(() => {
+    const deleted = check?.components.filter(row => row.state === 'deleted').map(row => row.key) ?? [];
+    const missing = agentCheck?.agent?.missing ?? [];
+    return [
+      ...(missing.length ? [`Used by ${agentCheck!.agent!.name} but not in the org: ${names(missing)}`] : []),
+      ...(deleted.length ? [`No longer in the org, kept locally: ${names(deleted)}`] : []),
+    ];
+  }, [agentCheck, check]);
 
   async function fetchSelected(keys = [...selected]) {
     if (!check || !keys.length) return;
+    if (rememberKey && !agent) writeMemory(rememberKey, remember ? memoryOf(check, selected) : null);
     setBusy(true); setError(''); setProgress({ done: 0, total: keys.length });
     try {
       const started = requireResult<{ jobId: string }>(await call(SYNC_RPC.start, { components: keys, orgId: check.org.orgId }));
@@ -188,160 +194,44 @@ export function OrgSyncDialog({ call, scope: initialScope, agent, onClose }: { c
   const changes = plan?.files.filter(file => file.action !== 'same') ?? [];
   const conflicts = changes.filter(file => file.action === 'conflict');
   const writes = changes.length - conflicts.length + take.size;
+  const heading = agent ? `Fetch ${agent} from org` : 'Fetch from org';
   let footer: ReactNode;
-  const listing = Boolean(agent) || choosing;
-  if (step === 'check' && listing) footer = <button type="button" className="sf-btn primary" disabled={busy || !selected.size || selected.size > SYNC_FETCH_MAX} onClick={() => void fetchSelected()}>
-    {busy && !check ? 'Checking…' : `Fetch ${plural(selected.size, 'component')}`}</button>;
-  else if (step === 'plan' && changes.length) footer = <button type="button" className="sf-btn primary" disabled={busy || !writes} onClick={() => void apply()}>
+  if (step === 'plan' && changes.length) footer = <button type="button" className="sf-btn primary" disabled={busy || !writes} onClick={() => void apply()}>
     {busy ? 'Applying…' : `Write ${plural(writes, 'file')}`}</button>;
 
-  return <dialog className="sf-login-dialog sf-sync" ref={ref} aria-labelledby={title} onCancel={event => { event.preventDefault(); closeRef.current(); }}>
-    <style>{SALESFORCE_STYLES + STYLES}</style>
-    <div className="sf-login-heading">
-      <h2 id={title}>{agent ? `Fetch ${agent} from org` : 'Fetch latest from org'}</h2>
-      <p>{check ? `${check.org.alias} · ` : ''}Nothing is written until you review the changes.</p>
-    </div>
-    <div className="sf-login-body">
-      {step === 'check' && <>
-        {!agent && <div className="sf-sync-scope" role="group" aria-label="What to fetch">
-          {SYNC_SCOPES.map(value => <button key={value} type="button" className={`sf-btn${value === scope ? ' primary' : ' quiet'}`} aria-pressed={value === scope} disabled={busy} onClick={() => setScope(value)}>{SCOPE_LABELS[value]}</button>)}
+  return <dialog className={`sf-login-dialog sf-sync${step === 'check' ? ' is-picker' : ''}`} ref={ref} aria-labelledby={title} onCancel={event => { event.preventDefault(); closeRef.current(); }}>
+    <style>{SALESFORCE_STYLES + STYLES + PICKER_STYLES}</style>
+    {step === 'check' ? <>
+      <OrgSyncPicker title={heading} titleId={title} check={check} busy={busy} error={check ? '' : error}
+        status={agent ? `Comparing the org with this project and what ${agent} uses…` : 'Comparing the org with this project…'}
+        selected={selected} onSelect={setSelected} presets={presets} notes={notes}
+        remember={rememberKey && !agent ? remember : undefined} onRemember={setRemember}
+        onCompare={() => void fetchSelected()} onCancel={close} />
+      {check && error && <p className="sf-login-error" role="alert" style={{ margin: '0 22px 12px' }}>{error}</p>}
+    </> : <>
+      <div className="sf-login-heading">
+        <h2 id={title}>{heading}</h2>
+        <p>{check ? `${check.org.alias} · ` : ''}Nothing is written until you review the changes.</p>
+      </div>
+      <div className="sf-login-body">
+        {step === 'fetching' && progress && <div role="status">
+          <p>Retrieving {plural(progress.total, 'component')} into a temporary folder…</p>
+          <div className="sf-sync-progress" aria-hidden="true"><span style={{ width: `${progress.total ? Math.round(progress.done / progress.total * 100) : 0}%` }} /></div>
+          <p className="sf-muted sf-small">{progress.done.toLocaleString('en-US')} of {progress.total.toLocaleString('en-US')} retrieved</p>
         </div>}
-        {!check && busy && <p className="sf-muted" role="status">{agent ? `Comparing ${agent} and what it uses with the org…` : 'Comparing with the org…'}</p>}
-        {check && agent && <AgentView check={check} selected={selected} onSelect={setSelected} />}
-        {check && !agent && !choosing && <SummaryView check={check} busy={busy}
-          onFetch={keys => void fetchSelected(keys)}
-          onChoose={keys => { setSelected(keys ? new Set(keys) : defaultSelection(check)); setChoosing(true); }} />}
-        {check && !agent && choosing && <>
-          <button type="button" className="sf-btn quiet" style={{ justifySelf: 'start' }} onClick={() => setChoosing(false)}>← Summary</button>
-          <CheckView check={check} selected={selected} onSelect={setSelected} />
-        </>}
-      </>}
-      {step === 'fetching' && progress && <div role="status">
-        <p>Retrieving {plural(progress.total, 'component')} into a temporary folder…</p>
-        <div className="sf-sync-progress" aria-hidden="true"><span style={{ width: `${progress.total ? Math.round(progress.done / progress.total * 100) : 0}%` }} /></div>
-        <p className="sf-muted sf-small">{progress.done.toLocaleString('en-US')} of {progress.total.toLocaleString('en-US')} retrieved</p>
-      </div>}
-      {step === 'plan' && plan && <PlanView plan={plan} changes={changes} take={take} onTake={setTake} call={call} jobId={job.current} />}
-      {step === 'done' && result && <ResultView result={result} />}
-      {error && <p className="sf-login-error" role="alert">{error}</p>}
-    </div>
-    <div className="sf-login-footer">
-      <p>{step === 'check' && selected.size > SYNC_FETCH_MAX ? `Fetch at most ${SYNC_FETCH_MAX.toLocaleString('en-US')} components at a time.` : 'Local edits are never overwritten without your choice.'}</p>
-      <div className="sf-login-buttons">
-        <button type="button" className="sf-btn quiet" onClick={close}>{step === 'done' || (step === 'plan' && !changes.length) ? 'Close' : 'Cancel'}</button>
-        {footer}
+        {step === 'plan' && plan && <PlanView plan={plan} changes={changes} take={take} onTake={setTake} call={call} jobId={job.current} />}
+        {step === 'done' && result && <ResultView result={result} />}
+        {error && <p className="sf-login-error" role="alert">{error}</p>}
       </div>
-    </div>
+      <div className="sf-login-footer">
+        <p>Local edits are never overwritten without your choice.</p>
+        <div className="sf-login-buttons">
+          <button type="button" className="sf-btn quiet" onClick={close}>{step === 'done' || (step === 'plan' && !changes.length) ? 'Close' : 'Cancel'}</button>
+          {footer}
+        </div>
+      </div>
+    </>}
   </dialog>;
-}
-
-/** One card per group: its count, who changed it last, and a single action. Choose opens the full list on that group. */
-function SummaryView({ check, busy, onFetch, onChoose }: { check: SyncCheck; busy: boolean; onFetch(keys: string[]): void; onChoose(keys?: string[]): void }) {
-  const groups = useMemo(() => syncGroups(check), [check]);
-  const listed = groups.reduce((sum, group) => sum + group.rows.length, 0);
-  if (!groups.length) return <p className="sf-muted" role="status">{plural(check.counts.current, 'component')} up to date · Nothing new in the org{check.truncated ? ' · Showing the first results only' : ''}</p>;
-  return <div className="sf-sync-summary">
-    {groups.map((group, index) => {
-      const keys = group.rows.map(row => row.key);
-      const last = group.rows.find(row => row.modifiedBy || row.modifiedAt);
-      const fetchable = Math.min(keys.length, SYNC_FETCH_MAX);
-      return <section key={group.id} className={`sf-sync-card${index === 0 ? ' is-first' : ''}`} aria-label={group.title}>
-        <div>
-          <strong>{keys.length.toLocaleString('en-US')} · {group.title}</strong><br />
-          <small>{group.hint}{last ? ` Latest: ${[last.modifiedBy, when(last.modifiedAt)].filter(Boolean).join(', ')}.` : ''}</small>
-        </div>
-        <div>
-          <button type="button" className="sf-btn quiet" disabled={busy} onClick={() => onChoose(keys.slice(0, fetchable))}>Choose…</button>
-          <button type="button" className={`sf-btn${index === 0 ? ' primary' : ''}`} disabled={busy} onClick={() => onFetch(keys.slice(0, fetchable))}>
-            {keys.length === 1 ? group.action : fetchable === keys.length ? `${group.action} all` : `${group.action} ${fetchable.toLocaleString('en-US')}`}</button>
-        </div>
-      </section>;
-    })}
-    <p className="sf-muted sf-small" role="status">{plural(check.counts.current, 'component')} up to date{check.truncated ? ' · Showing the first results only' : ''}</p>
-    <DeletedNote check={check} />
-    <button type="button" className="sf-btn quiet" style={{ justifySelf: 'start' }} disabled={busy} onClick={() => onChoose()}>Show all {plural(listed, 'component')}</button>
-  </div>;
-}
-
-function DeletedNote({ check }: { check: SyncCheck }) {
-  const deleted = check.components.filter(row => row.state === 'deleted');
-  return deleted.length > 0 && <p className="sf-muted sf-small">No longer in the org, kept locally: {deleted.slice(0, 20).map(row => row.fullName).join(', ')}{deleted.length > 20 ? ` and ${deleted.length - 20} more` : ''}</p>;
-}
-
-/** The agent and what it uses, by kind, with up-to-date rows shown but not selectable. */
-function AgentView({ check, selected, onSelect }: { check: SyncCheck; selected: Set<string>; onSelect(next: Set<string>): void }) {
-  const current = check.agent?.current ?? [];
-  const missing = check.agent?.missing ?? [];
-  const toggle = (key: string, on: boolean) => {
-    const next = new Set(selected);
-    if (on) next.add(key); else next.delete(key);
-    onSelect(next);
-  };
-  const sections = AGENT_SECTIONS.map(([label, type]) => ({ label, rows: check.components.filter(row => row.type === type), current: current.filter(row => row.type === type) }))
-    .filter(section => section.rows.length || section.current.length);
-  return <>
-    <p className="sf-muted" role="status">{check.components.length
-      ? `${plural(check.components.length, 'component')} to compare · ${current.length.toLocaleString('en-US')} up to date`
-      : `${check.agent?.name ?? 'This agent'} and what it uses are up to date.`}</p>
-    {sections.map(section => <section key={section.label} className="sf-sync-group" aria-label={section.label}>
-      <header><span className="sf-grow"><strong>{section.label}</strong> <small>{section.rows.length + section.current.length}</small></span></header>
-      <div className="sf-sync-rows">
-        {section.rows.map(row => {
-          const state = row.state === 'new' && row.latest ? 'latest' : row.state;
-          return <label key={row.key} className="sf-sync-row">
-            <input type="checkbox" checked={selected.has(row.key)} disabled={row.state === 'deleted'} onChange={event => toggle(row.key, event.target.checked)} />
-            <span>{row.fullName} <small>{[row.modifiedBy, when(row.modifiedAt)].filter(Boolean).join(' · ')}</small></span>
-            <span className={`sf-sync-pill is-${state}`}>{STATE_LABELS[state]}</span>
-          </label>;
-        })}
-        {section.current.map(row => <div key={row.key} className="sf-sync-row is-current">
-          <input type="checkbox" checked={false} disabled aria-label={`${row.fullName} is up to date`} />
-          <span>{row.fullName}</span>
-          <span className="sf-sync-pill">{STATE_LABELS.current}</span>
-        </div>)}
-      </div>
-    </section>)}
-    {missing.length > 0 && <p className="sf-muted sf-small">Used by the agent but not in the org: {missing.slice(0, 20).map(key => key.split(':')[1]).join(', ')}{missing.length > 20 ? ` and ${missing.length - 20} more` : ''}</p>}
-  </>;
-}
-
-function CheckView({ check, selected, onSelect }: { check: SyncCheck; selected: Set<string>; onSelect(next: Set<string>): void }) {
-  const [filter, setFilter] = useState('');
-  const all = useMemo(() => syncGroups(check), [check]);
-  const needle = filter.trim().toLowerCase();
-  const groups = needle ? all.map(group => ({ ...group, rows: group.rows.filter(row => row.fullName.toLowerCase().includes(needle)) })).filter(group => group.rows.length) : all;
-  const toggle = (keys: string[], on: boolean) => {
-    const next = new Set(selected);
-    for (const key of keys) if (on) next.add(key); else next.delete(key);
-    onSelect(next);
-  };
-  return <>
-    <input type="search" className="sf-input sf-sync-filter" aria-label="Filter components" placeholder="Filter by name" value={filter} onChange={event => setFilter(event.target.value)} />
-    <p className="sf-muted" role="status">
-      {plural(check.counts.current, 'component')} up to date{all.length ? '' : ' · Nothing new in the org'}{needle && !groups.length ? ' · No names match' : ''}{check.truncated ? ' · Showing the first results only' : ''}
-    </p>
-    {groups.map(group => {
-      const keys = group.rows.map(row => row.key);
-      const count = keys.filter(key => selected.has(key)).length;
-      return <section key={group.id} className="sf-sync-group" aria-label={group.title}>
-        <header>
-          <input type="checkbox" aria-label={`Select all ${group.title}`} checked={count === keys.length}
-            ref={input => { if (input) input.indeterminate = count > 0 && count < keys.length; }}
-            onChange={event => toggle(keys, event.target.checked)} />
-          <span className="sf-grow"><strong>{group.title}</strong> <small>{count} of {keys.length}</small><br /><small>{group.hint}</small></span>
-        </header>
-        <div className="sf-sync-rows">
-          {group.rows.slice(0, VISIBLE_ROWS).map(row => <label key={row.key} className="sf-sync-row">
-            <input type="checkbox" checked={selected.has(row.key)} onChange={event => toggle([row.key], event.target.checked)} />
-            <span>{row.fullName} <small>{TYPE_LABELS[row.type]}</small></span>
-            <small>{[row.modifiedBy, when(row.modifiedAt)].filter(Boolean).join(' · ')}</small>
-          </label>)}
-          {group.rows.length > VISIBLE_ROWS && <div className="sf-sync-more">and {(group.rows.length - VISIBLE_ROWS).toLocaleString('en-US')} more</div>}
-        </div>
-      </section>;
-    })}
-    <DeletedNote check={check} />
-  </>;
 }
 
 function PlanView({ plan, changes, take, onTake, call, jobId }: { plan: Ready; changes: SyncPlanFile[]; take: Set<string>; onTake(next: Set<string>): void; call: Call; jobId: string }) {

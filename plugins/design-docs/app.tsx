@@ -28,12 +28,14 @@ export default definePluginApp((app) => {
     path: NAV_PATH,
     component: NavPanel
   });
+  // The Design tab can run in its own window; the host card stands in for it meanwhile.
   app.slots.projectTab({
     id: 'design',
     label: 'Design',
     icon: 'DraftingCompass',
     header: 'custom',
-    component: ProjectTab
+    component: ProjectTab,
+    detachable: true
   });
   app.slots.messageDirective({
     id: 'design-doc',

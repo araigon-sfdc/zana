@@ -949,7 +949,7 @@ function AgentScriptWorkspace(props: AgentScriptPanelProps) {
       <style>{AGENTFORCE_STUDIO_STYLES}</style>
       <style>{AGENT_ACTION_STYLES}</style>
       {newAgentOpen && <NewAgentDialog pluginId={pluginId} projectId={projectId} onClose={() => setNewAgentOpen(false)} onCreated={async file => { await refreshFiles(); await openFile(file.path); openTool('files'); }} />}
-      {fetchAgent && <OrgSyncDialog call={syncCall} scope="agentforce" agent={fetchAgent} onClose={() => setFetchAgent(null)} />}
+      {fetchAgent && <OrgSyncDialog call={syncCall} agent={fetchAgent} onClose={() => setFetchAgent(null)} />}
       {saveAsOpen && <SaveAgentDialog busy={busy} error={error} onClose={() => setSaveAsOpen(false)} onSave={path => {
         setBusy(true); setError(null);
         send.flushSave({ path, create: true });
