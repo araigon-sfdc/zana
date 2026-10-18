@@ -18,17 +18,33 @@ vi.mock('./plugin-worker-bridge.js', () => ({
   PEER_WORKER_COMMIT_TIMEOUT_MS: 10_000,
   createPluginWorkerBridge: () => ({ get activeCommits() { return state.activeCommits; }, dispose: vi.fn(), encode: vi.fn(() => ({})), retainedFunctions: 0 })
 }));
-const { createIsolatedPluginRuntime } = await import('./isolated-plugin-runtime.js');
+const { createIsolatedPluginRuntime, PLUGIN_HEARTBEAT_TIMEOUT_MS } = await import('./isolated-plugin-runtime.js');
 
 afterEach(() => { vi.useRealTimers(); state.activeCommits = 0; state.workers.length = 0; });
 
-function start() {
+function start(timeout: { heartbeatTimeoutMs?: number } = { heartbeatTimeoutMs: 1_000 }) {
   const onFailure = vi.fn();
-  const runtime = createIsolatedPluginRuntime({ api: {} as never, entry: 'x', generation: 1, databasePath: 'db', onFailure, heartbeatTimeoutMs: 1_000 });
+  const runtime = createIsolatedPluginRuntime({ api: {} as never, entry: 'x', generation: 1, databasePath: 'db', onFailure, ...timeout });
   const worker = state.workers.at(-1) as EventEmitter;
   worker.emit('message', { kind: 'ready' });
   return { runtime, onFailure, worker };
 }
+
+it('tolerates bounded synchronous plugin work by default and still fails a wedged worker', async () => {
+  vi.useFakeTimers();
+  expect(PLUGIN_HEARTBEAT_TIMEOUT_MS).toBe(5_000);
+  const f = start({});
+  // A supported 24MiB Design Docs journal blocks a slow runner for seconds; the old 1.5s budget killed it.
+  await vi.advanceTimersByTimeAsync(4_500);
+  expect(f.onFailure).not.toHaveBeenCalled();
+  // A heartbeat restarts the budget.
+  f.worker.emit('message', { kind: 'heartbeat' });
+  await vi.advanceTimersByTimeAsync(4_500);
+  expect(f.onFailure).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(1_000);
+  expect(f.onFailure).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ message: 'Plugin event loop stopped responding' }));
+  f.runtime.dispose();
+});
 
 it('exempts an in-flight peer commit from the heartbeat check only for a bounded grace', async () => {
   vi.useFakeTimers();

@@ -6,6 +6,14 @@ import { sqliteWorkerConfiguration } from '@zana-ai/zcc-db';
 import type { ZccPluginApi } from '@zana-ai/zcc-plugin-sdk';
 import { createPluginWorkerBridge, PEER_WORKER_COMMIT_TIMEOUT_MS } from './plugin-worker-bridge.js';
 
+/**
+ * Silence tolerated from a ready plugin worker before it is declared hung. The worker runs off the server thread, so
+ * synchronous plugin work never stalls the app; this only has to separate a wedged worker from a busy one. Plugins
+ * legitimately do synchronous SQLite work (Design Docs journals a supported 24MiB paired document in ~0.75s on fast
+ * hardware), so the budget keeps several-fold headroom for slower machines and CI runners.
+ */
+export const PLUGIN_HEARTBEAT_TIMEOUT_MS = 5_000;
+
 let active = 0;
 function workerEntry(): string {
   for (const relative of ['./plugin-server-worker.js', '../plugin-server-worker.js', './plugin-server-worker.ts']) {
@@ -54,7 +62,7 @@ export function createIsolatedPluginRuntime(options: {
     return count > 0 && now - commitProgressAt < PEER_WORKER_COMMIT_TIMEOUT_MS + 5_000;
   };
   const watchdog = setInterval(() => {
-    if (ready && !commitGraceActive(Date.now()) && !(apiWaitStarted !== undefined && Date.now() - apiWaitStarted < 10_000) && Date.now() - lastHeartbeat > (options.heartbeatTimeoutMs ?? 1500)) fail(new Error('Plugin event loop stopped responding'));
+    if (ready && !commitGraceActive(Date.now()) && !(apiWaitStarted !== undefined && Date.now() - apiWaitStarted < 10_000) && Date.now() - lastHeartbeat > (options.heartbeatTimeoutMs ?? PLUGIN_HEARTBEAT_TIMEOUT_MS)) fail(new Error('Plugin event loop stopped responding'));
   }, 250);
   watchdog.unref();
   function dispose(error = new Error('Plugin runtime stopped')) {
