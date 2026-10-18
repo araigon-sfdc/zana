@@ -4,7 +4,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { RefreshCw, Search, X } from 'lucide-react';
 import type { SshHostEntry } from '@zana-ai/zcc-domain/product';
 import { StencilList } from './ui/Skeleton.js';
-import { isMacShortcutPlatform } from '../lib/platformShortcut.js';
 
 export function HostSshIdentityDialog({
   hostName,
@@ -28,7 +27,7 @@ export function HostSshIdentityDialog({
 
   const loadHosts = useCallback((sync: boolean) => {
     if (!hasDesktopBridge()) {
-      setError(`SSH binding not loaded — quit${isMacShortcutPlatform() ? ' (⌘Q)' : ''} and relaunch the app.`);
+      setError('SSH binding not loaded — quit (⌘Q) and relaunch the app.');
       setHosts([]);
       return;
     }
