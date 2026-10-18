@@ -262,6 +262,28 @@ describe('generated standalone bundle', () => {
     expect(shim.PROTOCOL_VERSION).toBe(HOST_RPC_PROTOCOL_VERSION);
     expect(typeof shim.runJoinStandalone).toBe('function');
   }, 60_000);
+  it('the shim runs the join when launched directly and closes it on SIGINT/SIGTERM', async () => {
+    const close = vi.fn(async () => undefined), run = vi.fn(async () => ({ hostId: 'h', close }));
+    vi.resetModules();
+    vi.doMock('../dist/join-standalone.mjs', () => ({ PROTOCOL_VERSION: 1, runJoinStandalone: run }));
+    const exit = vi.spyOn(process, 'exit').mockImplementation((() => undefined) as never);
+    const argv = process.argv;
+    try {
+      // `join` is required: a bare launch of the file must not start a daemon.
+      process.argv = [argv[0], '/x/join-standalone.mjs'];
+      await import('./join-standalone.mjs?bare');
+      expect(run).not.toHaveBeenCalled();
+      process.argv = [argv[0], '/x/join-standalone.mjs', 'join'];
+      await import('./join-standalone.mjs?direct');
+      expect(run).toHaveBeenCalledTimes(1);
+      process.emit('SIGTERM');
+      await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(0));
+      expect(close).toHaveBeenCalledTimes(1);
+    } finally {
+      process.argv = argv;
+      vi.doUnmock('../dist/join-standalone.mjs');
+    }
+  });
   it('built Node-only helper forwards and controls independent app, denies scoped execution', async () => {
     const full = await fixture({ run });
     expect(await full.result(full.send(full.command))).toMatchObject({ ok: true, result: { body: full.command.body } });
