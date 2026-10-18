@@ -2,8 +2,8 @@ import { NextResponse } from 'next/server';
 import {
   MARKETPLACE_JSON_HEADERS,
   OFFICIAL_MARKETPLACE_FEED_PATH
-} from '@/lib/official-marketplace';
-import { loadOfficialMarketplace } from '@/lib/live-marketplace';
+} from '../../../lib/official-marketplace';
+import { loadOfficialMarketplace } from '../../../lib/live-marketplace';
 
 /**
  * Alias of `/marketplace/v1/marketplace.json` so older

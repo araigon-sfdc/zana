@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
-import { MARKETPLACE_JSON_HEADERS } from '@/lib/official-marketplace';
-import { loadOfficialMarketplace } from '@/lib/live-marketplace';
+import { MARKETPLACE_JSON_HEADERS } from '../../../../lib/official-marketplace';
+import { loadOfficialMarketplace } from '../../../../lib/live-marketplace';
 
 /**
  * BB-shaped provenance catalog. `zcc marketplace add` fetches this index.
