@@ -36,7 +36,7 @@ function fixture() {
     'lwc/card/card.js': 'export default 2;',
   };
   const dates: Record<string, string> = { 'ApexClass:Same': '2026-01-01T00:00:00.000+0000', 'ApexClass:Edited': '2026-01-01T00:00:00.000+0000', 'ApexClass:Fresh': '2026-01-01T00:00:00.000Z', 'AiAuthoringBundle:Support_2': '2026-01-01T00:00:00.000Z', 'AiAuthoringBundle:Support_3': '2026-02-01T00:00:00.000Z', 'LightningComponentBundle:card': '2026-01-01T00:00:00.000Z' };
-  const folders: Record<string, string> = { ApexClass: 'classes', AiAuthoringBundle: 'aiAuthoringBundles', LightningComponentBundle: 'lwc', ApexTrigger: 'triggers', Flow: 'flows', GenAiPromptTemplate: 'genAiPromptTemplates' };
+  const folders: Record<string, string> = { ApexClass: 'classes', AiAuthoringBundle: 'aiAuthoringBundles', LightningComponentBundle: 'lwc', ApexTrigger: 'triggers', Flow: 'flows', GenAiPromptTemplate: 'genAiPromptTemplates', LightningTypeBundle: 'lightningTypes' };
   const names = (type: string) => Object.keys(dates).filter(key => key.startsWith(`${type}:`)).map(key => key.slice(type.length + 1));
   const manifests: string[] = [];
   const execSf = vi.fn(async (args: string[], options?: ExecSfOptions) => {
@@ -98,6 +98,8 @@ describe('fetch latest helpers', () => {
     expect(componentName('Flow', 'Route.flow-meta.xml')).toBe('Route');
     expect(componentName('GenAiPromptTemplate', 'Summarize.genAiPromptTemplate-meta.xml')).toBe('Summarize');
     expect(agentReferences('target: "apex://A"\ntarget: "flow://F_1"\ntarget: "generatePromptResponse://P"\ntarget: "standardInvocableAction://sendEmail"\napex://A apex://9bad x://y')).toEqual(['ApexClass:A', 'Flow:F_1', 'GenAiPromptTemplate:P']);
+    expect(agentReferences('complex_data_type_name: "c__Offer"\ncomplex_data_type_name: lightning__textType\ncomplex_data_type_name: "ns__Pkg"\ncomplex_data_type_name: Plain\ncomplex_data_type_name: "c__Offer"')).toEqual(['LightningTypeBundle:Offer', 'LightningTypeBundle:Plain']);
+    expect(componentName('LightningTypeBundle', 'Offer/schema.json')).toBe('Offer');
     expect(agentVersion('Btnet_Agent_180')).toEqual({ base: 'Btnet_Agent', version: 180 });
     expect(agentVersion('Btnet_Agent')).toEqual({ base: 'Btnet_Agent', version: 0 });
     expect(manifest(['ApexClass:A', 'ApexClass:B', 'ApexTrigger:T'], '67.0')).toMatch(/<members>A<\/members>\n {4}<members>B<\/members>\n {4}<name>ApexClass<\/name>[\s\S]*<name>ApexTrigger<\/name>[\s\S]*<version>67.0<\/version>/);
@@ -263,9 +265,12 @@ describe('fetch latest', () => {
     expect(stored.get(`sf:project:p:sync::ApexClass`)).toBeUndefined();
   });
 
-  it('checks one agent with its newest org version and the Apex, Flows and prompt templates it calls', async () => {
-    const { service, root, query, dates, files } = fixture();
-    put(root, `${D}/aiAuthoringBundles/Support/Support.agent`, ['apex://Same', 'apex://Fresh', 'flow://Route', 'generatePromptResponse://Summarize', 'apex://Ghost', 'standardInvocableAction://sendEmail', 'apex://Same'].map(target => `target: "${target}"`).join('\n'));
+  it('checks one agent with its newest org version, the Apex, Flows and prompt templates it calls, and its Lightning types', async () => {
+    const { service, root, query, execSf, dates, files } = fixture();
+    put(root, `${D}/aiAuthoringBundles/Support/Support.agent`, ['apex://Same', 'apex://Fresh', 'flow://Route', 'generatePromptResponse://Summarize', 'apex://Ghost', 'standardInvocableAction://sendEmail', 'apex://Same'].map(target => `target: "${target}"`).join('\n')
+      + '\ncomplex_data_type_name: "c__Offer"\ncomplex_data_type_name: "lightning__textType"\ncomplex_data_type_name: "c__GhostType"');
+    dates['LightningTypeBundle:Offer'] = '2026-01-02T00:00:00.000Z';
+    files['lightningTypes/Offer/schema.json'] = '{}';
     dates['Flow:Route'] = '2026-01-03T00:00:00.000+0000';
     dates['GenAiPromptTemplate:Summarize'] = '2026-01-04T00:00:00.000Z';
     files['flows/Route.flow-meta.xml'] = '<Flow/>';
@@ -273,23 +278,26 @@ describe('fetch latest', () => {
     const check = await service.checkAgent(root, 'Support');
     // Support_2 is another local version, so it stays out; Support_3 is the newest org version.
     expect(check.components.map(component => [component.key, component.state])).toEqual([
-      ['AiAuthoringBundle:Support_3', 'new'], ['GenAiPromptTemplate:Summarize', 'new'], ['Flow:Route', 'new'], ['ApexClass:Fresh', 'new'], ['ApexClass:Same', 'unknown'],
+      ['AiAuthoringBundle:Support_3', 'new'], ['GenAiPromptTemplate:Summarize', 'new'], ['Flow:Route', 'new'], ['LightningTypeBundle:Offer', 'new'], ['ApexClass:Fresh', 'new'], ['ApexClass:Same', 'unknown'],
     ]);
-    expect(check.agent).toEqual({ name: 'Support', current: [], missing: ['ApexClass:Ghost'] });
+    expect(check.agent).toEqual({ name: 'Support', current: [], missing: ['ApexClass:Ghost', 'LightningTypeBundle:GhostType'] });
+    expect(execSf).toHaveBeenCalledWith(expect.arrayContaining(['--metadata-type', 'LightningTypeBundle']), expect.anything());
     expect(query).toHaveBeenCalledWith(expect.stringContaining("FROM ApexClass WHERE NamespacePrefix = null AND Name IN ('Same', 'Fresh', 'Ghost')"), expect.objectContaining({ tooling: false }));
     expect(query).toHaveBeenCalledWith("SELECT ApiName, LastModifiedDate, LastModifiedBy FROM FlowDefinitionView WHERE NamespacePrefix = null AND ApiName IN ('Route') ORDER BY ApiName", expect.anything());
     expect(check.components.find(component => component.key === 'Flow:Route')).toMatchObject({ modifiedBy: 'Ada', modifiedAt: '2026-01-03T00:00:00.000Z' });
 
-    const { jobId } = await service.start(root, { components: ['ApexClass:Same', 'Flow:Route'], orgId: org.orgId });
+    const { jobId } = await service.start(root, { components: ['ApexClass:Same', 'Flow:Route', 'LightningTypeBundle:Offer'], orgId: org.orgId });
     const plan = await settle(service, root, jobId);
     expect(plan.state === 'ready' && plan.files.map(file => [file.path, file.action])).toEqual([
-      [`${D}/flows/Route.flow-meta.xml`, 'create'], [`${D}/classes/Same.cls`, 'same'], [`${D}/classes/Same.cls-meta.xml`, 'same'],
+      [`${D}/flows/Route.flow-meta.xml`, 'create'], [`${D}/lightningTypes/Offer/schema.json`, 'create'], [`${D}/classes/Same.cls`, 'same'], [`${D}/classes/Same.cls-meta.xml`, 'same'],
     ]);
     await service.apply(root, jobId, {});
     expect(read(root, `${D}/flows/Route.flow-meta.xml`)).toBe('<Flow/>');
+    expect(read(root, `${D}/lightningTypes/Offer/schema.json`)).toBe('{}');
     const again = await service.checkAgent(root, 'Support');
-    expect(again.agent!.current.map(row => row.key)).toEqual(['ApexClass:Same', 'Flow:Route']);
-    expect(again.counts.current).toBe(2);
+    expect(again.agent!.current.map(row => row.key)).toEqual(['ApexClass:Same', 'Flow:Route', 'LightningTypeBundle:Offer']);
+    expect(again.agent!.missing).toEqual(['ApexClass:Ghost', 'LightningTypeBundle:GhostType']);
+    expect(again.counts.current).toBe(3);
     expect((await service.check(root, 'all')).components.map(component => component.key)).toContain('GenAiPromptTemplate:Summarize');
 
     put(root, `${D}/aiAuthoringBundles/Bare/Bare.agent`, 'no actions');
@@ -411,6 +419,9 @@ describe('fetch latest RPCs', () => {
     expect(await call('sync.check', { states: ['changed'], limit: 1 })).toEqual({ ok: true, data: { components: [rows[1]], truncated: true } });
     expect(await call('sync.check', { states: ['changed'] })).toEqual({ ok: true, data: { components: rows.slice(1), truncated: false } });
     expect(await call('sync.check', { limit: 5 })).toEqual({ ok: true, data: { components: rows, truncated: false } });
+    service.check.mockResolvedValue({ components: rows, current: [{ key: 'd' }], truncated: false } as never);
+    expect(await call('sync.check', {})).toEqual({ ok: true, data: { components: rows, truncated: false } });
+    expect(await call('sync.check', { current: true })).toEqual({ ok: true, data: { components: rows, current: [{ key: 'd' }], truncated: false } });
     await expect(call('sync.check', { states: ['stale'] })).rejects.toThrow('Choose states from changed');
     await expect(call('sync.check', { limit: 0 })).rejects.toThrow('positive whole-number');
     await expect(call('sync.check', { limit: 'x' })).rejects.toThrow('positive whole-number');

@@ -573,8 +573,9 @@ describe('AgentScriptPanel Fetch agent from org', () => {
     await ready(el);
     await click(fetchButton(el)!);
     expect(rpc).toHaveBeenCalledWith('salesforce', 'sync.check', { projectId: 'proj-1', agent: 'QC' });
+    expect(rpc).toHaveBeenCalledWith('salesforce', 'sync.check', { projectId: 'proj-1', scope: 'all', current: true });
     await flush();
-    expect(document.body.textContent).toContain('QC and what it uses are up to date.');
+    expect(document.querySelector('dialog.sf-sync h2')?.textContent).toBe('Fetch QC from org');
     await click(byText(document.body, 'button', /^Cancel$/)!);
     expect(document.querySelector('dialog.sf-sync')).toBeNull();
   });
