@@ -523,7 +523,7 @@ describe("public Salesforce panels", () => {
     ).not.toHaveProperty("disabled", true);
   });
 
-  it("opens Fetch latest scoped to the current view and closes it", async () => {
+  it("opens Fetch latest on every metadata type and closes it", async () => {
     call.mockImplementation(async (method, args) =>
       method === "sync.check"
         ? { ok: true, data: { org: { alias: "dev", orgId: org.orgId }, scope: args?.scope, checkedAt: 1, components: [], counts: { changed: 0, conflict: 0, unknown: 0, new: 0, deleted: 0, current: 3 }, truncated: false } }
@@ -533,10 +533,10 @@ describe("public Salesforce panels", () => {
     await screen.findByText("Ready for your next change.");
     fireEvent.click(screen.getByRole("tab", { name: "Apex & logs" }));
     fireEvent.click(screen.getByRole("button", { name: "Fetch latest from org" }));
-    await screen.findByText(/3 components up to date/);
-    expect(call).toHaveBeenCalledWith("sync.check", expect.objectContaining({ scope: "apex", projectId: "p" }));
+    await screen.findByText("Nothing in the org to fetch.");
+    expect(call).toHaveBeenCalledWith("sync.check", expect.objectContaining({ scope: "all", current: true, projectId: "p" }));
     fireEvent.click(screen.getByText("Cancel"));
-    expect(screen.queryByRole("dialog", { name: "Fetch latest from org" })).toBeNull();
+    expect(screen.queryByRole("dialog", { name: "Fetch from org" })).toBeNull();
   });
 
   it("keeps an explicit missing target visible instead of displaying another org", () => {

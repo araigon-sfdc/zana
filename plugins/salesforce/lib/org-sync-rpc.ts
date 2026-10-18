@@ -28,7 +28,8 @@ export function registerOrgSync(input: {
     // Counts always describe the whole check; states and limit only narrow the listed rows.
     const rows = states ? check.components.filter(row => states.includes(row.state)) : check.components;
     const components = limit === undefined ? rows : rows.slice(0, limit);
-    return { ok: true, data: { ...check, components, truncated: check.truncated || components.length < rows.length } };
+    const { current, ...rest } = check;
+    return { ok: true, data: { ...rest, components, truncated: check.truncated || components.length < rows.length, ...(input.current === true ? { current } : {}) } };
   });
   registerRpc(SYNC_RPC.start, async args => ({ ok: true, ...await service.start(await projectRoot(), args) }));
   registerRpc(SYNC_RPC.status, async args => ({ ok: true, data: await service.status(await projectRoot(), text(args, 'jobId')) }));

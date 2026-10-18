@@ -277,7 +277,7 @@ export function SalesforceProjectTab(props: {
         <OrgSyncDialog
           key={`${props.projectId}:${alias}`}
           call={call}
-          scope={view === "agentforce" ? "agentforce" : view === "apex" ? "apex" : "all"}
+          rememberKey={`salesforce:sync-pick:${props.projectId}`}
           onClose={() => setSyncOpen(false)}
         />
       )}

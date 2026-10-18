@@ -1,5 +1,5 @@
 /** Fetch latest: compare org metadata with local source, then pull chosen components. */
-export const SYNC_TYPES = ['AiAuthoringBundle', 'ApexClass', 'ApexTrigger', 'LightningComponentBundle', 'Flow', 'GenAiPromptTemplate'] as const;
+export const SYNC_TYPES = ['AiAuthoringBundle', 'ApexClass', 'ApexTrigger', 'LightningComponentBundle', 'Flow', 'GenAiPromptTemplate', 'LightningTypeBundle'] as const;
 export type SyncType = (typeof SYNC_TYPES)[number];
 
 export const SYNC_SCOPES = ['agentforce', 'apex', 'all'] as const;
@@ -17,6 +17,7 @@ export const TYPE_LABELS: Record<SyncType, string> = {
   LightningComponentBundle: 'LWC',
   Flow: 'Flow',
   GenAiPromptTemplate: 'Prompt template',
+  LightningTypeBundle: 'Lightning type',
 };
 
 /** Agent Script action target schemes (`apex://Name`) that name a component this fetch can retrieve. */
@@ -56,12 +57,16 @@ export interface SyncCheck {
   truncated: boolean;
   /** Set when the check covers one agent: its bundle, its newest org version and what its actions call. */
   agent?: SyncAgent;
+  /** Up-to-date components, so a picker can list every org component; `sync.check` returns it only with `current: true`. */
+  current?: SyncCurrent[];
 }
+
+export type SyncCurrent = Omit<SyncComponent, 'state' | 'latest'>;
 
 export interface SyncAgent {
   name: string;
   /** Related components already up to date, listed so the operator sees the whole agent. */
-  current: Array<Omit<SyncComponent, 'state' | 'latest'>>;
+  current: SyncCurrent[];
   /** Referenced by the agent but neither in the org nor in this project. */
   missing: string[];
 }
@@ -100,5 +105,11 @@ export const SYNC_RPC = {
   apply: 'sync.apply',
   cancel: 'sync.cancel',
 } as const;
+
+/** Agent bundle versions are `<Agent>_<n>`; the bare name is the local working copy. */
+export function agentVersion(name: string): { base: string; version: number } {
+  const match = name.match(/^(.*?)_([1-9][0-9]*)$/);
+  return match ? { base: match[1]!, version: Number(match[2]) } : { base: name, version: 0 };
+}
 
 export const isSyncScope = (value: unknown): value is SyncScope => SYNC_SCOPES.includes(value as SyncScope);
