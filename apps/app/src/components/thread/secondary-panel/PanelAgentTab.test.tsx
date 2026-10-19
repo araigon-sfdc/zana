@@ -1,9 +1,10 @@
 // @vitest-environment happy-dom
 
+import type { ReactElement } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 
-const composerProps = vi.hoisted(() => ({ last: null as null | Record<string, unknown> }));
+const composerProps = vi.hoisted(() => ({ last: null as null | Record<string, unknown>, session: null as unknown }));
 const threads = vi.hoisted(() => ({
   panelConversations: vi.fn(async (_pluginId: string, _panel?: string): Promise<Array<{ id: string; title: string | null; updatedAt: number }>> => []),
   openAsThread: vi.fn(async (_threadId: string) => ({ thread: {} }))
@@ -13,6 +14,7 @@ const navigate = vi.hoisted(() => vi.fn());
 vi.mock('../../ThreadCommandComposer.js', () => ({
   ThreadCommandComposer: (props: { onCreated?: (threadId: string) => void }) => {
     composerProps.last = props;
+    composerProps.session = useComposerDraft();
     return <button type="button" onClick={() => props.onCreated?.('t-new')}>Send</button>;
   }
 }));
@@ -24,13 +26,17 @@ vi.mock('../../../views/threads/ThreadDetailView.js', () => ({
 vi.mock('../../../lib/product-client.js', () => ({ product: { threads } }));
 vi.mock('react-router-dom', () => ({ useNavigate: () => navigate }));
 
+import { useComposerDraft } from '../../composer/ComposerDraft.js';
+import { resetComposerSessions } from '../../composer/composer-session.js';
 import { PANEL_AGENT_RECENT_LIMIT, PanelAgentTab } from './PanelAgentTab.js';
 
 const binding = { pluginId: 'p1', panel: 'main', view: 'items/7' };
 
 afterEach(() => {
   cleanup();
+  resetComposerSessions();
   composerProps.last = null;
+  composerProps.session = null;
   threads.panelConversations.mockReset().mockResolvedValue([]);
   threads.openAsThread.mockReset().mockResolvedValue({ thread: {} });
   navigate.mockReset();
@@ -112,5 +118,19 @@ describe('PanelAgentTab', () => {
     expect((await screen.findByRole('alert')).textContent).toBe('only side-panel conversations can be opened as threads');
     expect(button.disabled).toBe(false);
     expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it('retains the draft per plugin panel and view, and keeps unbound composers instance-local', () => {
+    const sessionFor = (element: ReactElement) => { const view = render(element); const session = composerProps.session; view.unmount(); return session; };
+    const noView = { pluginId: 'p1', panel: 'main' };
+    const first = sessionFor(<PanelAgentTab pluginPanel={noView} onCreated={vi.fn()} />);
+    expect(first).toBeTruthy();
+    // Same panel and view: the draft survives remounting; a different view or panel does not share it.
+    expect(sessionFor(<PanelAgentTab pluginPanel={noView} onCreated={vi.fn()} />)).toBe(first);
+    expect(sessionFor(<PanelAgentTab pluginPanel={binding} onCreated={vi.fn()} />)).not.toBe(first);
+    expect(sessionFor(<PanelAgentTab pluginPanel={{ ...noView, panel: 'other' }} onCreated={vi.fn()} />)).not.toBe(first);
+    const unboundA = sessionFor(<PanelAgentTab onCreated={vi.fn()} />);
+    const unboundB = sessionFor(<PanelAgentTab onCreated={vi.fn()} />);
+    expect(unboundA).not.toBe(unboundB);
   });
 });

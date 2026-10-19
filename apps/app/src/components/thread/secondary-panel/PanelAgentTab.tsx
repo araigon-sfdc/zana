@@ -2,6 +2,7 @@ import { lazy, Suspense, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ExternalLink, MessageSquare } from 'lucide-react';
 import { ThreadCommandComposer } from '../../ThreadCommandComposer.js';
+import { ComposerDraftProvider } from '../../composer/ComposerDraft.js';
 import { product } from '../../../lib/product-client.js';
 import { getThreadRoutePath } from '../../../lib/route-paths.js';
 
@@ -74,6 +75,7 @@ export function PanelAgentTab({
           ? 'Ask about this page. The agent knows which plugin it is next to.'
           : 'Ask an agent without leaving this page.'}
       </p>
+      <ComposerDraftProvider sessionKey={pluginPanel ? JSON.stringify(['panel', pluginPanel.pluginId, pluginPanel.panel, pluginPanel.view ?? null]) : undefined}>
       <ThreadCommandComposer
         autoFocus
         navigateOnCreate={false}
@@ -82,6 +84,7 @@ export function PanelAgentTab({
         pluginPanel={pluginPanel}
         onCreated={onCreated}
       />
+      </ComposerDraftProvider>
     </div>
   );
 }
