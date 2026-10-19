@@ -7,6 +7,7 @@ import { type AgentScriptDialect, type PublicOrgView } from '../../lib/types.js'
 import {
   STUDIO_CHANGED_CHANNEL,
   STUDIO_RPC,
+  countProblems,
   type ExplorerNode,
   type ProposalOutcome,
   type ProposeEditInput,
@@ -767,7 +768,8 @@ function AgentScriptWorkspace(props: AgentScriptPanelProps) {
   bridgeHandlers.current = {
     onSnapshot: message => {
       const nextActions = message.actions ?? [];
-      setSource(message.content); setIssues(message.issues); setActions(nextActions);
+      // The frame's `issues` counts every diagnostic; the document bar shows problems only.
+      setSource(message.content); setIssues(message.diagnostics ? countProblems(message.diagnostics) : message.issues); setActions(nextActions);
       setDiagnostics(message.diagnostics ?? []);
       setActionTabs(tabs => tabs.filter(tab => tab.action.id.startsWith('dependency:') || nextActions.some(action => action.id === tab.action.id)));
       setSelectedActionId(id => id?.startsWith('dependency:') || nextActions.some(action => action.id === id) ? id : null);
@@ -944,7 +946,7 @@ function AgentScriptWorkspace(props: AgentScriptPanelProps) {
     </div>
   ) : false;
 
-  const problemsCount = problems.length;
+  const problemsCount = countProblems(problems);
   const tabs = layout === 'legacy' ? false : (
     <EditorTabs tabs={studio.tabs} active={studio.activeTab} dirtyId={dirty && activePath ? `agent:${activePath}` : null} problems={problemsCount}
       problemsId={activePath ? `agent:${activePath}` : null} trailing={workspaceActions} onSelect={selectTab} onClose={closeTab} onCloseMany={closeTabs} />
