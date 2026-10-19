@@ -9,13 +9,13 @@ import { startProductServer, type ProductServer } from './product-server.js';
 import { AmbiguousHostError, HostUnavailableError } from './host-hub.js';
 import { registerThreadProvider } from '../services/threads/thread-provider-catalog.js';
 
-const reconcileMock = vi.hoisted(() => ({ failure: undefined as unknown, active: false }));
+const reconcileMock = vi.hoisted(() => ({ failure: undefined as unknown, active: false, count: 0 }));
 vi.mock('../services/hosts/host-bootstrap.js', async (importActual) => {
   const actual = await importActual<typeof import('../services/hosts/host-bootstrap.js')>();
   return {
     ...actual,
     reconcileRemoteProjectBindings: (ctx: never) =>
-      reconcileMock.active ? Promise.reject(reconcileMock.failure) : actual.reconcileRemoteProjectBindings(ctx)
+      (reconcileMock.count++, reconcileMock.active) ? Promise.reject(reconcileMock.failure) : actual.reconcileRemoteProjectBindings(ctx)
   };
 });
 
@@ -93,19 +93,37 @@ describe('product HTTP', () => {
   it.each([
     ['Error', new Error('reconcile exploded'), 'reconcile exploded'],
     ['non-Error', 'tok_secret_session_123', 'unknown error']
-  ])('GET /projects warns with the message only and still lists projects when reconcile rejects with %s', async (_label, failure, expected) => {
+  ])('POST /projects warns with the message only and still adds projects when reconcile rejects with %s', async (_label, failure, expected) => {
     const dataDir = mkdtempSync(join(tmpdir(), 'zcc-product-reconcile-warn-'));
     writeFileSync(join(dataDir, 'projects.json'), JSON.stringify({ version: 1, projects: [] }));
     server = await startTestProductServer({ dataDir, origins: { serverPort: 0, devAppPort: 5173 } });
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     reconcileMock.failure = failure;
     reconcileMock.active = true;
-    const response = await fetch(`${server.url}api/v1/projects`);
+    const response = await fetch(`${server.url}api/v1/projects`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ path: dataDir })
+    });
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ projects: [] });
+    await expect(response.json()).resolves.toMatchObject({ project: { name: expect.any(String) } });
+    await vi.waitFor(() => expect(warn).toHaveBeenCalledTimes(1));
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalledWith(`[zcc] remote project reconcile failed: ${expected}`);
     expect(String(warn.mock.calls[0]![0])).not.toContain('tok_secret');
+  });
+
+  it('GET /projects lists without triggering remote project reconciliation', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'zcc-product-get-no-reconcile-'));
+    writeFileSync(join(dataDir, 'projects.json'), JSON.stringify({ version: 1, projects: [] }));
+    server = await startTestProductServer({ dataDir, origins: { serverPort: 0, devAppPort: 5173 } });
+    const request = vi.spyOn(server.ctx.remoteProjectReconciler!, 'request');
+    reconcileMock.failure = new Error('must not run');
+    reconcileMock.active = true;
+    const calls = reconcileMock.count;
+    const response = await fetch(`${server.url}api/v1/projects`);
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ projects: [] });
+    expect(request).not.toHaveBeenCalled();
+    expect(reconcileMock.count).toBe(calls);
   });
 
   it('serves native catalogues from the authorized host and preserves discovery failures at the HTTP boundary', async () => {
@@ -1619,14 +1637,14 @@ describe('product HTTP', () => {
   it('transcribes voice over multipart when a host is connected', async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'zcc-product-voice-'));
     writeFileSync(join(dataDir, 'projects.json'), JSON.stringify({ version: 1, projects: [] }));
-    writeFileSync(join(dataDir, 'config.json'), JSON.stringify({ version: 1, theme: 'dark' }));
+    writeFileSync(join(dataDir, 'config.json'), JSON.stringify({ version: 1, theme: 'dark', voiceInputEnabled: true }));
     server = await startTestProductServer({
       dataDir,
       origins: { serverPort: 0, devAppPort: 5173 }
     });
 
     const disabled = await fetch(`${server.url}api/v1/system/voice-status`).then((response) => response.json());
-    expect(disabled).toEqual({ enabled: false });
+    expect(disabled).toEqual({ enabled: false, reason: 'no_host' });
 
     const rpc = vi.fn(async () => ({ model: 'gpt-transcribe', text: 'hello from voice' }));
     server.ctx.hostHub.connectedHostIds = () => ['host-1'];
@@ -1634,7 +1652,7 @@ describe('product HTTP', () => {
     server.ctx.hostHub.callHostOnlineRpc = rpc;
 
     const enabled = await fetch(`${server.url}api/v1/system/voice-status`).then((response) => response.json());
-    expect(enabled).toEqual({ enabled: true });
+    expect(enabled).toEqual({ enabled: true, reason: null });
 
     const form = new FormData();
     form.set('file', new Blob([new Uint8Array([1, 2, 3])], { type: 'audio/webm' }), 'recording.webm');
@@ -1686,6 +1704,18 @@ describe('product HTTP', () => {
     });
     expect(down.status).toBe(503);
 
+    // Server-side enforcement: the Experimental toggle off refuses both routes.
+    server.ctx.config.getConfig = () => ({ voiceInputEnabled: false }) as ReturnType<typeof server.ctx.config.getConfig>;
+    server.ctx.hostHub.connectedHostIds = () => ['host-1'];
+    server.ctx.hostHub.resolveHostId = () => 'host-1';
+    const offStatus = await fetch(`${server.url}api/v1/system/voice-status`).then((response) => response.json());
+    expect(offStatus).toEqual({ enabled: false, reason: 'disabled' });
+    const formOff = new FormData();
+    formOff.set('file', new Blob([new Uint8Array([1])], { type: 'audio/webm' }), 'recording.webm');
+    const off = await fetch(`${server.url}api/v1/system/voice-transcription`, { method: 'POST', body: formOff });
+    expect(off.status).toBe(403);
+    await expect(off.json()).resolves.toMatchObject({ error: 'voice_disabled' });
+
     const originForm = new FormData();
     originForm.set('file', new Blob([new Uint8Array([1])], { type: 'audio/webm' }), 'recording.webm');
     const originDenied = await fetch(`${server.url}api/v1/system/voice-transcription`, {
@@ -1694,6 +1724,14 @@ describe('product HTTP', () => {
       body: originForm
     });
     expect(originDenied.status).toBe(403);
+
+    const oversized = await fetch(`${server.url}api/v1/system/voice-transcription`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: Buffer.alloc(26 * 1024 * 1024, 1)
+    });
+    expect(oversized.status).toBe(403);
+    await expect(oversized.json()).resolves.toMatchObject({ error: 'voice_disabled' });
   });
 
   it('serves environment diff file TOC and per-file patches', async () => {

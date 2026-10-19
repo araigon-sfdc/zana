@@ -26,14 +26,15 @@ const h = vi.hoisted(() => ({
   personas: [], listeners: new Set<() => void>(),
   catalog: null as unknown as ThreadModelCatalogSnapshot,
   descriptors: [] as HarnessAdapterDescriptor[], remembered: null as string | null, rememberedModel: '',
-  defaultHarness: 'claude', catalogScope: vi.fn(), ensure: vi.fn(), ensureProvider: vi.fn(), reloadProvider: vi.fn(),
+  permissionError: undefined as string | undefined, voiceState: 'idle',
+  defaultHarness: 'claude', catalogScope: vi.fn(), ensure: vi.fn(), ensureProvider: vi.fn(), refresh: vi.fn(),
   effectiveDefault: vi.fn(async (): Promise<EffectiveHarnessDefaultResult> => ({ ok: true, profile: 'claude', family: 'claude', source: 'global-default' })),
   createTerminal: vi.fn(async () => ({ id: 'terminal-1' })), selectTab: vi.fn(), pushToast: vi.fn(), clear: vi.fn(),
   remember: vi.fn(), loadProjects: vi.fn(), worktreeIsolationDefault: false,
   projectWorktreeIsolation: undefined as boolean | undefined, projectSettingsListeners: new Set<(projectId: string) => void>(),
   projectSettingsGet: vi.fn(async () => ({ worktreeIsolation: h.projectWorktreeIsolation })),
   environmentProps: null as null | { value: { kind: string }; onChange: (next: { kind: string }) => void },
-  modelProps: null as null | { onSelectedProviderChange: (id: string) => void; onReloadModels?: () => void;
+  modelProps: null as null | { onModelChange: (value: string) => void; onSelectedProviderChange: (id: string) => void; onReloadModels?: () => void;
     selectedProviderId: string; modelLockedLabel?: string; modelIsLoading: boolean; providerOptions: Array<{ value: string }> }
 }));
 
@@ -62,20 +63,21 @@ vi.mock('../hooks/useHosts.js', () => ({
 vi.mock('./thread/pickers/thread-model-catalog.js', () => ({ threadModelCatalogForHost: (hostId: string, projectId: string) => {
   h.catalogScope(hostId, projectId);
   return { subscribe: (listener: () => void) => { h.listeners.add(listener); return () => { h.listeners.delete(listener); }; },
-    getSnapshot: () => h.catalog, ensure: h.ensure, ensureProvider: h.ensureProvider, reloadProvider: h.reloadProvider };
+    getSnapshot: () => h.catalog, ensure: h.ensure, ensureProvider: h.ensureProvider, refresh: h.refresh };
 } }));
 vi.mock('./thread/pickers/composer-selection-preference.js', async importOriginal => {
   const actual = await importOriginal<typeof import('./thread/pickers/composer-selection-preference.js')>();
   return { ...actual, rememberedProviderId: () => h.remembered,
     rememberedSelectionFor: () => ({ model: h.rememberedModel }), rememberComposerSelection: h.remember };
 });
-vi.mock('./thread/pickers/useThreadPermissionMode.js', () => ({ useThreadPermissionMode: () => ({ permissionMode: 'accept-edits', setPermissionMode: vi.fn() }) }));
+vi.mock('./thread/pickers/useThreadPermissionMode.js', () => ({ useThreadPermissionMode: () => ({ permissionMode: 'accept-edits', setPermissionMode: vi.fn(), selectionError: h.permissionError }) }));
 vi.mock('./composer/use-composer-prompt-field.js', () => ({ useComposerPromptField: () => ({
   text: 'Task', images: [], serialize: () => ({ text: 'Task', mentions: [] }), clear: h.clear,
+  captureRevision: () => 0, clearIfRevision: h.clear,
   insertText: vi.fn(), setText: vi.fn(), focus: vi.fn(), handleChromeKeyDown: vi.fn(),
   dropHandlers: {}, canAttach: false, suggestions: [], typeaheadOpen: false
 }) }));
-vi.mock('./thread/voice/useVoiceInput.js', () => ({ useVoiceInput: () => ({ state: 'idle', isSupported: true, available: true, canStart: true, start: vi.fn() }) }));
+vi.mock('./thread/voice/useVoiceInput.js', () => ({ useVoiceInput: () => ({ state: h.voiceState, stream: null, visible: true, isSupported: true, available: true, canStart: true, start: vi.fn(), stop: vi.fn(), cancel: vi.fn() }) }));
 vi.mock('./AgentLauncher.js', () => ({ buildLaunchArgs: (prompt: string) => ({ initialPrompt: prompt, title: 'Task' }) }));
 vi.mock('./composer/ComposerPromptField.js', () => ({ ComposerPromptField: () => null }));
 vi.mock('../plugins/PluginComposerChrome.js', () => ({ PluginComposerChrome: ({ children }: { children: ReactNode }) => <>{children}</> }));
@@ -90,7 +92,9 @@ vi.mock('./EnvironmentPicker.js', () => ({
 vi.mock('./ComposerProjectPicker.js', () => ({ ComposerProjectPicker: () => null }));
 vi.mock('./RemoteComposerConnection.js', () => ({ RemoteComposerConnection: () => null }));
 vi.mock('./ui/PopoverPicklist.js', () => ({ PopoverPicklist: () => null }));
-vi.mock('./thread/pickers/ComposerModePicker.js', () => ({ ComposerModePicker: () => null }));
+vi.mock('./thread/pickers/ComposerModePicker.js', () => ({ ComposerModePicker: (props: { onRefresh?: () => void }) => (
+  props.onRefresh ? <button onClick={props.onRefresh}>Refresh modes</button> : null
+) }));
 vi.mock('./thread/pickers/ModelReasoningPicker.js', () => ({ ModelReasoningPicker: (props: NonNullable<typeof h.modelProps>) => {
   h.modelProps = props;
   return <><span data-testid="selected-provider">{props.selectedProviderId}</span>
@@ -118,6 +122,7 @@ beforeEach(() => {
   h.projects = [local(), remote()];
   h.hosts = [{ id: 'primary-host', status: 'connected', isPrimary: true }, { id: 'remote-host', status: 'connected', isPrimary: false }];
   h.catalog = catalog(['codex']); h.remembered = null; h.rememberedModel = '';
+  h.permissionError = undefined; h.voiceState = 'idle';
   h.worktreeIsolationDefault = false; h.projectWorktreeIsolation = undefined; h.projectSettingsListeners.clear(); h.environmentProps = null;
   h.projectSettingsGet.mockReset().mockImplementation(async () => ({ worktreeIsolation: h.projectWorktreeIsolation }));
   h.effectiveDefault.mockReset().mockResolvedValue({ ok: true, profile: 'codex', family: 'codex', source: 'global-default' });
@@ -134,7 +139,7 @@ describe('CLI Agent project-owned discovery', () => {
     expect(h.effectiveDefault).not.toHaveBeenCalled();
     expect(h.modelProps!.providerOptions.map(row => row.value)).toEqual(['codex']);
     fireEvent.click(screen.getByRole('button', { name: 'Reload models' }));
-    expect(h.reloadProvider).toHaveBeenCalledWith('codex');
+    expect(h.refresh).toHaveBeenCalledWith('codex');
     fireEvent.click(screen.getByRole('button', { name: 'Launch agent' }));
     await waitFor(() => expect(h.createTerminal).toHaveBeenCalledWith('remote', 'codex', 80, 24, expect.objectContaining({
       hostId: 'primary-host', harnessRouting: { schemaVersion: 1, byAdapter: { codex: { modelTargetId: 'codex-live', executionState: 'accept-edits' } } }
@@ -200,6 +205,15 @@ describe('CLI Agent project-owned discovery', () => {
     await waitFor(() => expect(h.createTerminal).toHaveBeenCalledWith('local', 'codex', 80, 24, expect.objectContaining({ hostId: 'primary-host' })));
   });
 
+  it('refreshes the OpenCode provider catalog from the mode picker', async () => {
+    h.catalog = catalog(['acp-opencode']);
+    h.descriptors = [{ id: 'opencode', label: 'OpenCode', defaultProfileId: 'opencode', profiles: [], targets: { models: [] } }] as unknown as HarnessAdapterDescriptor[];
+    h.effectiveDefault.mockResolvedValue({ ok: true, profile: 'opencode', family: 'opencode', source: 'global-default' });
+    render(composer(h.projects[0]));
+    fireEvent.click(await screen.findByRole('button', { name: 'Refresh modes' }));
+    expect(h.refresh).toHaveBeenCalledWith('acp-opencode');
+  });
+
   it('lets a native-only harness own its model selection without offering model reload', async () => {
     h.remembered = 'codex'; h.rememberedModel = 'old-model';
     h.descriptors[0] = { ...h.descriptors[0], modelSelection: 'native-only' };
@@ -209,7 +223,7 @@ describe('CLI Agent project-owned discovery', () => {
     await waitFor(() => expect(h.createTerminal).toHaveBeenCalledWith('local', 'codex', 80, 24, expect.objectContaining({
       harnessRouting: { schemaVersion: 1, byAdapter: { codex: { executionState: 'accept-edits' } } }
     })));
-    expect(h.reloadProvider).not.toHaveBeenCalled();
+    expect(h.refresh).not.toHaveBeenCalled();
   });
 
   it('renders project worktree override ahead of global default and reacts to setting changes', async () => {
@@ -305,5 +319,54 @@ describe('CLI Agent project-owned discovery', () => {
     await waitFor(() => expect(h.projectSettingsGet).toHaveBeenCalled());
     view.unmount();
     await act(async () => { reject(new Error('late')); });
+  });
+});
+
+describe('CLI Agent retained launch choices', () => {
+  const launchButton = () => screen.getByRole('button', { name: 'Launch agent' });
+  const ready = () => waitFor(() => expect(launchButton().hasAttribute('disabled')).toBe(false));
+
+  it('refuses to launch while the restored permission mode is unavailable', async () => {
+    h.permissionError = 'The saved permission mode is unavailable.';
+    render(composer(h.projects[1]));
+    await ready();
+    fireEvent.click(launchButton());
+    expect((await screen.findByTestId('legacy-agent-command-error')).textContent).toBe('The saved permission mode is unavailable.');
+    expect(h.createTerminal).not.toHaveBeenCalled();
+    expect(h.clear).not.toHaveBeenCalled();
+  });
+
+  it('refuses a model the user chose that the live catalogue no longer offers, and launches once they pick an offered one', async () => {
+    render(composer(h.projects[1]));
+    await ready();
+    act(() => h.modelProps!.onModelChange('retired-model'));
+    fireEvent.click(launchButton());
+    expect((await screen.findByTestId('legacy-agent-command-error')).textContent)
+      .toBe('The saved model is unavailable. Choose an available model before launching.');
+    expect(h.createTerminal).not.toHaveBeenCalled();
+    act(() => h.modelProps!.onModelChange('codex-live'));
+    fireEvent.click(launchButton());
+    await waitFor(() => expect(h.createTerminal).toHaveBeenCalledWith('remote', 'codex', 80, 24, expect.objectContaining({
+      harnessRouting: expect.objectContaining({ byAdapter: { codex: expect.objectContaining({ modelTargetId: 'codex-live' }) } })
+    })));
+  });
+
+  it('keeps an explicitly chosen model when the roster refreshes with different defaults', async () => {
+    h.catalog = catalog(['codex']);
+    render(composer(h.projects[1]));
+    await ready();
+    act(() => h.modelProps!.onModelChange('codex-live'));
+    updateCatalog({ ...catalog(['codex']), byProvider: { codex: { models: [{ model: 'codex-new', displayName: 'New' }, { model: 'codex-live', displayName: 'Live' }], selectedOnlyModels: [], modelLoadError: null } } } as ThreadModelCatalogSnapshot);
+    fireEvent.click(launchButton());
+    await waitFor(() => expect(h.createTerminal).toHaveBeenCalledWith('remote', 'codex', 80, 24, expect.objectContaining({
+      harnessRouting: expect.objectContaining({ byAdapter: { codex: expect.objectContaining({ modelTargetId: 'codex-live' }) } })
+    })));
+  });
+
+  it('shows the recording bar instead of the toolbar controls while dictating', async () => {
+    h.voiceState = 'recording';
+    render(composer(h.projects[1]));
+    expect(await screen.findByTestId('thread-voice-bar')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Launch agent' })).toBeNull();
   });
 });

@@ -1,7 +1,7 @@
 import { registerSalesforcePanels } from './panels.js';
 import { registerStudioDirectives } from './src/app/directives/index.js';
-import type { ComponentType } from 'react';
-import { definePluginApp, useComposerView, useZccContext, useZccNavigate } from '@zana-ai/zcc-plugin-sdk/app';
+import { definePluginApp, useComposerView } from '@zana-ai/zcc-plugin-sdk/app';
+import { AgentFileOpener } from './src/app/AgentFileOpener.js';
 import { AgentforcePlaygroundPanel } from './src/app/AgentScriptPanel.js';
 import { AgentforcePreviewPanel } from './src/app/AgentforcePreviewPanel.js';
 import { CreateSalesforceProjectDialog } from './src/app/CreateSalesforceProjectDialog.js';
@@ -11,6 +11,14 @@ import { SalesforceOrgsPanel } from './src/app/SalesforceOrgsPanel.js';
 import { SalesforceProjectTab } from './src/app/SalesforceProjectTab.js';
 import { SalesforceStudioDetachedCard } from './src/app/SalesforceStudioDetachedCard.js';
 import { openAgentforcePlayground, openAgentforcePreview } from './src/app/agentforce-panel-params.js';
+import { AGENT_SCRIPT_TOOLS } from './src/app/AgentScriptTools.js';
+import { studioPanelTool } from './src/app/studio/StudioPanelTool.js';
+import { isPanelTool, panelToolActionId } from './src/app/studio/studio-tool-bridge.js';
+
+const STUDIO_TOOL_ICONS: Record<string, string> = {
+  agents: 'Bot', graph: 'Network', preview: 'Play', test: 'FlaskConical', release: 'Rocket',
+  actions: 'Zap', comments: 'MessageSquare', 'org-preview': 'Cloud'
+};
 
 function hostReact() {
   return (globalThis as { __ZCC_HOST_REACT__?: typeof import('react') }).__ZCC_HOST_REACT__;
@@ -79,62 +87,6 @@ function SalesforceComposerBanner(props: { pluginId?: string }) {
   return null;
 }
 
-function AgentFileOpener(props: {
-  pluginId: string;
-  path: string;
-  source?: { threadId: string | null; projectId: string | null };
-  experimental_Original: ComponentType;
-}) {
-  const React = hostReact();
-  const navigate = useZccNavigate();
-  const context = useZccContext();
-  if (!React) return null;
-  const Original = props.experimental_Original;
-  const canOpen = Boolean(context.threadId);
-  return React.createElement(
-    'div',
-    { className: 'salesforce-agent-opener', style: { display: 'grid', gap: 8, padding: 8 } },
-    React.createElement('p', { style: { margin: 0, color: 'var(--text-muted)' } }, props.path),
-    React.createElement(
-      'button',
-      {
-        type: 'button',
-        disabled: !canOpen,
-        onClick: () => {
-          openAgentforcePlayground({
-            openThreadPanel: (options) => navigate.openThreadPanel(options),
-            projectId: context.projectId ?? props.source?.projectId,
-            path: props.path
-          });
-        }
-      },
-      'Open in Playground'
-    ),
-    React.createElement(
-      'button',
-      {
-        type: 'button',
-        disabled: !canOpen,
-        onClick: () => {
-          openAgentforcePreview({
-            openThreadPanel: (options) => navigate.openThreadPanel(options),
-            path: props.path
-          });
-        }
-      },
-      'Open in Preview'
-    ),
-    canOpen
-      ? null
-      : React.createElement(
-          'p',
-          { style: { margin: 0, color: 'var(--text-muted)' } },
-          'Open a thread to use the Agentforce Playground or Preview side panel.'
-        ),
-    React.createElement(Original)
-  );
-}
-
 export default definePluginApp((app) => {
   registerSalesforcePanels(app);
   registerStudioDirectives(app);
@@ -193,6 +145,20 @@ export default definePluginApp((app) => {
     scopes: ['thread', 'agent-session'],
     component: AgentforcePreviewPanel
   });
+  // Studio's tools in the side panel beside the Salesforce tab; Studio renders them (studio-tool-bridge).
+  for (const tool of AGENT_SCRIPT_TOOLS) {
+    if (!isPanelTool(tool.id)) continue;
+    app.slots.threadPanelAction({
+      id: panelToolActionId(tool.id),
+      title: tool.title,
+      category: 'Agent Script Studio',
+      icon: STUDIO_TOOL_ICONS[tool.id],
+      layout: 'flush',
+      scopes: ['plugin-page'],
+      pages: ['salesforce'],
+      component: studioPanelTool(tool.id, tool.title)
+    });
+  }
   app.slots.experimental_createProjectAction({
     id: 'dx-project',
     title: 'Salesforce project',

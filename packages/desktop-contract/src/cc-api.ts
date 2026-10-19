@@ -1,5 +1,6 @@
 import type { ThreadHistoryQuery, ThreadHistoryPage, ConversationTranscript } from '@zana-ai/zcc-domain/product';
 import type { DesktopBrowserApi } from './browser.js';
+import type { SquadLaunchPrefill, SquadProposalErrorCode } from '@zana-ai/zcc-domain/squad-proposal';
 import type { MarketplaceCatalogRow } from '@zana-ai/zcc-domain';
 import type { OwnNotificationLevel, ThreadNotificationState } from '@zana-ai/zcc-domain';
 import type {
@@ -1929,6 +1930,13 @@ export interface CcApi {
     cancel(launchRequestId: string): Promise<Result<CancelTeamLaunchResult>>;
     /** Start a durable Team job. Main re-authorizes Team/project and maps slots. */
     startJob(input: TeamJobLaunchInput): Promise<TeamJobLaunchResponse>;
+    /** Resolve a pending Squad proposal into a composer pre-fill. Desktop window only. */
+    reviewProposal(
+      proposalId: string
+    ): Promise<
+      | { ok: true; value: SquadLaunchPrefill }
+      | { ok: false; code: SquadProposalErrorCode; message: string }
+    >;
     /**
      * Launch a team as an AUTONOMOUS run into a project: opens orchestrator +
      * worker tabs, the orchestrator seeded with `goal`, and a main-side
@@ -1993,8 +2001,6 @@ export interface CcApi {
   };
   voice: {
     transcribe(audio: string, mimeType: string): Promise<VoiceTranscribeResult>;
-    /** Whether the host can transcribe (a host daemon is connected). */
-    hasApiKey(): Promise<boolean>;
     /** Ensure the OS-level (macOS TCC) microphone permission is granted.
      *  Resolves true if access is available, false if the user denied it.
      *  A no-op that resolves true on non-macOS platforms. */

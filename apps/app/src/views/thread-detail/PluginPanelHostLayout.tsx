@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useRef } from 'react';
+import { type ReactNode, useEffect, useMemo, useRef } from 'react';
 import { Bot, PanelRight } from 'lucide-react';
 import { getDesktopBrowserApi } from '../../lib/desktop-browser.js';
 import { getBrowserUrlHost } from '../../lib/browser-url.js';
@@ -6,14 +6,16 @@ import { ThreadSecondaryPanel } from '../../components/thread/secondary-panel/Th
 import { ThreadNewTabPage } from '../../components/thread/secondary-panel/ThreadNewTabPage.js';
 import { BrowserTabDeck } from '../../components/thread/secondary-panel/BrowserTabDeck.js';
 import { PanelAgentTab } from '../../components/thread/secondary-panel/PanelAgentTab.js';
+import { ThreadPluginTab } from '../../components/thread/secondary-panel/ThreadPluginTab.js';
 import { onPluginPanelAgentRequest } from '../../plugins/plugin-panel-agent.js';
+import { onPluginPanelToolRequest, PLUGIN_PAGE_PANEL_OWNER_PREFIX, PluginPagePanelProvider } from '../../plugins/plugin-page-panel.js';
 import { useSecondaryPanel } from '../../components/thread/secondary-panel/useThreadSecondaryPanel.js';
 import {
   activeClosableTab
 } from '../../components/thread/secondary-panel/threadSecondaryPanelState.js';
 
 export function pluginPanelBrowserOwnerId(pluginId: string, panelPath: string): string {
-  return `plugin-panel:${pluginId}:${panelPath}`;
+  return `${PLUGIN_PAGE_PANEL_OWNER_PREFIX}${pluginId}:${panelPath}`;
 }
 
 export function PluginPanelHostLayout({
@@ -21,6 +23,7 @@ export function PluginPanelHostLayout({
   panelPath,
   subPath,
   scopeId,
+  separateWindow = false,
   launchers = true,
   children
 }: {
@@ -30,6 +33,8 @@ export function PluginPanelHostLayout({
   subPath?: string;
   /** Keeps a separate panel per scope (a project tab's project) for the same page. */
   scopeId?: string;
+  /** Shown in its own window: keeps a panel apart from the main window's panel for the same page. */
+  separateWindow?: boolean;
   /**
    * The floating show-panel / ask-agent buttons. Without them the panel opens
    * only when the page asks (`navigate.openPanelAgent`), so a page with its own
@@ -40,7 +45,7 @@ export function PluginPanelHostLayout({
 }) {
   if (getDesktopBrowserApi() === null) return children;
   return (
-    <PluginPanelBrowserHost pluginId={pluginId} panelPath={panelPath} subPath={subPath} scopeId={scopeId} launchers={launchers}>
+    <PluginPanelBrowserHost pluginId={pluginId} panelPath={panelPath} subPath={subPath} scopeId={scopeId} separateWindow={separateWindow} launchers={launchers}>
       {children}
     </PluginPanelBrowserHost>
   );
@@ -51,6 +56,7 @@ function PluginPanelBrowserHost({
   panelPath,
   subPath,
   scopeId,
+  separateWindow,
   launchers,
   children
 }: {
@@ -58,10 +64,12 @@ function PluginPanelBrowserHost({
   panelPath: string;
   subPath?: string;
   scopeId?: string;
+  separateWindow: boolean;
   launchers: boolean;
   children: ReactNode;
 }) {
-  const ownerId = pluginPanelBrowserOwnerId(pluginId, scopeId ? `${panelPath}@${scopeId}` : panelPath);
+  // Windows share no live panel state, so each keeps its own saved one (the last writer would win otherwise).
+  const ownerId = pluginPanelBrowserOwnerId(pluginId, `${scopeId ? `${panelPath}@${scopeId}` : panelPath}${separateWindow ? '#window' : ''}`);
   const viewRef = useRef<HTMLDivElement>(null);
   const panel = useSecondaryPanel(ownerId, {
     getContainerWidthPx: () => viewRef.current?.clientWidth ?? 0
@@ -78,15 +86,26 @@ function PluginPanelBrowserHost({
   // The page asked to show a conversation (`navigate.openPanelAgent`); an open
   // tab for it is focused, not duplicated. A draft prefills the composer so the
   // user picks the harness before anything starts.
-  const { addTab, openAgentDraft } = panel;
+  const { activateTab, addTab, openAgentDraft, openPluginTool } = panel;
+  // This panel has no Info / Diff / Plan pins: when the shown tab closes, the last tab left takes over.
+  const fallbackTabId = panelOpen && !closable ? panel.state.tabs.at(-1)?.id : undefined;
+  useEffect(() => {
+    if (fallbackTabId) activateTab(fallbackTabId);
+  }, [activateTab, fallbackTabId]);
+  // The page's own side-panel tools (`navigate.openPanelTool`, `'plugin-page'` scope).
+  const page = useMemo(() => ({ pluginId, page: panelPath }), [pluginId, panelPath]);
+  useEffect(
+    () => onPluginPanelToolRequest(page, (target) => openPluginTool({ pluginId, ...target })),
+    [openPluginTool, page, pluginId]
+  );
   useEffect(
     () => onPluginPanelAgentRequest(pluginId, (target) => {
       if ('draft' in target) {
         openAgentDraft({ title: target.title ?? 'Agent', draft: target.draft, projectId: target.projectId, view: target.view });
       }
       else addTab({ kind: 'agent', title: target.title ?? 'Agent', threadId: target.threadId });
-    }),
-    [addTab, openAgentDraft, pluginId]
+    }, page),
+    [addTab, openAgentDraft, page, pluginId]
   );
 
   let panelBody = null;
@@ -111,6 +130,21 @@ function PluginPanelBrowserHost({
         }}
       />
     );
+  } else if (closable?.kind === 'plugin' && closable.moduleId === pluginId && closable.actionId) {
+    // Only this page's plugin; a stored tab naming another plugin is not mounted here.
+    panelBody = (
+      <ThreadPluginTab
+        key={closable.id}
+        moduleId={pluginId}
+        projectId={scopeId ?? null}
+        actionId={closable.actionId}
+        params={closable.params}
+        layout={closable.layout}
+        surface="plugin-page"
+        page={page}
+        tabId={closable.id}
+      />
+    );
   } else if (closable?.kind === 'new-tab') {
     panelBody = (
       <ThreadNewTabPage
@@ -118,10 +152,16 @@ function PluginPanelBrowserHost({
         cwd={null}
         threadId={ownerId}
         allowSidecarTerminal={false}
+        panelScope="plugin-page"
+        page={page}
         onOpenFile={() => undefined}
         onOpenBrowser={() => panel.addTab({ kind: 'browser', title: 'Browser', url: '' })}
         onOpenAgent={newAgent}
-        onOpenPlugin={() => undefined}
+        onOpenPlugin={(moduleId, title, options) => {
+          if (moduleId === pluginId && options?.actionId) {
+            openPluginTool({ pluginId, actionId: options.actionId, title, params: options.params ?? null, layout: options.layout });
+          }
+        }}
       />
     );
   }
@@ -134,7 +174,7 @@ function PluginPanelBrowserHost({
       style={panelOpen ? { ['--thread-secondary-width' as string]: `${panel.state.widthPx}px` } : undefined}
     >
       <div className="split-plugin-main">
-        {children}
+        <PluginPagePanelProvider page={page}>{children}</PluginPagePanelProvider>
         {panelOpen || !launchers ? null : (
           <div className="plugin-panel-host-launchers">
             <button
