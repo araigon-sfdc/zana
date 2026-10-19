@@ -25,6 +25,9 @@ vi.mock('../../../views/threads/ThreadDetailView.js', () => ({
 }));
 vi.mock('../../../lib/product-client.js', () => ({ product: { threads } }));
 vi.mock('react-router-dom', () => ({ useNavigate: () => navigate }));
+const viewWindow = vi.hoisted(() => ({ target: null as null | { pluginId: string }, show: vi.fn(async (_to: string) => undefined) }));
+vi.mock('../../../lib/pluginViewSurface.js', () => ({ getPluginViewTarget: () => viewWindow.target }));
+vi.mock('../../../plugins/plugin-view-windows.js', () => ({ showInMainWindow: viewWindow.show }));
 
 import { useComposerDraft } from '../../composer/ComposerDraft.js';
 import { resetComposerSessions } from '../../composer/composer-session.js';
@@ -108,6 +111,18 @@ describe('PanelAgentTab', () => {
     fireEvent.click(screen.getByTestId('panel-agent-open-as-thread'));
     expect(threads.openAsThread).toHaveBeenCalledWith('t1');
     await waitFor(() => expect(navigate).toHaveBeenCalledWith(expect.stringContaining('t1')));
+  });
+
+  it('opens the thread in the main window from a plugin view window', async () => {
+    viewWindow.target = { pluginId: 'salesforce' };
+    try {
+      render(<PanelAgentTab threadId="t1" pluginPanel={binding} onCreated={vi.fn()} />);
+      fireEvent.click(screen.getByTestId('panel-agent-open-as-thread'));
+      await waitFor(() => expect(viewWindow.show).toHaveBeenCalledWith(expect.stringContaining('t1')));
+      expect(navigate).not.toHaveBeenCalled();
+    } finally {
+      viewWindow.target = null;
+    }
   });
 
   it('reports a failed promotion and lets the user retry', async () => {
