@@ -6463,13 +6463,13 @@ describe("request routing", () => {
     const bridge = createBridgeJsonRpcTestHarness(handleLine);
     try {
       const params = { providerId: "claude-code" };
-      const requests: Array<[string, Record<string, unknown>, unknown]> = [
+      const requests = [
         ["provider/health", params, { probe: "health" }],
         ["provider/usage", params, { probe: "usage" }],
         ["provider/installation/status", params, { probe: "status" }],
         ["provider/installation/run", { ...params, action: "update" }, { probe: "update" }],
         ["thread/discard", { threadId: "thread-unknown", providerThreadId: "provider-unknown" }, { ok: true }],
-      ];
+      ] as const;
       for (const [index, [method, requestParams, result]] of requests.entries()) {
         bridge.sendRequest(index + 1, method, requestParams);
         expect((await bridge.waitForResponse(index + 1)).result).toEqual(result);
