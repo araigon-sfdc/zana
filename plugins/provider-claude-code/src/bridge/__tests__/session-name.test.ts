@@ -30,19 +30,19 @@ describe("latestSessionName", () => {
       '"agent-name" cut-off line from the tail start',
       customTitle("Old"),
       agentName("Old"),
-      JSON.stringify({ type: "user", message: { content: "Alex: MAR designer" } }),
-      customTitle("Alex: MAR designer"),
-      agentName("  Alex: MAR designer  "),
+      JSON.stringify({ type: "user", message: { content: "Reviewer: docs" } }),
+      customTitle("Reviewer: docs"),
+      agentName("  Reviewer: docs  "),
       agentName("   "),
       JSON.stringify({ type: "agent-name", agentName: 7 }),
       JSON.stringify({ type: "summary", "custom-title": "x" }),
     ].join("\n");
-    expect(latestSessionName(text)).toBe("Alex: MAR designer");
+    expect(latestSessionName(text)).toBe("Reviewer: docs");
   });
 
   it("prefers a fork's own title over the copied source name", () => {
-    const text = [customTitle("Alex"), agentName("Alex"), customTitle("Alex (fork)")].join("\n");
-    expect(latestSessionName(text)).toBe("Alex (fork)");
+    const text = [customTitle("Reviewer"), agentName("Reviewer"), customTitle("Reviewer (fork)")].join("\n");
+    expect(latestSessionName(text)).toBe("Reviewer (fork)");
   });
 
   it("returns undefined for a session that was never renamed", () => {
@@ -55,17 +55,17 @@ describe("readResumeSessionName", () => {
 
   it("reads the transcript in the cwd's project folder", () => {
     const file = path.join(projects, "C--work-my-app", "s.jsonl");
-    const fs = memoryFs({ [file]: agentName("Tom: EN tests") });
+    const fs = memoryFs({ [file]: agentName("Planner: release") });
     expect(readResumeSessionName({ sessionId: "s", cwd: "C:\\work\\my.app", env: { CLAUDE_CONFIG_DIR: "/cfg" }, fs }))
-      .toBe("Tom: EN tests");
+      .toBe("Planner: release");
   });
 
   it("falls back to scanning project folders and to ~/.claude", () => {
     vi.spyOn(os, "homedir").mockReturnValue("/home/me");
     const home = path.join("/home/me", ".claude", "projects");
     const file = path.join(home, "-very-long-path-hash", "s.jsonl");
-    const fs = memoryFs({ [file]: agentName("Ane: EU tests") }, { [home]: ["other", "-very-long-path-hash"] });
-    expect(readResumeSessionName({ sessionId: "s", cwd: "/very/long/path", env: {}, fs })).toBe("Ane: EU tests");
+    const fs = memoryFs({ [file]: agentName("Tester: smoke") }, { [home]: ["other", "-very-long-path-hash"] });
+    expect(readResumeSessionName({ sessionId: "s", cwd: "/very/long/path", env: {}, fs })).toBe("Tester: smoke");
     expect(readResumeSessionName({ sessionId: "missing", cwd: "/very/long/path", env: {}, fs })).toBeUndefined();
   });
 

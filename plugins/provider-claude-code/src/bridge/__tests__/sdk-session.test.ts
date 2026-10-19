@@ -490,13 +490,13 @@ describe("SdkSession", () => {
       mkdirSync(project, { recursive: true });
       writeFileSync(
         path.join(project, "session-1.jsonl"),
-        `${JSON.stringify({ type: "agent-name", agentName: "Alex: MAR designer" })}
+        `${JSON.stringify({ type: "agent-name", agentName: "Reviewer: docs" })}
 `,
       );
       const extraArgs = { chrome: null };
       const env = { CLAUDE_CONFIG_DIR: configDir };
       new SdkSession({ ...defaultOptions, env, extraArgs }, vi.fn(), vi.fn()).start("session-1");
-      expect(getLatestQueryCall().options.extraArgs).toEqual({ chrome: null, name: "Alex: MAR designer" });
+      expect(getLatestQueryCall().options.extraArgs).toEqual({ chrome: null, name: "Reviewer: docs" });
 
       new SdkSession({ ...defaultOptions, env, extraArgs }, vi.fn(), vi.fn()).start("session-2");
       expect(getLatestQueryCall().options.extraArgs).toEqual(extraArgs);
