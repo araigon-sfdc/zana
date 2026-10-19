@@ -21,6 +21,7 @@ import {
   missingClaudeCliGuidance,
   translateMissingClaudeCliError,
 } from "./missing-cli-error.js";
+import { readResumeSessionName } from "./session-name.js";
 
 export interface SdkSessionOptions {
   cwd: string;
@@ -245,6 +246,17 @@ export class SdkSession {
       });
     };
     const recordThreadId = this.options.recordThreadId;
+    const env = this.options.env ?? process.env;
+    const resumeName = resumeSessionId
+      ? readResumeSessionName({
+          sessionId: resumeSessionId,
+          cwd: this.options.cwd,
+          env,
+        })
+      : undefined;
+    const extraArgs = resumeName
+      ? { ...this.options.extraArgs, name: resumeName }
+      : this.options.extraArgs;
     const sdkOptions: Options = {
       abortController: this.abortController,
       cwd: this.options.cwd,
@@ -263,7 +275,7 @@ export class SdkSession {
       includePartialMessages: true,
       settingSources: ["user", "project", "local"],
       persistSession: true,
-      env: this.options.env ?? process.env,
+      env,
       stderr: onStderr,
       ...(this.options.mcpServers
         ? { mcpServers: this.options.mcpServers }
@@ -296,7 +308,7 @@ export class SdkSession {
       ...(this.options.plugins ? { plugins: this.options.plugins } : {}),
       ...(this.options.thinking ? { thinking: this.options.thinking } : {}),
       ...(this.options.settings ? { settings: this.options.settings } : {}),
-      ...(this.options.extraArgs ? { extraArgs: this.options.extraArgs } : {}),
+      ...(extraArgs ? { extraArgs } : {}),
     };
 
     try {
