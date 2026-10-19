@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   Options,
@@ -478,6 +481,30 @@ describe("SdkSession", () => {
         }),
       }),
     );
+  });
+
+  it("keeps a renamed session's name when resuming it", () => {
+    const configDir = mkdtempSync(path.join(tmpdir(), "claude-config-"));
+    try {
+      const project = path.join(configDir, "projects", "-tmp-test");
+      mkdirSync(project, { recursive: true });
+      writeFileSync(
+        path.join(project, "session-1.jsonl"),
+        `${JSON.stringify({ type: "agent-name", agentName: "Reviewer: docs" })}
+`,
+      );
+      const extraArgs = { chrome: null };
+      const env = { CLAUDE_CONFIG_DIR: configDir };
+      new SdkSession({ ...defaultOptions, env, extraArgs }, vi.fn(), vi.fn()).start("session-1");
+      expect(getLatestQueryCall().options.extraArgs).toEqual({ chrome: null, name: "Reviewer: docs" });
+
+      new SdkSession({ ...defaultOptions, env, extraArgs }, vi.fn(), vi.fn()).start("session-2");
+      expect(getLatestQueryCall().options.extraArgs).toEqual(extraArgs);
+      new SdkSession({ ...defaultOptions, env }, vi.fn(), vi.fn()).start();
+      expect(getLatestQueryCall().options.extraArgs).toBeUndefined();
+    } finally {
+      rmSync(configDir, { recursive: true, force: true });
+    }
   });
 });
 
