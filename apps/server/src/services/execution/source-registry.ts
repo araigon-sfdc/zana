@@ -289,6 +289,14 @@ export function createExecutionSourceRegistry(options: RegistryOptions) {
     try {
       const info = await handle.stat();
       if (!info.isFile()) throw new ExecutionSourceError('NOT_REGULAR_FILE', 'Execution source must be a regular file');
+      // `path` is canonical, so the handle must be the file it names now: a folder on the
+      // way swapped for a symlink after the realpath check would have opened another inode.
+      // Without openat this narrows the race rather than closing it.
+      let canonical: Awaited<ReturnType<typeof stat>> | undefined;
+      try { canonical = (await realpath(path)) === path ? await stat(path) : undefined; } catch { canonical = undefined; }
+      if (!canonical || canonical.dev !== info.dev || canonical.ino !== info.ino) {
+        throw new ExecutionSourceError('SOURCE_CHANGED', 'Execution source changed during read');
+      }
       const bytes = await readHandleBounded(handle, info.size, path, maxBytes);
       const after = await handle.stat();
       if (after.dev !== info.dev || after.ino !== info.ino || after.size !== info.size || !after.isFile()) {
@@ -338,13 +346,28 @@ export function createExecutionSourceRegistry(options: RegistryOptions) {
     }
   }
 
-  async function issue(input: { windowId: number; projectId: string; paths: string[] }): Promise<ExecutionSourceCapabilityView[]> {
+  /**
+   * `withinRoot` (optional) confines every source to that directory, checked against the
+   * realpath taken here. `resolve` later requires the same realpath, so a symlink swapped in
+   * after this check cannot redirect the capability outside the root.
+   */
+  async function issue(input: { windowId: number; projectId: string; paths: string[]; withinRoot?: string }): Promise<ExecutionSourceCapabilityView[]> {
     pruneCapabilities();
     if (input.paths.length > limits.maxFiles) throw new ExecutionSourceError('TOO_MANY_SOURCES', `Select at most ${limits.maxFiles} execution sources`);
+    let realRoot: string | undefined;
+    if (input.withinRoot !== undefined) {
+      try { realRoot = await realpath(input.withinRoot); } catch { throw new ExecutionSourceError('UNSUPPORTED_SOURCE', 'Execution source root is unavailable'); }
+    }
     const canonical: Array<{ exactPath: string; canonicalPath: string; representations: string[] }> = [];
     for (const exactPath of input.paths) {
       let real: string;
       try { real = await realpath(exactPath); } catch { throw new ExecutionSourceError('SOURCE_CHANGED', 'Selected execution source is unavailable'); }
+      if (realRoot !== undefined) {
+        const rel = relative(realRoot, real);
+        if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+          throw new ExecutionSourceError('UNSUPPORTED_SOURCE', 'Execution source is outside the project');
+        }
+      }
       if (canonical.some(({ canonicalPath }) => canonicalPath === real)) throw new ExecutionSourceError('DUPLICATE_SOURCE', 'Duplicate execution source selected');
       canonical.push({ exactPath, canonicalPath: real, representations: pathRepresentations(exactPath, real) });
     }
