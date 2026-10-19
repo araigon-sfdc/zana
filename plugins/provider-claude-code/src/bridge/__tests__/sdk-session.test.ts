@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type {
   Options,
   SDKMessage,
@@ -81,6 +81,14 @@ function keepSdkStreamOpen(): void {
 }
 
 function mockProcessUid(uid: number): void {
+  if (process.getuid === undefined) {
+    // Windows has no process.getuid to spy on; add one for this test only.
+    process.getuid = () => uid;
+    onTestFinished(() => {
+      delete process.getuid;
+    });
+    return;
+  }
   vi.spyOn(process, "getuid").mockReturnValue(uid);
 }
 
