@@ -38,7 +38,6 @@ import {
   type SDKMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import { fromProviderExternalThreadName } from "@zana-ai/zcc-domain/thread-runtime";
 import {
   createClaudeDeltaTranslator,
   type ClaudeDeltaTranslator,
@@ -402,6 +401,9 @@ function requireSkillPluginsRoot(): string {
 }
 
 const THREAD_STOP_CLOSE_TIMEOUT_MS = 4_000;
+// The runtime tags provider-facing names `[zcc] <title>` (`[bb] ` on older
+// builds). Host entries cannot import zcc-domain's helper, so strip one tag here.
+const PROVIDER_THREAD_NAME_TAG = /^\[(?:zcc|bb)\] /;
 export const CLAUDE_IDLE_QUERY_GRACE_MS = 30_000;
 const CLAUDE_CHROME_SETTING_RESTART_REASON = "Claude in Chrome setting changed";
 
@@ -2839,7 +2841,7 @@ async function handleThreadNameSet(
 ): Promise<void> {
   // Claude sessions address each other by name (SendMessage), so the session
   // gets the plain thread title without the runtime's provider-facing tag.
-  const title = fromProviderExternalThreadName(params.title).trim();
+  const title = params.title.replace(PROVIDER_THREAD_NAME_TAG, "").trim();
   if (!title) {
     sendError(id, BRIDGE_JSON_RPC_ERRORS.INVALID_PARAMS, "thread/name/set requires a title");
     return;
