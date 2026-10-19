@@ -21,6 +21,18 @@ describe('platformShortcut', () => {
     expect(platformShortcut('↵ new · ⇧↵ active tab', 'Win32')).toBe('Enter new · Shift+Enter active tab');
   });
 
+  it('spells key glyphs by name, alone or after modifiers', () => {
+    expect(platformShortcut('⌘⌫ deletes the line', 'Win32')).toBe('Ctrl+Backspace deletes the line');
+    expect(platformShortcut('⎋ closes · ⇧⇥ goes back · ⌦ removes', 'Win32')).toBe('Esc closes · Shift+Tab goes back · Delete removes');
+    expect(platformKey('⎋', 'Win32')).toBe('Esc');
+    expect(platformShortcut('⌘⌫', 'MacIntel')).toBe('⌘⌫');
+  });
+
+  it('shows ⌃⌘ chords as the single Ctrl they are pressed with off macOS', () => {
+    expect(platformShortcut('⌃⌘X', 'Win32')).toBe(platformShortcut('⌘X', 'Win32'));
+    expect(platformShortcut('⌃⌥⌘X', 'Win32')).toBe('Ctrl+Alt+X');
+  });
+
   it('collapses already-bilingual copy to the PC half', () => {
     expect(platformShortcut('⌘/Ctrl+Enter to run', 'Win32')).toBe('Ctrl+Enter to run');
   });
