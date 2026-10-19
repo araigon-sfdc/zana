@@ -75,7 +75,7 @@ import {
   sha256Hex,
   writeAgentFile
 } from './agent-files.js';
-import { createReleaseService, ReadGrants } from './release.js';
+import { clickedSdk, createReleaseService, ReadGrants } from './release.js';
 import { RELEASE_RPC } from './release-contract.js';
 import { parseAgentScriptSource } from './agent-script-parse.js';
 import { readProjectAction } from './action-source.js';
@@ -377,8 +377,10 @@ export async function createSalesforcePlugin(zcc: ZccPluginApi, deps: Salesforce
     }
     return readStatus();
   });
-  registerRpc('orgs', async () => {
+  registerRpc('orgs', async (args) => {
     try {
+      // The roster is cached until sign-in; Refresh picks up orgs added or removed from a terminal.
+      if (args && typeof args === 'object' && (args as { refresh?: unknown }).refresh === true) connections.refreshOrgs();
       const orgs = await sdk.listOrgs();
       const selectedAlias = await sdk.resolveAlias();
       return { ok: true, orgs, selectedAlias, targetSource: contexts.current()?.targetSource ?? 'shared' };
@@ -391,7 +393,7 @@ export async function createSalesforcePlugin(zcc: ZccPluginApi, deps: Salesforce
   const orgLogin = new OrgLoginService({
     execSf: deps.execSf,
     listOrgs: () => sdk.listOrgs(),
-    invalidate: () => connections.invalidate(),
+    invalidate: () => { connections.invalidate(); connections.refreshOrgs(); },
   });
   zcc.onDispose(() => orgLogin.dispose());
   const runOrgLogin = async (args: unknown) => {
@@ -618,8 +620,8 @@ export async function createSalesforcePlugin(zcc: ZccPluginApi, deps: Salesforce
   });
   registerRpc('agentScript.examples', async () => ({ ok: true, examples: AGENT_SCRIPT_EXAMPLES }));
   // A "Load versions" approval also lets Compile reach a production org from the window.
-  registerRpc('agentScript.compile', (args) => runUiCompile(args, readGrants.wrap(sdk, releaseScope()), deps, readSettings));
-  registerRpc('agentBuilder.open', (args) => runOpenInBuilder(args, readGrants.wrap(sdk, releaseScope()), deps, readSettings));
+  registerRpc('agentScript.compile', (args) => runUiCompile(args, clickedSdk(readGrants.wrap(sdk, releaseScope()), args), deps, readSettings));
+  registerRpc('agentBuilder.open', (args) => runOpenInBuilder(args, clickedSdk(readGrants.wrap(sdk, releaseScope()), args), deps, readSettings));
   const release = createReleaseService({
     sdk,
     evidence: evalEvidence,
