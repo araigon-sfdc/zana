@@ -2466,6 +2466,17 @@ export interface AppConfig {
    */
   autoCloseIdleMinutes?: number;
   /**
+   * Minutes a thread's provider session (the Claude Code or Codex process
+   * behind a non-terminal thread) may sit idle before the host daemon stops it
+   * to free memory; the next turn resumes it with its history. A stopped
+   * session cannot receive messages from other sessions or fire its own
+   * scheduled wakeups until then. A session with an active turn or open
+   * background work (such as a backgrounded shell) is never stopped. `0` ⇒
+   * never. Absent ⇒ {@link THREAD_SESSION_RELEASE_DEFAULTS.minutes} (30).
+   * Clamped in {@link normalizeConfig}; read live on each sweep.
+   */
+  threadSessionReleaseMinutes?: number;
+  /**
    * When an idle agent is auto-closed (see {@link autoCloseIdleEnabled}), also
    * drop a folded breadcrumb into the inbox's collapsed "Agent closed" section.
    * Default OFF — an idle auto-close is routine bookkeeping already recorded in
@@ -2898,6 +2909,21 @@ export const AUTO_CLOSE_IDLE_DEFAULTS = {
   minMinutes: 1,
   maxMinutes: 240
 } as const;
+
+export const THREAD_SESSION_RELEASE_DEFAULTS = {
+  minutes: 30,
+  minMinutes: 5,
+  maxMinutes: 1440
+} as const;
+
+/** Settings choices for {@link AppConfig.threadSessionReleaseMinutes}; `0` ⇒ never. */
+export const THREAD_SESSION_RELEASE_CHOICES = [30, 60, 120, 240, 480, 0] as const;
+
+export function threadSessionReleaseLabel(minutes: number): string {
+  if (minutes <= 0) return 'Never';
+  if (minutes % 60 === 0) return `After ${minutes / 60} hour${minutes === 60 ? '' : 's'}`;
+  return `After ${minutes} minutes`;
+}
 
 /** Launch-surface default revision. See {@link AppConfig.composerLaunchSurfacesRev}. */
 export const COMPOSER_LAUNCH_SURFACES_REV = 2;

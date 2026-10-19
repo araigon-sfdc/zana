@@ -61,7 +61,7 @@ export default function plugin(zcc: ZccPluginApi) {
       fork: "checkpoint",
       supportsManualCompaction: true,
       supportsThreadArchive: false,
-      supportsThreadRename: false,
+      supportsThreadRename: true,
       supportsWorkflows: true,
       permissionModes: ["accept-edits", "auto", "full"],
       reasoningLevels: [
