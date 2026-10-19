@@ -33,23 +33,53 @@ export const NODE_CLI_PROCESS: CliProcessDeps = {
 /**
  * On Windows `sf` is an `sf.cmd` shim that cannot be spawned without a shell,
  * so every call used to fail as "CLI not found". There we launch the install's
- * own `node.exe` on its CLI entry instead (see `resolveWindowsSf`).
+ * own `node.exe` on its CLI entry instead (see `resolveWindowsSf`). Other
+ * platforms keep the `execFile('sf')` capture unchanged.
  */
 export function createExecSf(deps: CliProcessDeps = NODE_CLI_PROCESS): (args: string[], opts?: ExecSfOptions) => Promise<ExecResult> {
   return async (args, opts) => {
-    if (deps.platform !== 'win32') return runCli('sf', args, opts, deps);
+    if (deps.platform !== 'win32') return execSf(args, opts);
     const launch = deps.resolveWindowsSf();
     if (!launch) return { code: 127, stdout: '', stderr: 'Salesforce CLI (sf) was not found on PATH.' };
-    return runCli(launch.command, [...launch.args, ...args], opts, deps);
+    return runCli(launch.command, [...launch.args, ...args], { ...opts, env: launch.env }, deps);
   };
+}
+
+function execSf(args: string[], opts?: ExecSfOptions): Promise<ExecResult> {
+  return new Promise((resolve) => {
+    execFileCb(
+      'sf',
+      args,
+      {
+        timeout: opts?.timeoutMs ?? SF_CLI_TIMEOUT_MS,
+        maxBuffer: MAX_BUFFER,
+        windowsHide: true,
+        ...(opts?.signal ? { signal: opts.signal } : {}),
+        ...(opts?.cwd ? { cwd: opts.cwd } : {})
+      },
+      (error, stdout, stderr) => {
+        resolve({
+          code: execCode(error),
+          stdout: stdout ?? '',
+          stderr: stderr ?? ''
+        });
+      }
+    );
+  });
 }
 
 /**
  * Runs a CLI without a shell, bounded by a timeout, an optional abort signal
- * and an output cap. On Windows a stop kills the whole process tree, so an
+ * and an output cap shared by stdout and stderr. `env` is layered over the
+ * current environment. On Windows a stop kills the whole process tree, so an
  * abandoned `sf org login web` does not keep holding its callback port.
  */
-export function runCli(command: string, args: string[], opts: ExecSfOptions = {}, deps: CliProcessDeps = NODE_CLI_PROCESS): Promise<ExecResult> {
+export function runCli(
+  command: string,
+  args: string[],
+  opts: ExecSfOptions & { env?: Record<string, string> } = {},
+  deps: CliProcessDeps = NODE_CLI_PROCESS
+): Promise<ExecResult> {
   return new Promise((resolve) => {
     let stdout = '';
     let stderr = '';
@@ -72,7 +102,12 @@ export function runCli(command: string, args: string[], opts: ExecSfOptions = {}
     if (opts.signal?.aborted) return stop();
     opts.signal?.addEventListener('abort', stop, { once: true });
     try {
-      child = deps.spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, ...(opts.cwd ? { cwd: opts.cwd } : {}) });
+      child = deps.spawn(command, args, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+        ...(opts.env ? { env: { ...process.env, ...opts.env } } : {}),
+        ...(opts.cwd ? { cwd: opts.cwd } : {})
+      });
     } catch (error) {
       return finish(execCode(error as Error));
     }

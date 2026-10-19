@@ -25,27 +25,26 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
 afterEach(() => vi.useRealTimers());
 
 describe('createExecSf', () => {
-  it('spawns sf without a shell and collects output with the exit code', async () => {
-    const { child, deps: d } = deps();
-    const result = createExecSf(d)(['org', 'list'], { cwd: '/proj' });
+  it('launches the resolved install on Windows with its shim env and reports a missing CLI as 127', async () => {
+    const launch = {
+      command: 'C:\\sf\\client\\bin\\node.exe',
+      args: ['--no-deprecation', 'C:\\sf\\client\\bin\\run.js'],
+      env: { SF_BINPATH: 'C:\\sf\\bin\\sf.cmd' }
+    };
+    const { child, deps: d } = deps({ platform: 'win32', resolveWindowsSf: vi.fn(() => launch) });
+    const utterance = 'say "hi" & 50%';
+    const result = createExecSf(d)(['agent', 'preview', 'send', '--utterance', utterance], { cwd: 'C:\\proj' });
     child.stdout.write('out');
     child.stderr.write('err');
     await tick();
     child.emit('close', 2);
     await expect(result).resolves.toEqual({ code: 2, stdout: 'out', stderr: 'err' });
-    expect(d.spawn).toHaveBeenCalledWith('sf', ['org', 'list'], { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, cwd: '/proj' });
-    expect(d.resolveWindowsSf).not.toHaveBeenCalled();
-  });
-
-  it('launches the resolved install on Windows and reports a missing CLI as 127', async () => {
-    const launch = { command: 'C:\\sf\\client\\bin\\node.exe', args: ['--no-deprecation', 'C:\\sf\\client\\bin\\run.js'] };
-    const { child, deps: d } = deps({ platform: 'win32', resolveWindowsSf: vi.fn(() => launch) });
-    const utterance = 'say "hi" & 50%';
-    const result = createExecSf(d)(['agent', 'preview', 'send', '--utterance', utterance]);
-    await tick();
-    child.emit('close', 0);
-    await expect(result).resolves.toMatchObject({ code: 0 });
-    expect(d.spawn).toHaveBeenCalledWith(launch.command, [...launch.args, 'agent', 'preview', 'send', '--utterance', utterance], expect.objectContaining({ windowsHide: true }));
+    expect(d.spawn).toHaveBeenCalledWith(launch.command, [...launch.args, 'agent', 'preview', 'send', '--utterance', utterance], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+      env: { ...process.env, SF_BINPATH: 'C:\\sf\\bin\\sf.cmd' },
+      cwd: 'C:\\proj'
+    });
 
     const missing = deps({ platform: 'win32' });
     await expect(createExecSf(missing.deps)(['--version'])).resolves.toEqual({ code: 127, stdout: '', stderr: 'Salesforce CLI (sf) was not found on PATH.' });

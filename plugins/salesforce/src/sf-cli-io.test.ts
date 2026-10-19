@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFile } from 'node:child_process';
-import { createContainedSpawner, NODE_CLI_PROCESS, salesforceRestRequest } from '../lib/sf-cli.js';
+import { createContainedSpawner, createExecSf, NODE_CLI_PROCESS, salesforceRestRequest } from '../lib/sf-cli.js';
 import type { ResolvedOrg } from '../lib/types.js';
 
 vi.mock('node:child_process', () => ({
@@ -34,6 +34,35 @@ describe('default CLI process deps', () => {
     (mocked.mock.calls[0]![3] as () => void)();
     const launch = NODE_CLI_PROCESS.resolveWindowsSf();
     expect(launch === null || typeof launch.command === 'string').toBe(true);
+  });
+});
+
+describe('sf on macOS and Linux', () => {
+  const execSf = createExecSf({ ...NODE_CLI_PROCESS, platform: 'linux' });
+
+  afterEach(() => {
+    mocked.mockReset();
+  });
+
+  it('runs sf through execFile with the timeout, buffer cap, signal and cwd', async () => {
+    const controller = new AbortController();
+    mocked.mockImplementation((cmd, args, opts, cb) => {
+      expect([cmd, args]).toEqual(['sf', ['agent', 'validate', 'authoring-bundle']]);
+      expect(opts).toEqual({ timeout: 120_000, maxBuffer: 2_000_000, windowsHide: true, signal: controller.signal, cwd: '/proj' });
+      (cb as (error: Error | null, stdout: string, stderr: string) => void)(null, '{"status":0}', '');
+      return undefined as never;
+    });
+    await expect(execSf(['agent', 'validate', 'authoring-bundle'], { cwd: '/proj', timeoutMs: 120_000, signal: controller.signal }))
+      .resolves.toEqual({ code: 0, stdout: '{"status":0}', stderr: '' });
+  });
+
+  it('maps execFile errors to exit codes and defaults missing output', async () => {
+    mocked.mockImplementation((_cmd, _args, opts, cb) => {
+      expect(opts).toEqual({ timeout: 30_000, maxBuffer: 2_000_000, windowsHide: true });
+      (cb as (error: Error | null, stdout?: string, stderr?: string) => void)(Object.assign(new Error('missing'), { code: 'ENOENT' }));
+      return undefined as never;
+    });
+    await expect(execSf(['--version'])).resolves.toEqual({ code: 127, stdout: '', stderr: '' });
   });
 });
 
