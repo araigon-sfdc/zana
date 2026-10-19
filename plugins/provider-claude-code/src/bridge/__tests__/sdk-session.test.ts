@@ -11,6 +11,7 @@ const mockQueryInstance = {
   interrupt: vi.fn(),
   setModel: vi.fn(),
   setPermissionMode: vi.fn(),
+  renameSession: vi.fn(),
   stopTask: vi.fn(),
   [Symbol.asyncIterator]: vi.fn(),
 };
@@ -194,6 +195,30 @@ describe("SdkSession", () => {
     const session = new SdkSession(defaultOptions, vi.fn(), vi.fn());
     await expect(session.stopTask("task-1")).resolves.toBe(false);
     expect(mockQueryInstance.stopTask).not.toHaveBeenCalled();
+  });
+
+  it("rename sends the title to the live query for its session", async () => {
+    keepSdkStreamOpen();
+    mockQueryInstance.renameSession.mockResolvedValue(undefined);
+    const session = new SdkSession(
+      { ...defaultOptions, sessionId: "session-rename" },
+      vi.fn(),
+      vi.fn(),
+    );
+    session.start();
+    await expect(session.rename("Reviewer")).resolves.toBe(true);
+    expect(mockQueryInstance.renameSession).toHaveBeenCalledWith(
+      "Reviewer",
+      "session-rename",
+    );
+    session.stop();
+  });
+
+  it("rename returns false without calling the SDK when no query is running", async () => {
+    mockQueryInstance.renameSession.mockClear();
+    const session = new SdkSession(defaultOptions, vi.fn(), vi.fn());
+    await expect(session.rename("Reviewer")).resolves.toBe(false);
+    expect(mockQueryInstance.renameSession).not.toHaveBeenCalled();
   });
 
   it("stop cleans up state", () => {

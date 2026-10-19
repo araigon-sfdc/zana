@@ -159,6 +159,10 @@ function buildSdkPermissionOptions(
   };
 }
 
+interface RenamableQuery {
+  renameSession(title: string, sessionId?: string): Promise<void>;
+}
+
 export class SdkSession {
   private query: Query | undefined;
   private sessionId: string | undefined;
@@ -203,6 +207,22 @@ export class SdkSession {
   async stopTask(taskId: string): Promise<boolean> {
     if (this.query === undefined) return false;
     await this.query.stopTask(taskId);
+    return true;
+  }
+
+  /**
+   * False when the query is not running; the caller then renames the
+   * transcript instead. A live process keeps its title in memory and would
+   * overwrite a transcript-only rename, so it has to be told directly.
+   */
+  async rename(title: string): Promise<boolean> {
+    if (this.query === undefined) return false;
+    // Sends `rename_session` with source "host", which Claude Code records as
+    // a user rename. The SDK implements it but does not type it on Query yet.
+    await (this.query as Query & RenamableQuery).renameSession(
+      title,
+      this.sessionId,
+    );
     return true;
   }
 
