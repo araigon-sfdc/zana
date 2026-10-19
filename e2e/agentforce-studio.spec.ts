@@ -1008,8 +1008,11 @@ test('Agentforce Studio: create local agents and control the visible workbench t
   expect(await cli(['lint', created.file.path], false)).toMatchObject({ exitCode: 0, stdout: expect.stringContaining(': ok') });
   const agent = (input: object) => cli(['tool', 'sf_agent', '--input', JSON.stringify(input)]);
   expect(await agent({ action: 'compile', path: created.file.path })).toMatchObject({ ok: true });
-  expect(await agent({ action: 'preview.start', path: created.file.path })).toMatchObject({ ok: true, data: { sessionId: 'cli-preview' } });
-  expect(await agent({ action: 'preview.end', sessionId: 'cli-preview' })).toMatchObject({ ok: true });
+  // A new draft has no default_agent_user, so its preview runs on the Preview API, not `sf agent preview`.
+  const preview = await agent({ action: 'preview.start', path: created.file.path });
+  expect(preview).toMatchObject({ ok: true, data: { sessionId: expect.any(String) } });
+  expect(preview.data.sessionId).not.toBe('cli-preview');
+  expect(await agent({ action: 'preview.end', sessionId: preview.data.sessionId })).toMatchObject({ ok: true });
   const specPath = 'agentforce-drafts/evals.json';
   writeFileSync(join(projectRoot, specPath), JSON.stringify({ tests: [{ utterance: 'Hello' }] }));
   expect(await agent({ action: 'eval.run', specPath })).toMatchObject({ ok: true, data: { passed: true } });
