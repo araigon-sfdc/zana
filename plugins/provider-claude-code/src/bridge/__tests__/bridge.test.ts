@@ -36,6 +36,13 @@ vi.mock("@anthropic-ai/claude-agent-sdk", () => ({
   tool: vi.fn((_name, _desc, _schema, handler) => handler),
 }));
 
+vi.mock("../provider-maintenance.js", () => ({
+  getClaudeProviderHealth: vi.fn(async () => ({ probe: "health" })),
+  getClaudeProviderUsage: vi.fn(async () => ({ probe: "usage" })),
+  getClaudeProviderInstallationStatus: vi.fn(async () => ({ probe: "status" })),
+  getClaudeProviderInstallationRun: vi.fn(async (action: string) => ({ probe: action })),
+}));
+
 import { CLAUDE_IDLE_QUERY_GRACE_MS, handleLine } from "../bridge.js";
 import {
   type BuildSessionOptionsArgs,
@@ -6445,6 +6452,28 @@ describe("thread/name/set", () => {
         code: -32000,
         message: "no transcript",
       });
+    } finally {
+      bridge.restore();
+    }
+  });
+});
+
+describe("request routing", () => {
+  it("answers provider maintenance and thread/discard requests", async () => {
+    const bridge = createBridgeJsonRpcTestHarness(handleLine);
+    try {
+      const params = { providerId: "claude-code" };
+      const requests: Array<[string, Record<string, unknown>, unknown]> = [
+        ["provider/health", params, { probe: "health" }],
+        ["provider/usage", params, { probe: "usage" }],
+        ["provider/installation/status", params, { probe: "status" }],
+        ["provider/installation/run", { ...params, action: "update" }, { probe: "update" }],
+        ["thread/discard", { threadId: "thread-unknown", providerThreadId: "provider-unknown" }, { ok: true }],
+      ];
+      for (const [index, [method, requestParams, result]] of requests.entries()) {
+        bridge.sendRequest(index + 1, method, requestParams);
+        expect((await bridge.waitForResponse(index + 1)).result).toEqual(result);
+      }
     } finally {
       bridge.restore();
     }
