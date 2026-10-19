@@ -77,6 +77,7 @@ import { BottomTests, BottomTrace } from './studio/BottomPanes.js';
 import { STUDIO_TOKENS } from './studio/studio-tokens.js';
 import { useSuites, withSuiteBadges } from './studio/useSuites.js';
 import { useContextChangeRelay } from './context-sync.js';
+import { modShortcut } from './shortcut-label.js';
 
 const PLUGIN_ID = 'salesforce';
 const PANEL_ROOT: CSSProperties = { height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column' };
@@ -869,7 +870,7 @@ function AgentScriptWorkspace(props: AgentScriptPanelProps) {
   const workspaceActions = stripOwnsWorkspace ? <>
     {followChip}
     {props.headerActions}
-    <button type="button" className="icon-btn" title="Go to file (⌘P)" aria-label="Go to file" onClick={() => setQuickOpen(true)}><Search size={15} aria-hidden="true" /></button>
+    <button type="button" className="icon-btn" title={`Go to file (${modShortcut('P')})`} aria-label="Go to file" onClick={() => setQuickOpen(true)}><Search size={15} aria-hidden="true" /></button>
     {orgPicker && <div className="af-document-org">{orgPicker}</div>}
     {!tools.state.open && !compact && <button type="button" className="icon-btn" title="Show side panel" aria-label="Show side panel" aria-expanded={false} onClick={tools.toggle}><PanelRight size={15} aria-hidden="true" /></button>}
   </> : undefined;
