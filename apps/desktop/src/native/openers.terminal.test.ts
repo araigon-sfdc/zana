@@ -10,7 +10,7 @@ const h = vi.hoisted(() => ({
   spawns: [] as Array<{ cmd: string; args: string[]; opts: Record<string, unknown>; child: { kill: () => void } }>,
   exit: 0 as number | 'hang',
   error: null as Error | null,
-  throws: null as Error | null
+  throws: null as unknown
 }));
 vi.mock('node:child_process', () => ({
   spawn: (cmd: string, args: string[], opts: Record<string, unknown>) => {
@@ -18,13 +18,14 @@ vi.mock('node:child_process', () => ({
     const child = Object.assign(new EventEmitter(), { kill: vi.fn(), unref: vi.fn() });
     h.spawns.push({ cmd, args, opts, child });
     queueMicrotask(() => {
-      if (h.error) child.emit('error', h.error);
-      else if (h.exit !== 'hang') child.emit('exit', h.exit);
+      if (h.error) return void child.emit('error', h.error);
+      child.emit('spawn');
+      if (h.exit !== 'hang') child.emit('exit', h.exit);
     });
     return child;
   }
 }));
-vi.mock('electron', () => ({ shell: { openPath: vi.fn(), showItemInFolder: vi.fn(), openExternal: vi.fn() } }));
+vi.mock('electron', () => ({ shell: { openPath: vi.fn(async () => ''), showItemInFolder: vi.fn(), openExternal: vi.fn(async () => {}) } }));
 
 const { openIn, windowsTerminalScript } = await import('./openers.js');
 
@@ -102,6 +103,9 @@ describe('openIn terminal on Windows', () => {
 
     h.throws = new Error('EPERM');
     expect((await openIn('terminal', dir)).message).toBe(`Could not open powershell.exe in ${dir}. EPERM`);
+
+    h.throws = 'denied';
+    expect((await openIn('terminal', dir)).message).toBe(`Could not open powershell.exe in ${dir}. denied`);
   });
 
   it('kills a launcher that never finishes', async () => {
@@ -122,5 +126,16 @@ describe('openIn terminal elsewhere', () => {
       message: 'External terminal launch is not yet supported on this platform.'
     });
     expect(h.spawns).toEqual([]);
+  });
+
+  it('leaves the other targets unchanged', async () => {
+    Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
+    for (const target of ['cursor', 'code', 'intellij'] as const) {
+      expect(await openIn(target, dir)).toEqual({ ok: true });
+    }
+    expect(h.spawns.map((s) => s.cmd)).toEqual(['cursor', 'code', 'idea']);
+    expect(await openIn('finder', dir)).toEqual({ ok: true });
+    expect(await openIn('browser', 'https://example.com')).toEqual({ ok: true });
+    expect((await openIn('browser', 'file:///etc/passwd')).ok).toBe(false);
   });
 });
