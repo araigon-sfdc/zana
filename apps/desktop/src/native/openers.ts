@@ -2,7 +2,8 @@ import { spawn } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
 import { win32 } from 'node:path';
 import { shell } from 'electron';
-import type { OpenResult, OpenTarget } from '@zana-ai/zcc-domain/product';
+import type { EditorTarget, OpenResult, OpenTarget } from '@zana-ai/zcc-domain/product';
+import { resolveWindowsEditorLaunch, WINDOWS_INSTALL_HINTS } from '@zana-ai/zcc-server/services/projects/editor-windows';
 
 /**
  * Per-target overrides the caller (main's IPC handler) resolves from `AppConfig`
@@ -40,10 +41,10 @@ function pickMacTerminalApp(): string {
   return 'Terminal';
 }
 
-function spawnDetached(cmd: string, args: string[]): Promise<OpenResult> {
+function spawnDetached(cmd: string, args: string[], env?: NodeJS.ProcessEnv): Promise<OpenResult> {
   return new Promise((resolve) => {
     try {
-      const child = spawn(cmd, args, { detached: true, stdio: 'ignore' });
+      const child = spawn(cmd, args, { detached: true, stdio: 'ignore', ...(env ? { env } : {}) });
       child.once('error', (err) => {
         resolve({ ok: false, message: err.message });
       });
@@ -146,14 +147,30 @@ function openWindowsTerminal(dir: string, program: string, timeoutMs = 20_000): 
  * bare `spawn('cursor', …)` fails with ENOENT and, with `stdio:'ignore'`, fails
  * SILENTLY. When the shim can't be found we fall back to `open -a <App>` for the
  * first installed app-name candidate; only if BOTH miss do we surface the
- * install hint. Non-macOS keeps CLI-only (the fallback is an `open` feature).
+ * install hint. Linux keeps CLI-only (the fallback is an `open` feature).
+ *
+ * Windows shims are batch files `spawn` can't start without a shell, so there we
+ * run what the shim runs, directly (see `editor-windows.ts`): `Code.exe cli.js
+ * -n <path>` as Node. Without `cli.js`, the bare exe gets just the path: with
+ * `-n` a running VS Code exits 0 and opens nothing.
  */
 async function openInEditor(
+  target: EditorTarget,
+  name: string,
   cli: string,
   cliArgs: string[],
   appNames: string[],
   installHint: string
 ): Promise<OpenResult> {
+  if (process.platform === 'win32') {
+    const launch = await resolveWindowsEditorLaunch(target, cli);
+    const notFound = `Could not launch ${name}. Install it ${WINDOWS_INSTALL_HINTS[target]} in Settings → Editor.`;
+    if (!launch) return { ok: false, message: notFound };
+    const viaExe = launch.cliJs
+      ? await spawnDetached(launch.exe, [launch.cliJs, ...cliArgs], { ...process.env, ELECTRON_RUN_AS_NODE: '1', VSCODE_DEV: '' })
+      : await spawnDetached(launch.exe, cliArgs[0] === '-n' ? cliArgs.slice(1) : cliArgs);
+    return viaExe.ok ? viaExe : { ok: false, message: `${notFound} (${viaExe.message})` };
+  }
   const viaCli = await spawnDetached(cli, cliArgs);
   if (viaCli.ok) return viaCli;
   if (process.platform === 'darwin') {
@@ -182,6 +199,8 @@ export async function openIn(
       // one — opening a project shouldn't hijack whatever the user already has
       // open in the editor.
       return openInEditor(
+        'cursor',
+        'Cursor',
         bin(overrides.cursorBinary, 'cursor'),
         ['-n', path],
         appNames(overrides.cursorApp, ['Cursor']),
@@ -189,6 +208,8 @@ export async function openIn(
       );
     case 'code':
       return openInEditor(
+        'code',
+        'VS Code',
         bin(overrides.codeBinary, 'code'),
         ['-n', path],
         appNames(overrides.codeApp, ['Visual Studio Code']),
@@ -196,6 +217,8 @@ export async function openIn(
       );
     case 'intellij':
       return openInEditor(
+        'intellij',
+        'IntelliJ IDEA',
         bin(overrides.intellijBinary, 'idea'),
         [path],
         appNames(overrides.intellijApp, ['IntelliJ IDEA', 'IntelliJ IDEA Ultimate', 'IntelliJ IDEA CE']),
