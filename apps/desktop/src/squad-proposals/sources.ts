@@ -113,27 +113,38 @@ export interface RefusedGoalPath {
 }
 
 /**
- * Absolute paths named in a goal are attached as sources at Launch, so they follow the same
- * policy as `sources`. A goal path outside the Project is refused too: the card lists only
- * `sources`, and the user must see what leaves the checkout before Launch. A hard-linked file
- * is refused, as Launch would fail on it. Folders and other non-files are ignored, as Launch ignores them. Returns the first path it refuses; paths that don't
- * exist are ignored, as Launch ignores them too. Same token rules as the host's goal-source discovery.
+ * The absolute paths a goal names, cleaned of quotes and trailing punctuation, in order. Same
+ * token rules as the host's goal-source discovery (`goalExecutionSourcePaths`).
  */
-export async function goalPathNotAllowed(fs: SquadProposalFs, scope: SquadSourceScope, goal: string): Promise<RefusedGoalPath | undefined> {
+export function goalPathTokens(goal: string): string[] {
   const raw: string[] = [];
   for (const m of goal.matchAll(/["'`]((?:[A-Za-z]:[/\\]|\/)[^"'`]+)["'`]/g)) if (m[1]) raw.push(m[1]);
   for (const m of goal.matchAll(/(?:^|[\s(])((?:[A-Za-z]:[/\\]|\/)[^\s`'"),;:]+)/g)) if (m[1]) raw.push(m[1]);
-  for (const token of raw) {
-    const cleaned = token.trim().replace(/^[`'"(]+|[`'"),;:]+$/g, '');
+  return raw.map((token) => token.trim().replace(/^[`'"(]+|[`'"),;:]+$/g, ''));
+}
+
+/**
+ * Absolute paths named in a goal are attached as sources at Launch, so they follow the same
+ * policy as `sources`. A goal path outside the Project is refused too unless it is one of the
+ * proposal's own `sources` (`listedOutside`, realpaths): the card lists only `sources`, and the
+ * user must see what leaves the checkout before Launch. A hard-linked file is refused, as Launch
+ * would fail on it. Only a regular file is judged: folders (the Project root, HOME, `/usr/local`)
+ * and other non-files are ignored, as Launch ignores them. Returns the first path it refuses;
+ * paths that don't exist are ignored, as Launch ignores them too.
+ */
+export async function goalPathNotAllowed(
+  fs: SquadProposalFs, scope: SquadSourceScope, goal: string, listedOutside: ReadonlySet<string> = new Set()
+): Promise<RefusedGoalPath | undefined> {
+  for (const cleaned of goalPathTokens(goal)) {
     for (const candidate of cleaned.endsWith('.') ? [cleaned, cleaned.slice(0, -1)] : [cleaned]) {
       let real: string;
       try { real = await fs.realpath(candidate); } catch { continue; }
-      if (await sourceRefusal(candidate, real, scope.policy, linkFsOf(fs))) return { path: cleaned, reason: 'policy' };
       // Only a regular file is attached at Launch: a folder or special file named in a goal is left alone.
       let stat: SquadSourceStat;
       try { stat = await fs.lstat(real); } catch { break; }
       if (!stat.isFile()) break;
-      if (insideRoot(scope.projectRoot, real) === undefined) return { path: cleaned, reason: 'outside-project' };
+      if (await sourceRefusal(candidate, real, scope.policy, linkFsOf(fs))) return { path: cleaned, reason: 'policy' };
+      if (insideRoot(scope.projectRoot, real) === undefined && !listedOutside.has(real)) return { path: cleaned, reason: 'outside-project' };
       if (stat.nlink > 1) return { path: cleaned, reason: 'hard-linked' };
       break;
     }

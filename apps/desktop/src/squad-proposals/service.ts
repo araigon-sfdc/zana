@@ -23,6 +23,7 @@ import {
   TOTAL_MAX_BYTES,
   confineSource,
   goalPathNotAllowed,
+  goalPathTokens,
   readConfinedSource,
   sourceScope,
   type ConfinedSource,
@@ -195,7 +196,12 @@ async function prepare(
   const scope = await sourceScope(deps.fs, project.path, deps.sourceBases());
   const sources = await confineSources(deps.fs, scope, rawSources);
   if (!sources.ok) return sources;
-  const refusedGoalPath = scope ? await goalPathNotAllowed(deps.fs, scope, goal) : undefined;
+  // Without the project folder nothing can be judged, and Launch would otherwise discover the goal's paths unchecked.
+  if (!scope && goalPathTokens(goal).length) {
+    return fail('NOT_FOUND', 'The project folder is not available, so the paths named in the goal can\'t be checked. Remove them from the goal, or try again once the project folder is back.');
+  }
+  const listed = new Set(sources.value.map((s) => s.source.path));
+  const refusedGoalPath = scope ? await goalPathNotAllowed(deps.fs, scope, goal, listed) : undefined;
   if (refusedGoalPath?.reason === 'outside-project') {
     return fail('SOURCE_NOT_ALLOWED', `The goal names ${refusedGoalPath.path}, which is outside this project. Pass it in sources instead, so the user sees it on the card before Launch.`);
   }
@@ -492,6 +498,8 @@ export function createSquadProposalService(deps: SquadProposalServiceDeps) {
 
     async beginLaunch(proposalId: string, projectId: string): Promise<SquadProposalOutcome<{
       proposal: { id: string; proposerKind: 'pty' | 'thread'; proposerId: string; proposerTitle?: string };
+      /** Realpaths of the sources the reviewed card listed: the only files outside the Project a goal may add at Launch. */
+      sourcePaths: string[];
     }>> {
       // Take the hold before any await, so two Launch presses (or two windows) can't both pass.
       if (leases.active(proposalId)) return fail('NOT_PENDING', 'This Squad launch is already starting.');
@@ -508,7 +516,8 @@ export function createSquadProposalService(deps: SquadProposalServiceDeps) {
         held = true;
         const { proposer } = pending.value;
         return ok({
-          proposal: { id: proposalId, proposerKind: proposer.kind, proposerId: proposer.id, ...(proposer.title ? { proposerTitle: proposer.title } : {}) }
+          proposal: { id: proposalId, proposerKind: proposer.kind, proposerId: proposer.id, ...(proposer.title ? { proposerTitle: proposer.title } : {}) },
+          sourcePaths: pending.value.sources.map((source) => source.path)
         });
       } catch (error) {
         return unexpected(`${proposalId} launch`, error, 'This Squad launch could not start. Try again.');

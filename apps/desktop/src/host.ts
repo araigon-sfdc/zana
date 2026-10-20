@@ -58,7 +58,7 @@ import { jobCoordinatorPrompt } from './team-coordinator-prompt.js';
 import {
   createDesktopNativeRecovery, gateInvalidProvidedPlan, recoverSquadStateAtBoot, runSpawnLifecycle, slotRecoveryLaunch,
   sweepUnretainedSquadWorktrees, teamAdmissionRequirements, teamJobFailureResponse, withProposalLaunch, findProposalExecution, type ProposalLaunchDeps,
-  withRenewedSources, scopedSourceRenewal
+  withRenewedSources, scopedSourceRenewal, splitProposedGoalSources
 } from './team-launch-support.js';
 import { openExecutionStorage } from './execution-storage.js';
 import { createPlanCorrectionHandoff, createPlanCorrectionHost } from './plan-correction/host.js';
@@ -6372,10 +6372,10 @@ export async function startTeamJobFromUi(
     return { ok: false, code: 'INVALID_CAPABILITY', message: 'Execution source capabilities require a trusted window' };
   }
   const proposed = input.proposalId !== undefined;
-  // A proposed launch discovers goal paths exactly like a manual one: one source policy.
+  // Goal paths follow the one source policy. A proposed launch narrows them below, once its stored proposal is known.
   const sourceBases = squadSourceBases();
-  const goalSourceDescriptors = await goalExecutionSourcePaths(originalGoal, project.path, sourceBases.home, sourceBases);
-  if (goalSourceDescriptors.length && !sourceContext) {
+  const discoveredGoalSources = await goalExecutionSourcePaths(originalGoal, project.path, sourceBases.home, sourceBases);
+  if (discoveredGoalSources.length && !sourceContext) {
     return { ok: false, code: 'INVALID_CAPABILITY', message: 'Goal execution sources require a trusted window' };
   }
   // A proposed launch is bound to its stored proposal and must come from a trusted window.
@@ -6384,7 +6384,23 @@ export async function startTeamJobFromUi(
   }
   const proposalId = proposed ? (typeof input.proposalId === 'string' ? input.proposalId.trim() : '') : undefined;
   const renewal = scopedSourceRenewal(executionSources, sourceContext?.windowId, projectId);
-  return withRenewedSources(() => withProposalLaunch(proposalLaunchDeps, proposalId, projectId, async (proposal) => {
+  return withRenewedSources(() => withProposalLaunch(proposalLaunchDeps, proposalId, projectId, async (proposal, reviewedSourcePaths) => {
+    // A proposed launch attaches goal-named files outside the Project only when the reviewed card listed them.
+    let goalSourceDescriptors = discoveredGoalSources;
+    let redactedGoalSources = discoveredGoalSources;
+    if (proposal) {
+      const projectReal = await realpath(project.path).catch(() => undefined);
+      const split = splitProposedGoalSources(discoveredGoalSources, projectReal, reviewedSourcePaths);
+      if (split.refused) {
+        return {
+          ok: false, code: 'SOURCE_NOT_ALLOWED',
+          message: `The goal names ${split.refused.exactPath}, which is outside this project and was not listed in the proposal's sources, so the card did not show it. `
+            + 'The agent must list it in the proposal\'s `sources` (the user then sees it on the card before Launch), or remove it from the goal.'
+        } as TeamJobLaunchResponse;
+      }
+      goalSourceDescriptors = split.attach;
+      redactedGoalSources = split.known;
+    }
     // Mint identity before snapshotting: source content lands in a dedicated,
     // immutable content store and execution ledger carries only bounded metadata.
     const launchRequestId = `ui:${randomUUID()}`;
@@ -6397,7 +6413,7 @@ export async function startTeamJobFromUi(
     const { sourceBundle } = snapshot;
     const built = await buildTeamJobStartRequest({
       teamId, projectId, projectName: project.name, launchRequestId, coordinationMode, slots, attended: !!sourceContext,
-      goal: originalGoal, title: originalJobTitle, summary: originalSummary, sourceBundle, goalSourceDescriptors
+      goal: originalGoal, title: originalJobTitle, summary: originalSummary, sourceBundle, goalSourceDescriptors: redactedGoalSources
     });
     if (!built.ok) return built.response;
     const result = proposal

@@ -366,24 +366,15 @@ describe('startTeamJobFromUi proposed launches', () => {
     }
   });
 
-  it('discovers goal-named files for a proposed launch exactly like a manual one, and never from a credential store', async () => {
-    // Not under h.root: that is this test's ZCC_DATA_DIR, which the source policy protects.
+  // Not under h.root: that is this test's ZCC_DATA_DIR, which the source policy protects.
+  async function withFakeHome(run: (fakeHome: string, sourceNames: (call: number) => string[], start: any) => Promise<void>) {
     const fakeHome = realpathSync(mkdtempSync(join(tmpdir(), 'zcc-launch-home-')));
-    const notes = join(fakeHome, 'notes.md');
-    writeFileSync(notes, 'design notes');
-    mkdirSync(join(fakeHome, '.ssh'));
-    const key = join(fakeHome, '.ssh', 'id_e2e');
-    writeFileSync(key, 'PRIVATE');
     vi.stubEnv('HOME', fakeHome);
-    await squadProposalStore.create(record('prop-home') as never);
     const start = vi.spyOn(SquadExecutionService.prototype, 'start');
     const sourceNames = (call: number) =>
       ((start.mock.calls[call]![2] as { sourceBundle?: { sources: Array<{ name: string }> } }).sourceBundle?.sources ?? []).map((source) => source.name);
     try {
-      expect((await startTeamJobFromUi(input({ coordinationMode: 'freeform', goal: `Read ${notes} and ${key}` }), { windowId: 1 })).ok).toBe(true);
-      expect(sourceNames(0)).toEqual(['notes.md']);
-      expect((await startTeamJobFromUi(input({ coordinationMode: 'freeform', goal: `Read ${notes} and ${key}`, proposalId: 'prop-home' }), { windowId: 1 })).ok).toBe(true);
-      expect(sourceNames(1)).toEqual(['notes.md']);
+      await run(fakeHome, sourceNames, start);
     } finally {
       start.mockRestore();
       vi.unstubAllEnvs();
@@ -392,6 +383,66 @@ describe('startTeamJobFromUi proposed launches', () => {
       vi.stubEnv('ZCC_SERVER_URL', 'http://127.0.0.1:9/');
       rmSync(fakeHome, { recursive: true, force: true });
     }
+  }
+
+  it('a manual launch still attaches goal-named HOME files, never from a credential store', async () => {
+    await withFakeHome(async (fakeHome, sourceNames) => {
+      const notes = join(fakeHome, 'notes.md');
+      writeFileSync(notes, 'design notes');
+      mkdirSync(join(fakeHome, '.ssh'));
+      const key = join(fakeHome, '.ssh', 'id_e2e');
+      writeFileSync(key, 'PRIVATE');
+      expect((await startTeamJobFromUi(input({ coordinationMode: 'freeform', goal: `Read ${notes} and ${key}` }), { windowId: 1 })).ok).toBe(true);
+      expect(sourceNames(0)).toEqual(['notes.md']);
+    });
+  });
+
+  it('refuses a proposed launch whose goal names an outside-Project file the card did not list', async () => {
+    await withFakeHome(async (fakeHome, _names, start) => {
+      const notes = join(fakeHome, 'notes.md');
+      writeFileSync(notes, 'private notes');
+      await squadProposalStore.create(record('prop-home') as never);
+      const refused = await startTeamJobFromUi(input({ coordinationMode: 'freeform', goal: `Read ${notes}`, proposalId: 'prop-home' }), { windowId: 1 });
+      expect(refused).toMatchObject({ ok: false, code: 'SOURCE_NOT_ALLOWED', message: expect.stringContaining(`${notes}, which is outside this project`) });
+      expect((refused as { message: string }).message).toContain('`sources`');
+      expect(start).not.toHaveBeenCalled();
+      // The hold is released: the proposal is still launchable once the goal no longer names the file.
+      expect((await startTeamJobFromUi(input({ coordinationMode: 'freeform', proposalId: 'prop-home' }), { windowId: 1 })).ok).toBe(true);
+    });
+  });
+
+  it('refuses a proposed launch whose goal names a file created after the card was reviewed', async () => {
+    await withFakeHome(async (fakeHome, _names, start) => {
+      const later = join(fakeHome, 'later.md');
+      await squadProposalStore.create(record('prop-later') as never);
+      // The goal names a path that does not exist yet: nothing to refuse at proposal time.
+      writeFileSync(later, 'created after review');
+      const refused = await startTeamJobFromUi(input({ coordinationMode: 'freeform', goal: `Read ${later}`, proposalId: 'prop-later' }), { windowId: 1 });
+      expect(refused).toMatchObject({ ok: false, code: 'SOURCE_NOT_ALLOWED' });
+      expect(start).not.toHaveBeenCalled();
+    });
+  });
+
+  it('attaches an outside-Project file the goal names when the reviewed card lists it, once', async () => {
+    await withFakeHome(async (fakeHome, sourceNames) => {
+      const notes = join(fakeHome, 'notes.md');
+      writeFileSync(notes, 'design notes');
+      await squadProposalStore.create({ ...record('prop-listed'), sources: [{ path: notes, relPath: '~/notes.md', bytes: 12, outsideProject: true }] } as never);
+      const launched = await startTeamJobFromUi(input({ coordinationMode: 'freeform', goal: `Read ${notes}`, proposalId: 'prop-listed' }), { windowId: 1 });
+      expect(launched.ok).toBe(true);
+      // The card's own source capability would attach it; the goal must not attach it a second time.
+      expect(sourceNames(0)).toEqual([]);
+    });
+  });
+
+  it('still attaches goal-named files inside the Project for a proposed launch', async () => {
+    await withFakeHome(async (_home, sourceNames) => {
+      const inside = join(projectDir, 'plan.md');
+      writeFileSync(inside, 'plan');
+      await squadProposalStore.create(record('prop-inside') as never);
+      expect((await startTeamJobFromUi(input({ coordinationMode: 'freeform', goal: `Follow ${inside}`, proposalId: 'prop-inside' }), { windowId: 1 })).ok).toBe(true);
+      expect(sourceNames(0)).toEqual(['plan.md']);
+    });
   });
 
   it('refuses a relaunch once a Squad started from the proposal, even if recording it failed', async () => {

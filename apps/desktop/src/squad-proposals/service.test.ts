@@ -7,7 +7,7 @@ import type { Persona, Team } from '@zana-ai/zcc-domain/product';
 import { ExecutionSourceError } from '@zana-ai/zcc-server/services/execution/source-registry';
 import { InboxActionOperatorError } from '../inbox-actions/registry.js';
 import { createSquadProposalStore } from './store.js';
-import { confineSource, goalPathNotAllowed, sourceScope, type SquadProposalFs, type SquadSourceScope } from './sources.js';
+import { confineSource, goalPathNotAllowed, goalPathTokens, sourceScope, type SquadProposalFs, type SquadSourceScope } from './sources.js';
 import {
   SQUAD_LAUNCH_PROPOSAL_ACTION,
   createSquadProposalService,
@@ -617,9 +617,16 @@ describe('beginLaunch and markLaunched', () => {
 
   it('returns the proposer without changing state', async () => {
     expect(await svc.service.beginLaunch('prop-1', 'p1')).toEqual({
-      ok: true, value: { proposal: { id: 'prop-1', proposerKind: 'pty', proposerId: 's1', proposerTitle: 'Design chat' } }
+      ok: true, value: { proposal: { id: 'prop-1', proposerKind: 'pty', proposerId: 's1', proposerTitle: 'Design chat' }, sourcePaths: [join(root, 'proj', 'plan.md')] }
     });
     expect((await svc.store.get('prop-1'))?.state).toBe('pending');
+  });
+  it('hands Launch the reviewed sources, so a goal can add nothing else outside the Project', async () => {
+    mkdirSync(join(homeDir, 'vault'));
+    const design = join(homeDir, 'vault', 'design.md');
+    writeFileSync(design, '# design');
+    expect(code(await svc.service.propose(route, { ...input, sources: ['plan.md', design] }))).toBe('ok');
+    expect(await svc.service.beginLaunch('prop-2', 'p1')).toMatchObject({ ok: true, value: { sourcePaths: [join(root, 'proj', 'plan.md'), design] } });
   });
   it('rejects wrong project, unknown, launched and expired records', async () => {
     expect(code(await svc.service.beginLaunch('prop-1', 'other'))).toBe('NOT_FOUND');
@@ -810,5 +817,49 @@ describe('goal path edge cases', () => {
     const scope = (await sourceScope(realFs, join(root, 'proj'), { home: homeDir }))!;
     const broken: SquadProposalFs = { ...realFs, lstat: async () => { throw new Error('EIO'); } };
     expect(await goalPathNotAllowed(broken, scope, `Read ${join(root, 'proj', 'plan.md')}`)).toBeUndefined();
+  });
+});
+
+describe('goal paths and the reviewed card', () => {
+  let design: string;
+  beforeEach(() => {
+    mkdirSync(join(homeDir, 'vault'));
+    design = join(homeDir, 'vault', 'design.md');
+    writeFileSync(design, '# design');
+  });
+
+  it('accepts a goal that names an outside file the proposal also lists in sources', async () => {
+    expect(code(await svc.service.propose(route, { ...input, goal: `Summarise ${design}`, sources: [design] }))).toBe('ok');
+  });
+
+  it('still refuses an outside file the goal names when sources list a different one', async () => {
+    writeFileSync(join(homeDir, 'vault', 'other.md'), '# other');
+    const r = await svc.service.propose(route, { ...input, goal: `Summarise ${design}`, sources: [join(homeDir, 'vault', 'other.md')] });
+    expect(r).toMatchObject({ ok: false, code: 'SOURCE_NOT_ALLOWED', message: expect.stringContaining('Pass it in sources') });
+  });
+
+  it('refuses a goal path when the project folder is gone, as it cannot be checked and Launch would discover it', async () => {
+    rmSync(join(root, 'proj'), { recursive: true });
+    const r = await svc.service.propose(route, { ...input, sources: [], goal: `Summarise ${design}` });
+    expect(r).toMatchObject({ ok: false, code: 'NOT_FOUND', message: expect.stringContaining("paths named in the goal can't be checked") });
+    expect(appendOnce).not.toHaveBeenCalled();
+  });
+
+  it('judges only files: a goal naming a folder, the Project root or HOME itself is ignored, as Launch ignores them', async () => {
+    mkdirSync(join(homeDir, '.ssh'));
+    const scope = (await sourceScope(realFs, join(root, 'proj'), { home: homeDir }))!;
+    for (const folder of [join(root, 'proj'), homeDir, join(homeDir, '.ssh'), join(homeDir, 'vault'), outside]) {
+      expect(await goalPathNotAllowed(realFs, scope, `Look in ${folder}`), folder).toBeUndefined();
+    }
+    // A file in the same places is still judged.
+    writeFileSync(join(homeDir, '.ssh', 'id_rsa'), 'PRIVATE');
+    expect(await goalPathNotAllowed(realFs, scope, `Look in ${join(homeDir, '.ssh', 'id_rsa')}`)).toMatchObject({ reason: 'policy' });
+    expect(await goalPathNotAllowed(realFs, scope, `Look in ${design}`)).toMatchObject({ reason: 'outside-project' });
+    expect(await goalPathNotAllowed(realFs, scope, `Look in ${design}`, new Set([design]))).toBeUndefined();
+  });
+
+  it('reads the same path tokens as the host: quoted, unquoted, with trailing punctuation', () => {
+    expect(goalPathTokens('See "/a b/c.md", /d/e.md; and (/f/g.md). Not a/path.')).toEqual(['/a b/c.md', '/d/e.md', '/f/g.md']);
+    expect(goalPathTokens('nothing here')).toEqual([]);
   });
 });
