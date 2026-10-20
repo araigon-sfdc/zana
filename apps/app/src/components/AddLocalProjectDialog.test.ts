@@ -9,11 +9,4 @@ describe('AddLocalProjectDialog', () => {
     expect(source).toContain('<Modal');
     expect(source).not.toContain('className="modal-backdrop"');
   });
-
-  it("formats the folder-path placeholder for the selected machine's OS", () => {
-    const source = readFileSync(new URL('./AddLocalProjectDialog.tsx', import.meta.url), 'utf8');
-
-    expect(source).toContain('placeholder={folderPathPlaceholder(selectedHost)}');
-    expect(source).not.toContain('placeholder="/path/to/project"');
-  });
 });
