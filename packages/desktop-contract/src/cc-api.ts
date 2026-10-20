@@ -1176,7 +1176,13 @@ export interface CcApi {
     pick(projectId: string): Promise<Result<ExecutionSourceCapabilityView[]>>;
   };
   openers: {
-    openIn(target: OpenTarget, path: string): Promise<OpenResult>;
+    /**
+     * `projectRoot` (editor targets only) opens the file at `path` inside that
+     * project's editor window. Main honours it only for a registered project
+     * (or one of its worktrees) that contains the file; otherwise the editor
+     * opens `path` alone.
+     */
+    openIn(target: OpenTarget, path: string, options?: { projectRoot?: string }): Promise<OpenResult>;
   };
   clipboard: {
     /**

@@ -774,7 +774,7 @@ const api: CcApi = {
     pick: (projectId) => ipcRenderer.invoke(IPC.executionSources.pick, projectId)
   },
   openers: {
-    openIn: (target, path) => ipcRenderer.invoke(IPC.openers.openIn, target, path)
+    openIn: (target, path, options) => ipcRenderer.invoke(IPC.openers.openIn, target, path, options)
   },
   clipboard: {
     writeText: (text) => ipcRenderer.invoke(IPC.clipboard.writeText, text)
