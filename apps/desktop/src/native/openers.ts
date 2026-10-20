@@ -106,7 +106,7 @@ async function openInEditor(
   installHint: string
 ): Promise<OpenResult> {
   if (process.platform === 'win32') {
-    const launch = resolveWindowsEditorLaunch(target, cli);
+    const launch = await resolveWindowsEditorLaunch(target, cli);
     const notFound = `Could not launch ${name}. Install it ${WINDOWS_INSTALL_HINTS[target]} in Settings → Editor.`;
     if (!launch) return { ok: false, message: notFound };
     const viaExe = launch.cliJs

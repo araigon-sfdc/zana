@@ -31,7 +31,7 @@ vi.mock('node:child_process', () => ({
 vi.mock('electron', () => ({ shell: { openPath: vi.fn(async () => ''), showItemInFolder: vi.fn(), openExternal: vi.fn(async () => {}) } }));
 vi.mock('@zana-ai/zcc-server/services/projects/editor-windows', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@zana-ai/zcc-server/services/projects/editor-windows')>()),
-  resolveWindowsEditorLaunch: (_target: string, binary: string) => h.exes.get(binary) ?? null
+  resolveWindowsEditorLaunch: async (_target: string, binary: string) => h.exes.get(binary) ?? null
 }));
 
 const { shell } = await import('electron');

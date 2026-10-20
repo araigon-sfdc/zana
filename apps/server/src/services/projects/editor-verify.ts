@@ -95,13 +95,13 @@ export async function verifyEditors(
     EDITORS.map(async (def): Promise<EditorVerifyResult> => {
       const binary = editorBinary(def, config);
       if (platform === 'win32') {
-        const exe = resolveWindowsEditor(def.target, binary);
+        const exe = await resolveWindowsEditor(def.target, binary);
         return {
           target: def.target,
           label: def.label,
           binary,
           installed: exe !== null,
-          version: exe ? windowsEditorVersion(def.target, exe) : undefined,
+          version: exe ? await windowsEditorVersion(def.target, exe) : undefined,
           installHint: WINDOWS_INSTALL_HINTS[def.target]
         };
       }

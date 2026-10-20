@@ -16,8 +16,8 @@ vi.mock('node:child_process', () => ({
 const w = vi.hoisted(() => ({ exes: new Map<string, string>(), versions: new Map<string, string>() }));
 vi.mock('./editor-windows.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./editor-windows.js')>()),
-  resolveWindowsEditor: (_target: string, binary: string) => w.exes.get(binary) ?? null,
-  windowsEditorVersion: (_target: string, exe: string) => w.versions.get(exe)
+  resolveWindowsEditor: async (_target: string, binary: string) => w.exes.get(binary) ?? null,
+  windowsEditorVersion: async (_target: string, exe: string) => w.versions.get(exe)
 }));
 
 const { verifyEditors, editorBinary } = await import('./editor-verify.js');
