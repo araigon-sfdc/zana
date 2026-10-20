@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
+import { win32 } from 'node:path';
 import { shell } from 'electron';
 import type { OpenResult, OpenTarget } from '@zana-ai/zcc-domain/product';
 
@@ -78,6 +79,62 @@ function openMacApp(appName: string, path: string): Promise<OpenResult> {
       });
     } catch (err) {
       resolve({ ok: false, message: err instanceof Error ? err.message : String(err) });
+    }
+  });
+}
+
+/**
+ * A PowerShell single-quoted literal: nothing inside is expanded. PowerShell
+ * also treats the curly quotes U+2018..U+201B as single quotes (they open and
+ * close a literal), so each of those is doubled too.
+ */
+function psLiteral(value: string): string {
+  return `'${value.replace(/['\u2018-\u201B]/g, '$&$&')}'`;
+}
+
+/** The script the hidden PowerShell runs to start `program` in `dir`. */
+export function windowsTerminalScript(dir: string, program: string): string {
+  return `$ErrorActionPreference = 'Stop'; Start-Process -FilePath ${psLiteral(program)} -WorkingDirectory ${psLiteral(dir)}`;
+}
+
+/**
+ * Open a terminal in `dir` on Windows. A console program spawned `detached`
+ * gets no console and exits at once, and `cmd /c start` would re-parse the
+ * folder (`%VAR%`, `&`). So a hidden PowerShell runs `Start-Process`, which
+ * gives the shell its own window in the user's default terminal app (Windows
+ * Terminal on Windows 11). The script travels as `-EncodedCommand`, so the
+ * folder is only ever a PowerShell string literal. Resolves on the launcher's
+ * exit code so an unknown program is reported.
+ */
+function openWindowsTerminal(dir: string, program: string, timeoutMs = 20_000): Promise<OpenResult> {
+  const powershell = process.env.SystemRoot
+    ? win32.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    : 'powershell.exe';
+  const encoded = Buffer.from(windowsTerminalScript(dir, program), 'utf16le').toString('base64');
+  const failed = `Could not open ${program} in ${dir}.`;
+  return new Promise((resolve) => {
+    try {
+      // Not `detached`: the launcher needs a (hidden) console to run, and the
+      // shell it starts breaks away, so it outlives ZCC.
+      const child = spawn(
+        powershell,
+        ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded],
+        { stdio: 'ignore', windowsHide: true }
+      );
+      const timer = setTimeout(() => {
+        child.kill();
+        resolve({ ok: false, message: `${failed} The launcher timed out.` });
+      }, timeoutMs);
+      child.once('error', (err) => {
+        clearTimeout(timer);
+        resolve({ ok: false, message: `${failed} ${err.message}` });
+      });
+      child.once('exit', (code) => {
+        clearTimeout(timer);
+        resolve(code === 0 ? { ok: true } : { ok: false, message: failed });
+      });
+    } catch (err) {
+      resolve({ ok: false, message: `${failed} ${err instanceof Error ? err.message : String(err)}` });
     }
   });
 }
@@ -165,6 +222,15 @@ export async function openIn(
       return { ok: true };
     }
     case 'terminal': {
+      if (process.platform === 'win32') {
+        let dir: string;
+        try {
+          dir = statSync(path).isDirectory() ? path : win32.dirname(path);
+        } catch (err) {
+          return { ok: false, message: err instanceof Error ? err.message : String(err) };
+        }
+        return openWindowsTerminal(dir, overrides.terminalApp?.trim() || 'powershell.exe');
+      }
       if (process.platform !== 'darwin') {
         return { ok: false, message: 'External terminal launch is not yet supported on this platform.' };
       }
