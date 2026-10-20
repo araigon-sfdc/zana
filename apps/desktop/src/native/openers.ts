@@ -83,9 +83,13 @@ function openMacApp(appName: string, path: string): Promise<OpenResult> {
   });
 }
 
-/** A PowerShell single-quoted literal: nothing inside is expanded. */
+/**
+ * A PowerShell single-quoted literal: nothing inside is expanded. PowerShell
+ * also treats the curly quotes U+2018..U+201B as single quotes (they open and
+ * close a literal), so each of those is doubled too.
+ */
 function psLiteral(value: string): string {
-  return `'${value.replace(/'/g, "''")}'`;
+  return `'${value.replace(/['\u2018-\u201B]/g, '$&$&')}'`;
 }
 
 /** The script the hidden PowerShell runs to start `program` in `dir`. */

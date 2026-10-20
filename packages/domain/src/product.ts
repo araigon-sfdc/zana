@@ -1943,8 +1943,9 @@ export interface AppConfig {
   /**
    * Preferred terminal for the "Open external Terminal" opener. macOS: app name
    * for `open -a <name>`; blank/absent ⇒ auto-pick (iTerm → WezTerm → Alacritty
-   * → Terminal.app). Windows: program `Start-Process` starts in the folder
-   * (`pwsh`, `cmd`, …); blank/absent ⇒ PowerShell.
+   * → Terminal.app). Windows: program name or path, without arguments, that
+   * `Start-Process` starts in the folder (`pwsh`, `cmd`, …); blank/absent ⇒
+   * PowerShell.
    */
   terminalApp?: string;
   /**

@@ -134,7 +134,7 @@ export const entries: readonly SettingsSearchEntry[] = [
     section: 'editor',
     anchor: 'editor-terminal',
     label: 'Preferred terminal app',
-    help: 'macOS: app name launched via ‘open -a <name>’; blank ⇒ auto-pick iTerm → WezTerm → Alacritty → Terminal. Windows: program started in the folder, such as pwsh or cmd; blank ⇒ PowerShell.',
+    help: 'macOS: app name launched via ‘open -a <name>’; blank ⇒ auto-pick iTerm → WezTerm → Alacritty → Terminal. Windows: program name or path started in the folder, without arguments, such as pwsh or cmd; blank ⇒ PowerShell.',
     keywords: ['iterm', 'wezterm', 'alacritty', 'open -a', 'powershell', 'pwsh', 'cmd', 'advanced'],
     kind: 'setting',
     reveal: 'advanced',

@@ -39,7 +39,7 @@ const decoded = (args: string[]) => Buffer.from(args[args.indexOf('-EncodedComma
 beforeEach(() => {
   Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
   process.env.SystemRoot = 'C:\\Windows';
-  dir = mkdtempSync(join(tmpdir(), "zcc-term it's 100%PATH% & co-"));
+  dir = mkdtempSync(join(tmpdir(), "zcc-term it's Bob’s 100%PATH% & co-"));
 });
 
 afterEach(() => {
@@ -60,6 +60,16 @@ describe('windowsTerminalScript', () => {
       "$ErrorActionPreference = 'Stop'; Start-Process -FilePath 'pwsh' -WorkingDirectory 'C:\\it''s & %PATH% $env:x'"
     );
   });
+
+  it('doubles the curly quotes PowerShell also reads as single quotes', () => {
+    expect(windowsTerminalScript('C:\\Users\\Bob\\Bob’s Projects', 'pwsh')).toBe(
+      "$ErrorActionPreference = 'Stop'; Start-Process -FilePath 'pwsh' -WorkingDirectory 'C:\\Users\\Bob\\Bob’’s Projects'"
+    );
+    // A name built to close the literal stays inside it.
+    expect(windowsTerminalScript('C:\\x’; Start-Process calc; ‘', 'my‚app‛')).toBe(
+      "$ErrorActionPreference = 'Stop'; Start-Process -FilePath 'my‚‚app‛‛' -WorkingDirectory 'C:\\x’’; Start-Process calc; ‘‘'"
+    );
+  });
 });
 
 describe('openIn terminal on Windows', () => {
@@ -71,6 +81,7 @@ describe('openIn terminal on Windows', () => {
     expect(args.slice(0, 5)).toEqual(['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand']);
     expect(opts).toEqual({ stdio: 'ignore', windowsHide: true });
     expect(decoded(args)).toBe(windowsTerminalScript(dir, 'powershell.exe'));
+    expect(decoded(args)).toContain("it''s Bob’’s 100%PATH% & co-");
     // The folder never appears on the command line itself.
     expect(args.join(' ')).not.toContain('100%PATH%');
   });
