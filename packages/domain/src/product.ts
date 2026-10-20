@@ -1941,9 +1941,10 @@ export interface AppConfig {
   editorIntellijBinary?: string;
   editorIntellijApp?: string;
   /**
-   * Preferred macOS terminal app name for the "Open external Terminal" opener
-   * (`open -a <name>`). Blank/absent ⇒ auto-pick (iTerm → WezTerm → Alacritty →
-   * Terminal.app).
+   * Preferred terminal for the "Open external Terminal" opener. macOS: app name
+   * for `open -a <name>`; blank/absent ⇒ auto-pick (iTerm → WezTerm → Alacritty
+   * → Terminal.app). Windows: program `Start-Process` starts in the folder
+   * (`pwsh`, `cmd`, …); blank/absent ⇒ PowerShell.
    */
   terminalApp?: string;
   /**
