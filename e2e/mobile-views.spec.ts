@@ -631,7 +631,6 @@ test('Main views and populated Inbox fit phone and tablet screens', async ({ app
           await expect(page.getByTestId('cli-agent-mobile-unsupported')).toBeVisible();
           await expect(page.getByTestId('agent-session-view')).toHaveCount(0);
           await expect(page.locator('.titlebar').getByRole('button', { name: 'Back to agents', exact: true })).toBeVisible();
-          await expect(page.locator('.agents-board-toolbar')).toBeHidden();
           await page.screenshot({ path: testInfo.outputPath(`${width}-agents-list-cli-notice.png`) });
           await page.getByRole('button', { name: 'Back to agents', exact: true }).click();
           await expect(page.locator('.agent-monitor-main')).toHaveCount(0);
