@@ -262,6 +262,35 @@ describe('linkChainRefusal', () => {
   });
 });
 
+describe('credential, history and browser-profile locations under HOME', () => {
+  it.each([
+    '.azure/accessTokens.json', '.config/op/config', '.terraform.d/credentials.tfrc.json', '.cargo/credentials', '.cargo/credentials.toml',
+    '.m2/settings.xml', '.password-store/mail.gpg', '.local/share/keyrings/login.keyring',
+    '.bash_history', '.zsh_history', '.zhistory', '.python_history', '.node_repl_history', '.psql_history', '.mysql_history', '.lesshst',
+    'Library/Application Support/Google/Chrome/Default/Login Data', 'Library/Application Support/BraveSoftware/Brave-Browser/Default/Cookies',
+    'Library/Application Support/Microsoft Edge/Default/History', 'Library/Application Support/Firefox/Profiles/x/logins.json',
+    'Library/Safari/History.db', '.mozilla/firefox/x/key4.db', '.config/google-chrome/Default/Cookies', '.config/chromium/Default/Cookies',
+    '.config/BraveSoftware/Brave-Browser/Default/Cookies',
+    '.oci/config', '.vault-token', '.pgpass', '.my.cnf', '.sfdx/key.json', '.sf/config.json', '.gem/credentials', '.config/rclone/rclone.conf'
+  ])('refuses ~/%s', (entry) => {
+    expect(SENSITIVE_HOME_PATHS.some((path) => entry === path || entry.startsWith(`${path}/`)), entry).toBe(true);
+    expect(sourcePathRefusal(`/Users/me/${entry}`, policy), entry).toBe('sensitive');
+  });
+
+  it('still allows the neighbours of those entries', () => {
+    for (const entry of ['.cargo/config.toml', '.m2/pom.xml', '.config/nvim/init.lua', 'Library/Preferences/x.plist', '.bashrc', '.zshrc', 'Documents/notes.md']) {
+      expect(sourcePathRefusal(`/Users/me/${entry}`, policy), entry).toBeUndefined();
+    }
+  });
+
+  it('refuses them through a link too, and lists them in the text shown to the agent', async () => {
+    const fs = fakeLinks({ '/Users/me/notes.md': '/Users/me/.zsh_history' });
+    expect(await linkChainRefusal('/Users/me/notes.md', policy, fs)).toBe('sensitive');
+    expect(SOURCE_POLICY_TEXT).toContain('~/.zsh_history');
+    expect(SOURCE_POLICY_TEXT).toContain('~/Library/Application Support/Google/Chrome');
+  });
+});
+
 describe('sourceRefusal', () => {
   it('runs the link walk, then the realpath policy', async () => {
     const fs = fakeLinks({ '/Users/me/notes.md': '/Users/me/.ssh/id_rsa' });
@@ -300,7 +329,38 @@ describe('inside the registered Project', () => {
   it('keeps Claude Code\'s credentials file refused for a Project inside ~/.claude', async () => {
     const resolved = await resolveSourcePolicy(id, { ...base, projectRoot: '/Users/me/.claude' });
     expect(sourcePathRefusal('/Users/me/.claude/.credentials.json', resolved)).toBe('sensitive');
-    expect(sourcePathRefusal('/Users/me/.claude/projects/p/memory/MEMORY.md', resolved)).toBeUndefined();
+    // ~/.claude/projects lies inside this Project, so it stays refused; only roots holding the Project are dropped.
+    expect(sourcePathRefusal('/Users/me/.claude/projects/p/memory/MEMORY.md', resolved)).toBe('sensitive');
+    expect(sourcePathRefusal('/Users/me/.claude/sessions/s.jsonl', resolved)).toBe('sensitive');
+    expect(sourcePathRefusal('/Users/me/.claude/settings.json', resolved)).toBeUndefined();
+  });
+
+  it('drops only the protected roots that hold the Project: a protected root inside the Project stays refused', async () => {
+    const config = await resolveSourcePolicy(id, { ...base, projectRoot: '/Users/me/.config' });
+    expect(sourcePathRefusal('/Users/me/.config/gh/hosts.yml', config)).toBe('sensitive');
+    expect(sourcePathRefusal('/Users/me/.config/gcloud/credentials.db', config)).toBe('sensitive');
+    expect(sourcePathRefusal('/Users/me/.config/op/config', config)).toBe('sensitive');
+    expect(sourcePathRefusal('/Users/me/.config/nvim/init.lua', config)).toBeUndefined();
+    const library = await resolveSourcePolicy(id, { ...base, projectRoot: '/Users/me/Library' });
+    expect(sourcePathRefusal('/Users/me/Library/Keychains/login.keychain-db', library)).toBe('sensitive');
+    expect(sourcePathRefusal('/Users/me/Library/Application Support/Google/Chrome/Default/Cookies', library)).toBe('sensitive');
+    expect(sourcePathRefusal('/Users/me/Library/Preferences/x.plist', library)).toBeUndefined();
+    const docker = await resolveSourcePolicy(id, { ...base, projectRoot: '/Users/me/.docker' });
+    expect(sourcePathRefusal('/Users/me/.docker/config.json', docker)).toBe('sensitive');
+    expect(sourcePathRefusal('/Users/me/.docker/compose.yml', docker)).toBeUndefined();
+    // A Project inside a protected root still reaches its own files, and a sibling protected root is still refused.
+    const chrome = await resolveSourcePolicy(id, { ...base, projectRoot: '/Users/me/.mozilla/work' });
+    expect(sourcePathRefusal('/Users/me/.mozilla/work/a.md', chrome)).toBeUndefined();
+    expect(sourcePathRefusal('/Users/me/.kube/config', chrome)).toBe('sensitive');
+  });
+
+  it('walks links with the same rule for a Project at ~/.config', async () => {
+    const resolved = await resolveSourcePolicy(id, { ...base, projectRoot: '/Users/me/.config' });
+    const fs = fakeLinks({ '/Users/me/.config/notes.md': '/Users/me/.config/gh/hosts.yml', '/Users/me/.config/ok.md': '/Users/me/.config/nvim/init.lua' });
+    expect(await linkChainRefusal('/Users/me/.config/notes.md', resolved, fs)).toBe('sensitive');
+    expect(await linkChainRefusal('/Users/me/.config/ok.md', resolved, fs)).toBeUndefined();
+    expect(await linkChainRefusal('/Users/me/.config/nvim/init.lua', resolved, fs)).toBeUndefined();
+    expect(await linkChainRefusal('/Users/me/.config/gh/hosts.yml', resolved, fs)).toBe('sensitive');
   });
 
   it('applies the link walk with the same split', async () => {

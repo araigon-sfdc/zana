@@ -20,27 +20,39 @@ export const SENSITIVE_HOME_PATHS: readonly string[] = [
   // Stores of the other harnesses Zana launches: opencode (opencode.db, auth.json), pi, grok, gemini.
   '.local/share/opencode', '.pi', '.grok', '.gemini',
   '.git-credentials', '.npmrc', '.pypirc', '.kube', '.claude.json', '.claude/.credentials.json',
-  '.claude/projects', 'Library/Keychains'
+  '.claude/projects', 'Library/Keychains',
+  // More cloud, secret-manager and package-registry credentials.
+  '.azure', '.config/op', '.terraform.d', '.cargo/credentials', '.cargo/credentials.toml', '.m2/settings.xml',
+  '.password-store', '.local/share/keyrings', '.oci', '.vault-token', '.pgpass', '.my.cnf', '.boto', '.s3cfg',
+  '.gem/credentials', '.config/rclone', '.config/git/credentials', '.config/doctl', '.config/glab-cli',
+  '.config/heroku', '.sf', '.sfdx',
+  // Shell and REPL history: commands and pasted secrets.
+  '.bash_history', '.zsh_history', '.zhistory', '.python_history', '.node_repl_history', '.psql_history',
+  '.mysql_history', '.lesshst',
+  // Browser profiles (cookies, saved logins, history) and other private macOS stores.
+  'Library/Application Support/Google/Chrome', 'Library/Application Support/BraveSoftware',
+  'Library/Application Support/Microsoft Edge', 'Library/Application Support/Firefox', 'Library/Safari',
+  'Library/Cookies', 'Library/Mail', 'Library/Messages',
+  '.mozilla', '.config/google-chrome', '.config/chromium', '.config/BraveSoftware'
 ];
 
 /**
  * The protected entries above that the extension permission broker's `sensitiveRoots` does not
- * list (it guards plugin writes, this guards agent reads). Documented in one place so the two
- * lists can be compared by eye; the broker parity test checks every other entry is in both.
+ * list (it guards plugin writes, this guards agent reads). The broker parity test checks that
+ * every entry of `SENSITIVE_HOME_PATHS` is in exactly one of the broker's list and this one, so
+ * it is derived rather than repeated: only the entries the broker does cover are named here.
  */
-export const SENSITIVE_HOME_PATHS_OUTSIDE_BROKER: readonly string[] = [
-  '.gnupg', '.config/gh', '.netrc', '.docker/config.json',
-  '.git-credentials', '.npmrc', '.pypirc', '.kube', '.claude.json', '.claude/.credentials.json',
-  '.claude/projects', 'Library/Keychains',
-  '.local/share/opencode', '.pi', '.grok', '.gemini'
-];
+const BROKER_COVERED_HOME_PATHS: readonly string[] = ['.ssh', '.aws', '.codex', '.cursor', '.config/gcloud', '.claude/sessions'];
+export const SENSITIVE_HOME_PATHS_OUTSIDE_BROKER: readonly string[] =
+  SENSITIVE_HOME_PATHS.filter((path) => !BROKER_COVERED_HOME_PATHS.includes(path));
 
 /**
- * The only HOME credential stores refused inside the registered Project. Before the shared
- * policy these (plus Zana's data folders and the app's own data) were the whole list, so a
- * Project that lives in, say, `~/.claude/projects/<p>` keeps the files it could attach.
+ * The HOME credential stores that stay refused whatever Project is registered, even one that
+ * lives inside them (`~/.ssh/proj`): the protections that predate the shared policy, plus Claude
+ * Code's credentials file, which no Project should hand to a Squad. Every other protected root
+ * stays refused inside the Project too, except the ones that contain or equal the Project root
+ * itself (a Project at `~/.claude/projects/p` must be able to attach its own files).
  */
-// The pre-#385 refusals, plus Claude Code's credentials file, which no Project should hand to a Squad.
 export const IN_PROJECT_PROTECTED_HOME_PATHS: readonly string[] = ['.ssh', '.aws', '.claude/.credentials.json'];
 
 /** Zana's data folders under HOME (production, dev and shared machines); ZCC_DATA_DIR is added by the caller. */
@@ -73,7 +85,7 @@ export function sourcePolicyText(policy?: Pick<SourcePolicy, 'roots' | 'home' | 
   return `A source must be a file inside ${allowedLocationsText(policy).replace(/^the project/, 'this project')}. `
     + `Credential stores and agent sessions (${SENSITIVE_HOME_PATHS.map((path) => `~/${path}`).join(', ')}), the app's own data `
     + `and Zana's data folders (~/.zcc and its kin) are refused, except their ${READABLE_DATA_DIRS.join(', ')} folders. `
-    + `Inside the project itself only ${IN_PROJECT_PROTECTED_HOME_PATHS.map((path) => `~/${path}`).join(', ')}, the app's own data and Zana's data folders stay refused. `
+    + `A project inside one of those folders can attach its own files, but a protected folder inside the project stays refused, as do ${IN_PROJECT_PROTECTED_HOME_PATHS.map((path) => `~/${path}`).join(', ')}, the app's own data and Zana's data folders. `
     + 'A link that leads into a refused location is refused too.';
 }
 
@@ -91,7 +103,7 @@ export interface SourcePolicy {
   dataDirs?: readonly string[];
   /** Realpath of the registered Project, set only when it is a proper sub-folder of HOME (see `projectProtectedRoots`). */
   projectRoot?: string;
-  /** What stays protected inside `projectRoot`: only the protections that predate the shared policy. Outside it, `protectedRoots` applies. */
+  /** What stays protected inside `projectRoot`: `protectedRoots` less those that contain or equal the Project root. Outside it, `protectedRoots` applies. */
   projectProtectedRoots?: readonly string[];
   /** The clone root, when it is an active base. */
   cloneRoot?: string;
@@ -240,17 +252,24 @@ export async function resolveSourcePolicy(
   const projectRoot = await resolveOr(bases.projectRoot);
   const activeCloneRoot = cloneRootSafe && !homeIsRoot ? cloneRoot : undefined;
   const roots = [projectRoot, homeIsRoot ? undefined : home, activeCloneRoot].filter((root): root is string => !!root);
-  // Inside a Project that is a proper sub-folder of HOME, only the protections that predate the shared
-  // policy apply; a Project that is HOME (or holds it) would otherwise lose every newer one.
+  // A Project that is a proper sub-folder of HOME may sit inside a protected folder (`~/.claude/projects/p`) and still
+  // attach its own files, so the protected roots that contain or equal it are dropped for paths inside it. Protected
+  // roots inside the Project (`~/.config/gh` for a Project at `~/.config`) and the always-protected stores stay refused.
+  // A Project that is HOME (or holds it) would otherwise lose every protection, so it relaxes nothing.
   const relaxInProject = projectRoot !== undefined && !homeIsRoot && !atOrWithin(home, projectRoot);
+  const protectedRoots = await bothForms([...defaultProtectedRoots(home), ...(bases.protectedRoots ?? [])]);
+  const alwaysProtected = await bothForms([...IN_PROJECT_PROTECTED_HOME_PATHS.map((path) => join(home, path)), ...(bases.protectedRoots ?? [])]);
   return {
     roots: [...new Set(roots)],
     home,
-    protectedRoots: await bothForms([...defaultProtectedRoots(home), ...(bases.protectedRoots ?? [])]),
+    protectedRoots,
     dataDirs: await bothForms([...defaultDataDirs(home), ...(bases.dataDirs ?? [])]),
     ...(relaxInProject ? {
       projectRoot,
-      projectProtectedRoots: await bothForms([...IN_PROJECT_PROTECTED_HOME_PATHS.map((path) => join(home, path)), ...(bases.protectedRoots ?? [])])
+      projectProtectedRoots: [...new Set([
+        ...alwaysProtected,
+        ...protectedRoots.filter((root) => !atOrWithinFold(projectRoot!, root))
+      ])]
     } : {}),
     ...(activeCloneRoot ? { cloneRoot: activeCloneRoot } : {})
   };
