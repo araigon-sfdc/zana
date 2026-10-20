@@ -5,9 +5,9 @@
  * `idea.bat`). Node's `spawn` can't start them without a shell: a bare `code`
  * misses PATHEXT (ENOENT) and `code.cmd` is refused outright (EINVAL, the
  * CVE-2024-27980 fix). Going through `cmd.exe` would re-parse project paths as
- * shell syntax, so instead we resolve the editor's own GUI executable and spawn
- * that directly — `Code.exe` / `Cursor.exe` / `idea64.exe` accept the same path
- * arguments the shim forwards.
+ * shell syntax, so instead we resolve what the shim runs and spawn that
+ * directly: `Code.exe` / `Cursor.exe` as Node on their `cli.js` (like the
+ * shim), or `idea64.exe` with the path.
  *
  * Resolution order: the configured binary (absolute path or PATH lookup with
  * PATHEXT) → the `.exe` it names (itself, a quoted `.exe` inside the shim, or a
@@ -93,21 +93,52 @@ function findOnPath(binary: string, fs: WindowsEditorFs): string | null {
   return null;
 }
 
+/**
+ * Existing files a shim names in double quotes with extension `ext`, e.g.
+ * `"%~dp0..\Code.exe"` (VS Code / Cursor) or an absolute `"C:\…\idea64.exe"`
+ * (JetBrains Toolbox scripts). `%~dp0` is the shim's own folder.
+ */
+function quotedFiles(shim: string, ext: string, fs: WindowsEditorFs): string[] {
+  const dir = path.dirname(shim);
+  const text = fs.readText(shim) ?? '';
+  const found: string[] = [];
+  for (const match of text.matchAll(new RegExp(`"([^"\\r\\n]+?\\${ext})"`, 'gi'))) {
+    const raw = match[1].replace(/%~dp0/gi, dir + path.sep);
+    if (raw.includes('%')) continue;
+    const file = path.resolve(dir, raw);
+    if (fs.isFile(file)) found.push(file);
+  }
+  return found;
+}
+
 /** The GUI executable a shim launches: a quoted `.exe` it names, else a sibling. */
 function exeFromShim(shim: string, fs: WindowsEditorFs): string | null {
   if (path.extname(shim).toLowerCase() === '.exe') return shim;
+  const [named] = quotedFiles(shim, '.exe', fs);
+  if (named) return named;
   const dir = path.dirname(shim);
-  const text = fs.readText(shim) ?? '';
-  // `"%~dp0..\Code.exe"` (VS Code / Cursor) or an absolute `"C:\…\idea64.exe"`
-  // (JetBrains Toolbox scripts). `%~dp0` is the shim's own folder.
-  for (const match of text.matchAll(/"([^"\r\n]+?\.exe)"/gi)) {
-    const raw = match[1].replace(/%~dp0/gi, dir + path.sep);
-    if (raw.includes('%')) continue;
-    const exe = path.resolve(dir, raw);
-    if (fs.isFile(exe)) return exe;
-  }
   const base = path.basename(shim, path.extname(shim));
   return [`${base}64.exe`, `${base}.exe`].map((n) => path.join(dir, n)).find((p) => fs.isFile(p)) ?? null;
+}
+
+/**
+ * The `cli.js` that VS Code / Cursor's shim runs with the exe as Node
+ * (`ELECTRON_RUN_AS_NODE=1 Code.exe …\out\cli.js %*`). Read from the shim that
+ * named `exe`, else from the one shipped in the install (`bin\code.cmd`,
+ * `resources\app\bin\cursor.cmd`), so an exe found directly gets it too.
+ */
+function cliJsFor(target: EditorTarget, exe: string, shim: string | null, fs: WindowsEditorFs): string | undefined {
+  if (target === 'intellij') return undefined;
+  const dir = path.dirname(exe);
+  const name = path.basename(exe, path.extname(exe)).toLowerCase();
+  const shims = [shim, path.join(dir, 'bin', `${name}.cmd`), path.join(dir, 'resources', 'app', 'bin', `${name}.cmd`)];
+  for (const candidate of shims) {
+    // Only a shim that launches this very exe knows its matching cli.js.
+    if (!candidate || !quotedFiles(candidate, '.exe', fs).some((e) => e.toLowerCase() === exe.toLowerCase())) continue;
+    const [cliJs] = quotedFiles(candidate, '.js', fs);
+    if (cliJs) return cliJs;
+  }
+  return undefined;
 }
 
 /** Default per-user and machine-wide install locations, newest IntelliJ first. */
@@ -137,15 +168,39 @@ function defaultInstalls(target: EditorTarget, fs: WindowsEditorFs): string[] {
   }
 }
 
+/** How to start an editor on Windows without a shell. */
+export interface WindowsEditorLaunch {
+  /** The editor's own executable. */
+  exe: string;
+  /**
+   * VS Code / Cursor's CLI script. When set, run `exe cliJs …args` with
+   * `ELECTRON_RUN_AS_NODE=1`, exactly as the shim does: launching the GUI exe
+   * with `-n <folder>` while the editor is already running opens nothing.
+   */
+  cliJs?: string;
+}
+
 /**
- * Resolve the GUI executable to spawn (directly, no shell) for `target`, given
- * the configured CLI name or path (`code`, a user override, …). Null when the
- * editor can't be found.
+ * Resolve how to launch `target` (directly, no shell), given the configured
+ * CLI name or path (`code`, a user override, …). Null when the editor can't be
+ * found.
  */
-export function resolveWindowsEditor(target: EditorTarget, binary: string, fs: WindowsEditorFs = realWindowsEditorFs): string | null {
+export function resolveWindowsEditorLaunch(
+  target: EditorTarget,
+  binary: string,
+  fs: WindowsEditorFs = realWindowsEditorFs
+): WindowsEditorLaunch | null {
   const shim = binary.trim() ? findOnPath(binary.trim(), fs) : null;
   const viaShim = shim ? exeFromShim(shim, fs) : null;
-  return viaShim ?? defaultInstalls(target, fs).find((p) => fs.isFile(p)) ?? null;
+  const exe = viaShim ?? defaultInstalls(target, fs).find((p) => fs.isFile(p));
+  if (!exe) return null;
+  const cliJs = cliJsFor(target, exe, viaShim ? shim : null, fs);
+  return cliJs ? { exe, cliJs } : { exe };
+}
+
+/** The editor's executable (see `resolveWindowsEditorLaunch`), or null. */
+export function resolveWindowsEditor(target: EditorTarget, binary: string, fs: WindowsEditorFs = realWindowsEditorFs): string | null {
+  return resolveWindowsEditorLaunch(target, binary, fs)?.exe ?? null;
 }
 
 function jsonField(file: string, fs: WindowsEditorFs, ...keys: string[]): string[] {

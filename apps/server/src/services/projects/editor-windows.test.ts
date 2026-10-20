@@ -2,7 +2,13 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect } from 'vitest';
-import { realWindowsEditorFs, resolveWindowsEditor, windowsEditorVersion, type WindowsEditorFs } from './editor-windows.js';
+import {
+  realWindowsEditorFs,
+  resolveWindowsEditor,
+  resolveWindowsEditorLaunch,
+  windowsEditorVersion,
+  type WindowsEditorFs
+} from './editor-windows.js';
 
 /**
  * In-memory Windows filesystem keyed by case-insensitive win32 paths, so the
@@ -104,6 +110,69 @@ describe('resolveWindowsEditor', () => {
     );
     expect(resolveWindowsEditor('code', 'code', fs)).toBeNull();
     expect(resolveWindowsEditor('intellij', 'idea', fakeFs({}))).toBeNull();
+  });
+});
+
+describe('resolveWindowsEditorLaunch', () => {
+  it('takes VS Code’s cli.js from the code.cmd shim on PATH', () => {
+    const fs = fakeFs(
+      {
+        'C:\\Microsoft VS Code\\bin\\code.cmd': VSCODE_SHIM,
+        'C:\\Microsoft VS Code\\Code.exe': '',
+        'C:\\Microsoft VS Code\\6d62b1d5da\\resources\\app\\out\\cli.js': ''
+      },
+      { PATH: 'C:\\Microsoft VS Code\\bin' }
+    );
+    expect(resolveWindowsEditorLaunch('code', 'code', fs)).toEqual({
+      exe: 'C:\\Microsoft VS Code\\Code.exe',
+      cliJs: 'C:\\Microsoft VS Code\\6d62b1d5da\\resources\\app\\out\\cli.js'
+    });
+  });
+
+  it('takes Cursor’s cli.js from its shim three folders below Cursor.exe', () => {
+    const fs = fakeFs(
+      {
+        'D:\\Apps\\cursor\\resources\\app\\bin\\cursor.cmd': '@echo off\r\n"%~dp0..\\..\\..\\Cursor.exe" "%~dp0..\\out\\cli.js" %*\r\n',
+        'D:\\Apps\\cursor\\Cursor.exe': '',
+        'D:\\Apps\\cursor\\resources\\app\\out\\cli.js': ''
+      },
+      { PATH: 'D:\\Apps\\cursor\\resources\\app\\bin' }
+    );
+    expect(resolveWindowsEditorLaunch('cursor', 'cursor', fs)).toEqual({
+      exe: 'D:\\Apps\\cursor\\Cursor.exe',
+      cliJs: 'D:\\Apps\\cursor\\resources\\app\\out\\cli.js'
+    });
+  });
+
+  it('finds the shim inside the install for an exe set directly or found in a default folder', () => {
+    const files = {
+      'E:\\VSC\\bin\\code.cmd': VSCODE_SHIM,
+      'E:\\VSC\\Code.exe': '',
+      'E:\\VSC\\6d62b1d5da\\resources\\app\\out\\cli.js': '',
+      'C:\\Program Files\\Cursor\\resources\\app\\bin\\cursor.cmd': '"%~dp0..\\..\\..\\Cursor.exe" "%~dp0..\\out\\cli.js" %*',
+      'C:\\Program Files\\Cursor\\Cursor.exe': '',
+      'C:\\Program Files\\Cursor\\resources\\app\\out\\cli.js': ''
+    };
+    const fs = fakeFs(files, { ProgramFiles: 'C:\\Program Files' });
+    expect(resolveWindowsEditorLaunch('code', 'E:\\VSC\\Code.exe', fs)?.cliJs).toBe('E:\\VSC\\6d62b1d5da\\resources\\app\\out\\cli.js');
+    expect(resolveWindowsEditorLaunch('cursor', 'cursor', fs)?.cliJs).toBe('C:\\Program Files\\Cursor\\resources\\app\\out\\cli.js');
+  });
+
+  it('launches the exe alone when no shim names it with an existing cli.js, and always for IntelliJ', () => {
+    const fs = fakeFs({
+      'E:\\VSC\\Code.exe': '',
+      'E:\\VSC\\bin\\code.cmd': '"%~dp0..\\Other.exe" "%~dp0cli.js"',
+      'E:\\VSC\\cli.js': '',
+      'F:\\VSC\\Code.exe': '',
+      'F:\\VSC\\bin\\code.cmd': VSCODE_SHIM,
+      'C:\\IDEA\\bin\\idea.bat': '"%~dp0idea64.exe" "%~dp0x.js"',
+      'C:\\IDEA\\bin\\idea64.exe': '',
+      'C:\\IDEA\\bin\\x.js': ''
+    });
+    expect(resolveWindowsEditorLaunch('code', 'E:\\VSC\\Code.exe', fs)).toEqual({ exe: 'E:\\VSC\\Code.exe' });
+    expect(resolveWindowsEditorLaunch('code', 'F:\\VSC\\Code.exe', fs)).toEqual({ exe: 'F:\\VSC\\Code.exe' });
+    expect(resolveWindowsEditorLaunch('intellij', 'C:\\IDEA\\bin\\idea.bat', fs)).toEqual({ exe: 'C:\\IDEA\\bin\\idea64.exe' });
+    expect(resolveWindowsEditorLaunch('code', 'nope', fakeFs({}))).toBeNull();
   });
 });
 

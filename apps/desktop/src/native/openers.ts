@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
 import { shell } from 'electron';
 import type { EditorTarget, OpenResult, OpenTarget } from '@zana-ai/zcc-domain/product';
-import { resolveWindowsEditor, WINDOWS_INSTALL_HINTS } from '@zana-ai/zcc-server/services/projects/editor-windows';
+import { resolveWindowsEditorLaunch, WINDOWS_INSTALL_HINTS } from '@zana-ai/zcc-server/services/projects/editor-windows';
 
 /**
  * Per-target overrides the caller (main's IPC handler) resolves from `AppConfig`
@@ -40,10 +40,10 @@ function pickMacTerminalApp(): string {
   return 'Terminal';
 }
 
-function spawnDetached(cmd: string, args: string[]): Promise<OpenResult> {
+function spawnDetached(cmd: string, args: string[], env?: NodeJS.ProcessEnv): Promise<OpenResult> {
   return new Promise((resolve) => {
     try {
-      const child = spawn(cmd, args, { detached: true, stdio: 'ignore' });
+      const child = spawn(cmd, args, { detached: true, stdio: 'ignore', ...(env ? { env } : {}) });
       child.once('error', (err) => {
         resolve({ ok: false, message: err.message });
       });
@@ -93,7 +93,9 @@ function openMacApp(appName: string, path: string): Promise<OpenResult> {
  * install hint. Linux keeps CLI-only (the fallback is an `open` feature).
  *
  * Windows shims are batch files `spawn` can't start without a shell, so there we
- * spawn the editor's own executable directly (see `editor-windows.ts`).
+ * run what the shim runs, directly (see `editor-windows.ts`): `Code.exe cli.js
+ * -n <path>` as Node. Without `cli.js`, the bare exe gets just the path: with
+ * `-n` a running VS Code exits 0 and opens nothing.
  */
 async function openInEditor(
   target: EditorTarget,
@@ -104,10 +106,12 @@ async function openInEditor(
   installHint: string
 ): Promise<OpenResult> {
   if (process.platform === 'win32') {
-    const exe = resolveWindowsEditor(target, cli);
+    const launch = resolveWindowsEditorLaunch(target, cli);
     const notFound = `Could not launch ${name}. Install it ${WINDOWS_INSTALL_HINTS[target]} in Settings → Editor.`;
-    if (!exe) return { ok: false, message: notFound };
-    const viaExe = await spawnDetached(exe, cliArgs);
+    if (!launch) return { ok: false, message: notFound };
+    const viaExe = launch.cliJs
+      ? await spawnDetached(launch.exe, [launch.cliJs, ...cliArgs], { ...process.env, ELECTRON_RUN_AS_NODE: '1', VSCODE_DEV: '' })
+      : await spawnDetached(launch.exe, cliArgs[0] === '-n' ? cliArgs.slice(1) : cliArgs);
     return viaExe.ok ? viaExe : { ok: false, message: `${notFound} (${viaExe.message})` };
   }
   const viaCli = await spawnDetached(cli, cliArgs);

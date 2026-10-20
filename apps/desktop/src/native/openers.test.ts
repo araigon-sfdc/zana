@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 const h = vi.hoisted(() => ({
   spawns: [] as Array<{ cmd: string; args: string[]; opts: Record<string, unknown> }>,
   failing: new Set<string>(),
-  exes: new Map<string, string>(),
+  exes: new Map<string, { exe: string; cliJs?: string }>(),
   macApps: new Set<string>()
 }));
 vi.mock('node:child_process', () => ({
@@ -31,7 +31,7 @@ vi.mock('node:child_process', () => ({
 vi.mock('electron', () => ({ shell: { openPath: vi.fn(async () => ''), showItemInFolder: vi.fn(), openExternal: vi.fn(async () => {}) } }));
 vi.mock('@zana-ai/zcc-server/services/projects/editor-windows', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@zana-ai/zcc-server/services/projects/editor-windows')>()),
-  resolveWindowsEditor: (_target: string, binary: string) => h.exes.get(binary) ?? null
+  resolveWindowsEditorLaunch: (_target: string, binary: string) => h.exes.get(binary) ?? null
 }));
 
 const { shell } = await import('electron');
@@ -51,19 +51,33 @@ afterEach(() => {
 });
 
 describe('openIn editors on Windows', () => {
-  it('spawns the resolved Code.exe directly with the shim’s arguments, no shell', async () => {
+  it('runs Code.exe on its cli.js as Node, like the shim, with no shell', async () => {
     onPlatform('win32');
-    h.exes.set('code', 'C:\\Microsoft VS Code\\Code.exe');
+    const cliJs = 'C:\\Microsoft VS Code\\6d62b1d5da\\resources\\app\\out\\cli.js';
+    h.exes.set('code', { exe: 'C:\\Microsoft VS Code\\Code.exe', cliJs });
     const result = await openIn('code', 'C:\\work\\my project & co');
     expect(result).toEqual({ ok: true });
     expect(h.spawns).toEqual([
-      { cmd: 'C:\\Microsoft VS Code\\Code.exe', args: ['-n', 'C:\\work\\my project & co'], opts: { detached: true, stdio: 'ignore' } }
+      {
+        cmd: 'C:\\Microsoft VS Code\\Code.exe',
+        args: [cliJs, '-n', 'C:\\work\\my project & co'],
+        opts: { detached: true, stdio: 'ignore', env: expect.objectContaining({ ELECTRON_RUN_AS_NODE: '1', VSCODE_DEV: '' }) }
+      }
     ]);
+    // The rest of the environment is inherited.
+    expect(Object.keys(h.spawns[0].opts.env as object)).toEqual(expect.arrayContaining(Object.keys(process.env)));
+  });
+
+  it('passes a bare Code.exe just the path, since -n opens nothing in a running VS Code', async () => {
+    onPlatform('win32');
+    h.exes.set('code', { exe: 'E:\\VSC\\Code.exe' });
+    await openIn('code', 'C:\\work');
+    expect(h.spawns).toEqual([{ cmd: 'E:\\VSC\\Code.exe', args: ['C:\\work'], opts: { detached: true, stdio: 'ignore' } }]);
   });
 
   it('resolves the configured CLI launcher and passes IntelliJ just the path', async () => {
     onPlatform('win32');
-    h.exes.set('D:\\IDEA\\bin\\idea.bat', 'D:\\IDEA\\bin\\idea64.exe');
+    h.exes.set('D:\\IDEA\\bin\\idea.bat', { exe: 'D:\\IDEA\\bin\\idea64.exe' });
     await openIn('intellij', 'C:\\work', { intellijBinary: ' D:\\IDEA\\bin\\idea.bat ' });
     expect(h.spawns.map((s) => [s.cmd, s.args])).toEqual([['D:\\IDEA\\bin\\idea64.exe', ['C:\\work']]]);
   });
@@ -80,7 +94,7 @@ describe('openIn editors on Windows', () => {
 
   it('includes the spawn error when the resolved executable fails to start', async () => {
     onPlatform('win32');
-    h.exes.set('code', 'C:\\VSC\\Code.exe');
+    h.exes.set('code', { exe: 'C:\\VSC\\Code.exe' });
     h.failing.add('C:\\VSC\\Code.exe');
     const result = await openIn('code', 'C:\\work');
     expect(result.ok).toBe(false);
