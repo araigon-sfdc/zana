@@ -1,29 +1,40 @@
 import { EventEmitter } from 'node:events';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 // Every spawn is recorded; `failing` commands emit ENOENT like a missing binary.
+// `/usr/bin/open -a <app>` exits 0 only for an app listed in `macApps`.
 const h = vi.hoisted(() => ({
   spawns: [] as Array<{ cmd: string; args: string[]; opts: Record<string, unknown> }>,
   failing: new Set<string>(),
-  exes: new Map<string, string>()
+  exes: new Map<string, string>(),
+  macApps: new Set<string>()
 }));
 vi.mock('node:child_process', () => ({
   spawn: (cmd: string, args: string[], opts: Record<string, unknown>) => {
     h.spawns.push({ cmd, args, opts });
-    const child = Object.assign(new EventEmitter(), { unref: vi.fn(), stderr: null });
+    const child = Object.assign(new EventEmitter(), { unref: vi.fn(), stderr: new EventEmitter() });
     queueMicrotask(() => {
       if (h.failing.has(cmd)) child.emit('error', Object.assign(new Error(`spawn ${cmd} ENOENT`), { code: 'ENOENT' }));
-      else child.emit('spawn');
+      else if (cmd !== '/usr/bin/open') child.emit('spawn');
+      else if (h.macApps.has(args[1])) child.emit('exit', 0);
+      else {
+        child.stderr.emit('data', `Unable to find application named '${args[1]}'`);
+        child.emit('exit', 1);
+      }
     });
     return child;
   }
 }));
-vi.mock('electron', () => ({ shell: { openPath: vi.fn(), showItemInFolder: vi.fn(), openExternal: vi.fn() } }));
+vi.mock('electron', () => ({ shell: { openPath: vi.fn(async () => ''), showItemInFolder: vi.fn(), openExternal: vi.fn(async () => {}) } }));
 vi.mock('@zana-ai/zcc-server/services/projects/editor-windows', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@zana-ai/zcc-server/services/projects/editor-windows')>()),
   resolveWindowsEditor: (_target: string, binary: string) => h.exes.get(binary) ?? null
 }));
 
+const { shell } = await import('electron');
 const { openIn } = await import('./openers.js');
 
 const realPlatform = process.platform;
@@ -36,6 +47,7 @@ afterEach(() => {
   h.spawns = [];
   h.failing = new Set();
   h.exes = new Map();
+  h.macApps = new Set();
 });
 
 describe('openIn editors on Windows', () => {
@@ -76,6 +88,35 @@ describe('openIn editors on Windows', () => {
   });
 });
 
+describe('openIn non-editor targets', () => {
+  it('opens a folder in the file manager, reveals a file, and reports a missing path', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'zcc-openers-'));
+    try {
+      writeFileSync(join(dir, 'notes.md'), '');
+      expect(await openIn('finder', dir)).toEqual({ ok: true });
+      expect(shell.openPath).toHaveBeenCalledWith(dir);
+      expect(await openIn('finder', join(dir, 'notes.md'))).toEqual({ ok: true });
+      expect(shell.showItemInFolder).toHaveBeenCalledWith(join(dir, 'notes.md'));
+      vi.mocked(shell.openPath).mockResolvedValueOnce('Access denied');
+      expect(await openIn('finder', dir)).toEqual({ ok: false, message: 'Access denied' });
+      expect((await openIn('finder', join(dir, 'gone'))).ok).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports the external terminal as unsupported off macOS', async () => {
+    onPlatform('linux');
+    expect(await openIn('terminal', '/work')).toEqual({ ok: false, message: 'External terminal launch is not yet supported on this platform.' });
+  });
+
+  it('opens only http(s) URLs in the browser', async () => {
+    expect(await openIn('browser', 'https://example.com')).toEqual({ ok: true });
+    expect(shell.openExternal).toHaveBeenCalledWith('https://example.com');
+    expect((await openIn('browser', 'file:///etc/passwd')).ok).toBe(false);
+  });
+});
+
 describe('openIn editors elsewhere', () => {
   it('keeps launching the CLI shim on Linux and returns the macOS-style hint on failure', async () => {
     onPlatform('linux');
@@ -85,5 +126,25 @@ describe('openIn editors elsewhere', () => {
     h.failing.add('idea');
     const failed = await openIn('intellij', '/work');
     expect(failed).toEqual({ ok: false, message: expect.stringContaining('Create Command-line Launcher') });
+  });
+
+  it('falls back on macOS to open -a, trying the app override first', async () => {
+    onPlatform('darwin');
+    h.failing.add('idea');
+    h.macApps.add('IntelliJ IDEA CE');
+    expect(await openIn('intellij', '/work', { intellijApp: 'My IDEA' })).toEqual({ ok: true });
+    expect(h.spawns.filter((s) => s.cmd === '/usr/bin/open').map((s) => s.args[1])).toEqual([
+      'My IDEA',
+      'IntelliJ IDEA',
+      'IntelliJ IDEA Ultimate',
+      'IntelliJ IDEA CE'
+    ]);
+  });
+
+  it('returns the install hint on macOS when neither the CLI nor any app is found', async () => {
+    onPlatform('darwin');
+    h.failing.add('cursor');
+    expect(await openIn('cursor', '/work')).toEqual({ ok: false, message: expect.stringContaining('Cursor.app is in /Applications') });
+    expect(h.spawns.at(-1)).toMatchObject({ cmd: '/usr/bin/open', args: ['-a', 'Cursor', '-n', '/work'] });
   });
 });
