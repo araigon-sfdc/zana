@@ -1019,7 +1019,9 @@ test('Agentforce Studio: create local agents and control the visible workbench t
   expect(await agent({ action: 'lifecycle.publish', path: created.file.path })).toMatchObject({ ok: false, code: 'refused' });
   const cliCalls = readFileSync(join(home, 'agent-cli.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
   expect(cliCalls.some(call => call.args[1] === 'publish')).toBe(false);
-  for (const verb of ['validate', 'preview', 'test']) {
+  // The draft's preview went through the Preview API, so `sf agent preview` never ran.
+  expect(cliCalls.some(call => call.args[1] === 'preview')).toBe(false);
+  for (const verb of ['validate', 'test']) {
     expect(cliCalls.find(call => call.args[1] === verb)).toMatchObject({ cwd: realpathSync(join(projectRoot, 'agentforce-drafts')), home });
   }
   async function view(surface: string) {
