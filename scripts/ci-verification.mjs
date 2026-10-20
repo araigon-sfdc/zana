@@ -35,6 +35,8 @@ export function boundarySpecs(paths) {
     if (/mobile-relay|mobile\/|mobile-/.test(path)) add('mobile-shell', 'mobile-relay-upload');
     if (/services\/scheduler\/|components\/scheduler\/|views\/scheduler\/|schedule-health/.test(path)) add('scheduler-self-healing', 'scheduler-overview', 'scheduler-detail', 'scheduler-cron');
     if (/squad-proposal|squad-worktree-runtime|squad-session-lifecycle|SquadEditor|team-store|TeamComposer|register-teams-mcp-tool|InboxDetail|(?:^|\/)AgentLauncher\.tsx|ExecutionJobDetails|modern-team-launch-tools|ipc\/execution-board|services\/execution\/(store|projection)/.test(path)) add('squad-proposal-flow', 'job-team-launch-ui');
+    // The shared source policy and registry feed proposals and manual launches only (#385).
+    if (/services\/execution\/(source-policy|source-registry)/.test(path)) add('squad-proposal-flow', 'job-team-launch-ui');
     if (/ci-verification|\.github\/workflows\/ci\.yml/.test(path)) add('smoke');
   }
   return [...specs].sort();

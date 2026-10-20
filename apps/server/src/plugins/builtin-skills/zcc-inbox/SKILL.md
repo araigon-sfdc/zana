@@ -391,8 +391,9 @@ can say "run it now with X" next time to skip the Inbox.
 Say which path you took, in one line: "Prepared a Squad launch for your review in
 the Inbox" or "Started X now; I own the run". The user can then catch a misroute.
 
-Review first: save the files to the project library, run `squad_plan_check`, pick
-a Squad with `list_teams`, then call `squad_propose`; do not call `execution.start`.
+Review first: pass the design and plan files you wrote or read, wherever they are,
+by their exact paths (do not copy them), run `squad_plan_check`, pick a Squad with
+`list_teams`, then call `squad_propose`; do not call `execution.start`.
 The user reviews the Inbox card and presses Launch. Follow the steps in the
 `brainstorm` skill ("When the user wants it built"). A `[Squad report]` message
 later is for you to summarise to the user, not to act on.

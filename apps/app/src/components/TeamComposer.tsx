@@ -30,6 +30,9 @@ import {
   stageRemoteComposerAttachments
 } from './legacy-agent-home.js';
 
+/** A source chip. A file outside the project (proposed from HOME or the clone root) shows its path. */
+type ComposerSource = ExecutionSourceCapabilityView & { path?: string; outsideProject?: boolean };
+
 /** One durable Team launch surface for inferred and user-provided plans. */
 export function TeamComposer({
   project: pinnedProject,
@@ -68,7 +71,7 @@ export function TeamComposer({
   );
   const [title, setTitle] = useComposerSetting(session, 'team.title', prefill?.title ?? '', { content: true });
   const [summary, setSummary] = useComposerSetting(session, 'team.summary', prefill?.summary ?? '', { content: true });
-  const [jobSources, setJobSources] = useState<ExecutionSourceCapabilityView[]>(() => prefill?.sources ?? []);
+  const [jobSources, setJobSources] = useState<ComposerSource[]>(() => prefill?.sources ?? []);
   // Pre-filled sources belong to `prefill.projectId`; keep them while the
   // project is still resolving to it.
   const prefillSourcesGuardRef = useRef(Boolean(prefill?.sources.length));
@@ -458,9 +461,10 @@ export function TeamComposer({
       {jobSources.length > 0 ? (
         <ul className="launch-attachment-list" aria-label="Attached sources">
           {jobSources.map((source) => (
-            <li key={source.id} className="launch-attachment-pill">
+            <li key={source.id} className="launch-attachment-pill" {...(source.outsideProject ? { title: source.path } : {})}>
               <FileText size={12} aria-hidden="true" />
-              <span>{source.name}</span>
+              <span>{source.outsideProject && source.path ? source.path : source.name}</span>
+              {source.outsideProject ? <span className="launch-attachment-outside">outside the Project</span> : null}
               <button
                 type="button"
                 aria-label={`Remove ${source.name}`}

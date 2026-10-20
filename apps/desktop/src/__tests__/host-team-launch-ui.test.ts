@@ -129,7 +129,8 @@ vi.mock('@zana-ai/zcc-host-daemon/mcp-config', () => ({
 const { startTeamJobFromUi, squadProposalService, squadProposalStore } = await import('../host.js');
 const { SquadExecutionService } = await import('@zana-ai/zcc-server/services/execution/service');
 
-const projectDir = realpathSync(mkdtempSync(join(h.root, 'proj-')));
+// Outside h.root, which is this test's ZCC_DATA_DIR: the source policy protects Zana's data folder.
+const projectDir = realpathSync(mkdtempSync(join(tmpdir(), 'zcc-launch-proj-')));
 mkdirSync(projectDir, { recursive: true });
 
 const PLAN = [
@@ -154,6 +155,7 @@ beforeEach(() => {
 afterAll(() => {
   vi.unstubAllEnvs();
   rmSync(h.root, { recursive: true, force: true });
+  rmSync(projectDir, { recursive: true, force: true });
 });
 
 const input = (extra: Record<string, unknown> = {}) => ({ teamId: 'team1', projectId: 'p1', goal: 'Ship the feature', ...extra }) as never;
@@ -364,26 +366,31 @@ describe('startTeamJobFromUi proposed launches', () => {
     }
   });
 
-  it('attaches goal-named files only from inside the project for a proposed launch (D3)', async () => {
-    const fakeHome = realpathSync(mkdtempSync(join(h.root, 'home-')));
-    const secret = join(fakeHome, 'secret.md');
-    writeFileSync(secret, 'token');
+  it('discovers goal-named files for a proposed launch exactly like a manual one, and never from a credential store', async () => {
+    // Not under h.root: that is this test's ZCC_DATA_DIR, which the source policy protects.
+    const fakeHome = realpathSync(mkdtempSync(join(tmpdir(), 'zcc-launch-home-')));
+    const notes = join(fakeHome, 'notes.md');
+    writeFileSync(notes, 'design notes');
+    mkdirSync(join(fakeHome, '.ssh'));
+    const key = join(fakeHome, '.ssh', 'id_e2e');
+    writeFileSync(key, 'PRIVATE');
     vi.stubEnv('HOME', fakeHome);
     await squadProposalStore.create(record('prop-home') as never);
     const start = vi.spyOn(SquadExecutionService.prototype, 'start');
+    const sourceNames = (call: number) =>
+      ((start.mock.calls[call]![2] as { sourceBundle?: { sources: Array<{ name: string }> } }).sourceBundle?.sources ?? []).map((source) => source.name);
     try {
-      // Control: a launch the user composed still attaches a file named from HOME.
-      expect((await startTeamJobFromUi(input({ coordinationMode: 'freeform', goal: `Read ${secret}` }), { windowId: 1 })).ok).toBe(true);
-      expect((start.mock.calls[0]![2] as { sourceBundle?: unknown }).sourceBundle).toBeDefined();
-      // A proposal's agent-written goal cannot pull it in.
-      expect((await startTeamJobFromUi(input({ coordinationMode: 'freeform', goal: `Read ${secret}`, proposalId: 'prop-home' }), { windowId: 1 })).ok).toBe(true);
-      expect((start.mock.calls[1]![2] as { sourceBundle?: unknown }).sourceBundle).toBeUndefined();
+      expect((await startTeamJobFromUi(input({ coordinationMode: 'freeform', goal: `Read ${notes} and ${key}` }), { windowId: 1 })).ok).toBe(true);
+      expect(sourceNames(0)).toEqual(['notes.md']);
+      expect((await startTeamJobFromUi(input({ coordinationMode: 'freeform', goal: `Read ${notes} and ${key}`, proposalId: 'prop-home' }), { windowId: 1 })).ok).toBe(true);
+      expect(sourceNames(1)).toEqual(['notes.md']);
     } finally {
       start.mockRestore();
       vi.unstubAllEnvs();
       vi.stubEnv('ZCC_DATA_DIR', h.root);
       vi.stubEnv('ZCC_EXECUTION_STORE', 'json');
       vi.stubEnv('ZCC_SERVER_URL', 'http://127.0.0.1:9/');
+      rmSync(fakeHome, { recursive: true, force: true });
     }
   });
 

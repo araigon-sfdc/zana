@@ -45,6 +45,11 @@ it('selects the Squad proposal specs for proposal, team and composer seams', () 
   ]) {
     expect(boundarySpecs([path])).toEqual(expect.arrayContaining(['e2e/squad-proposal-flow.spec.ts', 'e2e/job-team-launch-ui.spec.ts']));
   }
+  // The shared source policy selects the proposal and launch specs, not the owner report-back one.
+  for (const path of ['apps/server/src/services/execution/source-policy.ts', 'apps/server/src/services/execution/source-registry.ts']) {
+    expect(boundarySpecs([path])).toEqual(expect.arrayContaining(['e2e/squad-proposal-flow.spec.ts', 'e2e/job-team-launch-ui.spec.ts']));
+    expect(boundarySpecs([path])).not.toContain('e2e/squad-direct-report.spec.ts');
+  }
   // Unrelated Squad and launcher files must not pull in the slow proposal specs.
   for (const path of [
     'docs/readme.md',

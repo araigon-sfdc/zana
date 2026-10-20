@@ -92,14 +92,17 @@ The steps below are the review-first path.
 | List Squads | `mcp__zcc-inbox__list_teams` | `zcc_list_teams` |
 | Propose the launch | `mcp__zcc-inbox__squad_propose` | `zcc_squad_propose` |
 
-1. Save the design (and optionally a portable plan) to the **project library**
-   (`<project>/.zcc/library/`). `~/.zcc/library` cannot be attached.
-2. Check the plan with `squad_plan_check` (`{ path }` of the saved file). Fix it
+1. Use the design and plan files you already wrote or read in this conversation,
+   wherever they are: this project, your home folder (a doc vault, `~/.zcc/library`)
+   or the clone root. Do not copy them.
+2. Check the plan with `squad_plan_check` (`{ path }` of the plan file). Fix it
    until it passes.
 3. Call `list_teams` and pick the Squad the user names. When its `canInferPlan`
    is false, propose with `planning: 'provided'`.
-4. Call `squad_propose` with the `teamId`, a short `goal`, and the saved files as
-   `sources` (paths inside this project).
+4. Call `squad_propose` with the `teamId`, a short `goal`, and the exact absolute
+   paths of those files as `sources`. If a path is refused (`SOURCE_NOT_ALLOWED`),
+   tell the user why. Never move a file out of a protected location (`~/.ssh`,
+   `~/.aws`, Zana's own state) to get around it.
 5. Tell the user to open the "Squad launch ready" Inbox card.
 
 On the review-first path, never use `execution.start`, `launch_team` or
