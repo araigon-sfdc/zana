@@ -50,6 +50,27 @@ interface Capability {
   issuedAt: number;
   expiresAt: number;
   used: boolean;
+  /** Issued under a source policy: a renewal keeps refusing hard-linked files. */
+  policy: boolean;
+}
+
+interface RetiredCapability {
+  id: string;
+  windowId: number;
+  projectId: string;
+  path: string;
+  exactPath: string;
+  representations: string[];
+  name: string;
+  digest: string;
+  policy: boolean;
+  retiredAt: number;
+}
+
+export type ExecutionSourceDropReason = 'moved' | 'unreadable' | 'too-large' | 'unknown';
+export interface ExecutionSourceReissueResult {
+  renewed: Array<{ previousId: string; source: ExecutionSourceCapabilityView; changed: boolean }>;
+  dropped: Array<{ previousId: string; name?: string; reason: ExecutionSourceDropReason }>;
 }
 
 export interface ExecutionSourcePathDescriptor {
@@ -70,6 +91,7 @@ interface RegistryOptions {
 }
 
 const DEFAULT_TTL_MS = 10 * 60 * 1_000;
+const RETIRED_MAX_AGE_MS = 60 * 60 * 1_000;
 const snapshotQueue = createSerializedTransactionQueue();
 const textualExtensions = new Set([
   '.txt', '.md', '.markdown', '.html', '.htm', '.json', '.yaml', '.yml', '.csv',
@@ -261,15 +283,50 @@ export function createExecutionSourceRegistry(options: RegistryOptions) {
   const capabilities = new Map<string, Capability>();
   const consumedCapabilities = new Set<string>();
 
+  const retired = new Map<string, RetiredCapability>();
+
+  function trimRetired(): void {
+    const timestamp = now();
+    for (const [retiredId, record] of retired) {
+      if (timestamp - record.retiredAt > RETIRED_MAX_AGE_MS) retired.delete(retiredId);
+    }
+    while (retired.size > limits.maxOutstandingCapabilities) retired.delete(retired.keys().next().value!);
+  }
+
+  function retire(capability: Capability): void {
+    retired.delete(capability.id);
+    retired.set(capability.id, {
+      id: capability.id, windowId: capability.windowId, projectId: capability.projectId, path: capability.path,
+      exactPath: capability.exactPath, representations: [...capability.representations], name: capability.name,
+      digest: capability.digest, policy: capability.policy, retiredAt: now()
+    });
+    trimRetired();
+  }
+
   function pruneCapabilities(): void {
     const timestamp = now();
     for (const [capabilityId, capability] of capabilities) {
-      if (capability.used || capability.expiresAt < timestamp) capabilities.delete(capabilityId);
+      if (capability.used || capability.expiresAt < timestamp) {
+        if (!capability.used) retire(capability);
+        capabilities.delete(capabilityId);
+      }
     }
   }
 
   /** What `issue()` saw when it stat'ed the path: the handle it reads must be that same file. */
   interface IssuedFile { dev: number; ino: number; policy: boolean }
+
+  async function statAndRead(path: string, options: { policy?: boolean; afterStat?: (size: number) => void } = {}): Promise<{ bytes: Buffer; size: number }> {
+    const info = await stat(path);
+    if (!info.isFile()) throw new ExecutionSourceError('NOT_REGULAR_FILE', 'Execution source must be a regular file');
+    // realpath does not resolve hard links, so `ln ~/.ssh/id_rsa ~/notes.md` passes the path policy.
+    if (options.policy && info.nlink > 1) throw new ExecutionSourceError('UNSUPPORTED_SOURCE', `${basename(path)} is a hard-linked file`);
+    if (info.size > limits.maxFileBytes) throw new ExecutionSourceError('SOURCE_TOO_LARGE', `${basename(path)} exceeds per-file limit`);
+    options.afterStat?.(info.size);
+    const bytes = await boundedRead(path, { dev: info.dev, ino: info.ino, policy: !!options.policy });
+    if (bytes.byteLength > limits.maxFileBytes) throw new ExecutionSourceError('SOURCE_TOO_LARGE', `${basename(path)} exceeds per-file limit`);
+    return { bytes, size: info.size };
+  }
 
   async function boundedRead(path: string, issued?: IssuedFile): Promise<Buffer> {
     let timer: NodeJS.Timeout | undefined;
@@ -397,19 +454,17 @@ export function createExecutionSourceRegistry(options: RegistryOptions) {
       if (capabilities.size >= limits.maxOutstandingCapabilities) {
         throw new ExecutionSourceError('TOO_MANY_SOURCES', 'Too many outstanding execution source capabilities');
       }
-      const info = await stat(path);
-      if (!info.isFile()) throw new ExecutionSourceError('NOT_REGULAR_FILE', 'Execution source must be a regular file');
-      // realpath does not resolve hard links, so `ln ~/.ssh/id_rsa ~/notes.md` passes the path policy.
-      if (input.policy && info.nlink > 1) throw new ExecutionSourceError('UNSUPPORTED_SOURCE', `${basename(path)} is a hard-linked file`);
-      if (info.size > limits.maxFileBytes) throw new ExecutionSourceError('SOURCE_TOO_LARGE', `${basename(path)} exceeds per-file limit`);
-      total += info.size;
-      if (total > limits.maxTotalBytes) throw new ExecutionSourceError('TOTAL_SOURCE_TOO_LARGE', 'Execution sources exceed total byte limit');
-      const bytes = await boundedRead(path, { dev: info.dev, ino: info.ino, policy: !!input.policy });
-      if (bytes.byteLength > limits.maxFileBytes) throw new ExecutionSourceError('SOURCE_TOO_LARGE', `${basename(path)} exceeds per-file limit`);
+      const { bytes } = await statAndRead(path, {
+        policy: !!input.policy,
+        afterStat: (size) => {
+          total += size;
+          if (total > limits.maxTotalBytes) throw new ExecutionSourceError('TOTAL_SOURCE_TOO_LARGE', 'Execution sources exceed total byte limit');
+        }
+      });
       const issuedAt = now();
       const capability: Capability = {
         id: id(), windowId: input.windowId, projectId: input.projectId, path, exactPath, representations, name: basename(path),
-        byteSize: bytes.byteLength, digest: digest(bytes), issuedAt, expiresAt: issuedAt + ttlMs, used: false
+        byteSize: bytes.byteLength, digest: digest(bytes), issuedAt, expiresAt: issuedAt + ttlMs, used: false, policy: !!input.policy
       };
       capabilities.set(capability.id, capability);
       createdIds.push(capability.id);
@@ -417,6 +472,83 @@ export function createExecutionSourceRegistry(options: RegistryOptions) {
     } return views; } catch (error) {
       for (const capabilityId of createdIds) capabilities.delete(capabilityId);
       throw error;
+    }
+  }
+
+  function viewOf(capability: Capability): ExecutionSourceCapabilityView {
+    return { id: capability.id, name: capability.name, byteSize: capability.byteSize, expiresAt: capability.expiresAt };
+  }
+
+  /**
+   * Gives a fresh capability to each id that `resolve` or expiry retired, when its file is
+   * still the one that was selected. An old id is never put back: the composer swaps it for
+   * the new one. A failure for one id never stops the others.
+   */
+  async function reissue(input: { windowId: number; projectId: string; capabilityIds: string[] }): Promise<ExecutionSourceReissueResult> {
+    if (input.capabilityIds.length > limits.maxFiles) throw new ExecutionSourceError('TOO_MANY_SOURCES', `Use at most ${limits.maxFiles} execution sources`);
+    pruneCapabilities();
+    trimRetired();
+    const result: ExecutionSourceReissueResult = { renewed: [], dropped: [] };
+    const findLive = (path: string) => [...capabilities.values()].find((capability) =>
+      !capability.used && capability.windowId === input.windowId && capability.projectId === input.projectId && capability.path === path);
+    for (const previousId of new Set(input.capabilityIds)) {
+      const live = capabilities.get(previousId);
+      if (live && !live.used && live.windowId === input.windowId && live.projectId === input.projectId) {
+        result.renewed.push({ previousId, source: viewOf(live), changed: false });
+        continue;
+      }
+      const record = retired.get(previousId);
+      if (!record || record.windowId !== input.windowId || record.projectId !== input.projectId) {
+        result.dropped.push({ previousId, reason: 'unknown' });
+        continue;
+      }
+      const drop = (reason: ExecutionSourceDropReason) => { result.dropped.push({ previousId, name: record.name, reason }); };
+      try {
+        let real: string;
+        try { real = await realpath(record.path); } catch { drop('moved'); continue; }
+        // record.path is the realpath `issue` proved inside the root, so equality keeps it inside.
+        if (real !== record.path) { drop('moved'); continue; }
+        const existing = findLive(record.path);
+        if (existing) {
+          existing.representations = [...new Set([...existing.representations, ...record.representations])];
+          retired.delete(previousId);
+          result.renewed.push({ previousId, source: viewOf(existing), changed: existing.digest !== record.digest });
+          continue;
+        }
+        if (capabilities.size >= limits.maxOutstandingCapabilities) { drop('unreadable'); continue; }
+        const { bytes } = await statAndRead(record.path, { policy: record.policy });
+        const raced = findLive(record.path);
+        if (raced) {
+          retired.delete(previousId);
+          result.renewed.push({ previousId, source: viewOf(raced), changed: raced.digest !== record.digest });
+          continue;
+        }
+        if (capabilities.size >= limits.maxOutstandingCapabilities) { drop('unreadable'); continue; }
+        const issuedAt = now();
+        const capability: Capability = {
+          id: id(), windowId: input.windowId, projectId: input.projectId, path: record.path, exactPath: record.exactPath,
+          representations: [...record.representations], name: record.name, byteSize: bytes.byteLength, digest: digest(bytes),
+          issuedAt, expiresAt: issuedAt + ttlMs, used: false, policy: record.policy
+        };
+        capabilities.set(capability.id, capability);
+        retired.delete(previousId);
+        result.renewed.push({ previousId, source: viewOf(capability), changed: capability.digest !== record.digest });
+      } catch (error) {
+        const code = error instanceof ExecutionSourceError ? error.code : undefined;
+        drop(code === 'NOT_REGULAR_FILE' ? 'moved' : code === 'SOURCE_TOO_LARGE' ? 'too-large' : 'unreadable');
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Forget the retired records of ids a successful launch consumed, so a replayed id cannot
+   * be exchanged for a fresh capability.
+   */
+  function discardRetired(input: { windowId: number; projectId: string; capabilityIds: string[] }): void {
+    for (const capabilityId of input.capabilityIds) {
+      const record = retired.get(capabilityId);
+      if (record && record.windowId === input.windowId && record.projectId === input.projectId) retired.delete(capabilityId);
     }
   }
 
@@ -487,6 +619,7 @@ export function createExecutionSourceRegistry(options: RegistryOptions) {
     } finally {
       for (const capability of selected) {
         capabilities.delete(capability.id);
+        retire(capability);
         consumedCapabilities.add(capability.id);
       }
       while (consumedCapabilities.size > limits.maxOutstandingCapabilities) consumedCapabilities.delete(consumedCapabilities.values().next().value!);
@@ -601,5 +734,5 @@ export function createExecutionSourceRegistry(options: RegistryOptions) {
     await rm(join(target, '..'), { recursive: true, force: true });
   }
 
-  return { issue, resolve, list, read, pruneSnapshots, removeSnapshot };
+  return { issue, reissue, discardRetired, resolve, list, read, pruneSnapshots, removeSnapshot };
 }
