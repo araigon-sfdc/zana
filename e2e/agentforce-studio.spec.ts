@@ -1292,7 +1292,9 @@ test('Salesforce readiness: local authoring without CLI, project org selection a
   await workbench.getByRole('tab', { name: 'Overview' }).click();
   await expect(workbench).toContainText('Project target');
   writeFileSync(statePath, 'expired');
-  // A real project-scoped refresh, without editing shared settings.
+  // The roster is cached until sign-in or Refresh, so drop it, then do a real
+  // project-scoped refresh without editing shared settings.
+  await page.evaluate(id => window.cc.pluginApps.callRpc('salesforce', 'orgs', { refresh: true, projectId: id }), projectId);
   await page.evaluate(id => window.dispatchEvent(new CustomEvent('sf:context-changed', { detail: { projectId: id } })), projectId);
   await expect(workbench.getByRole('heading', { name: 'Reconnect your org' })).toBeVisible();
   await page.setViewportSize({ width: 760, height: 900 });
