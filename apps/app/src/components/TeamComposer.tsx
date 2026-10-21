@@ -30,6 +30,7 @@ import {
   composerDropProjectRoot,
   stageRemoteComposerAttachments
 } from './legacy-agent-home.js';
+import { platformShortcut } from '../lib/platformShortcut.js';
 
 /** A source chip. A file outside the project (proposed from HOME or the clone root) shows its path. */
 type ComposerSource = ExecutionSourceCapabilityView & { path?: string; outsideProject?: boolean };
@@ -91,7 +92,7 @@ export function TeamComposer({
   const selectedTeam = teams.find((team) => team.id === teamId);
 
   const field = useComposerPromptField({
-    placeholder: 'Describe the GOAL for the squad to reach (⌘↵ to launch). Attach or drop supporting files.',
+    placeholder: platformShortcut('Describe the GOAL for the squad to reach (⌘↵ to launch). Attach or drop supporting files.'),
     testId: 'team-command-input',
     ariaLabel: 'Goal for the squad',
     projectId,
