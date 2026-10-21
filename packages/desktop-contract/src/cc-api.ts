@@ -2,6 +2,7 @@ import type { ThreadHistoryQuery, ThreadHistoryPage, ConversationTranscript } fr
 import type { DesktopBrowserApi } from './browser.js';
 import type { SquadLaunchPrefill, SquadProposalErrorCode } from '@zana-ai/zcc-domain/squad-proposal';
 import type { MarketplaceCatalogRow } from '@zana-ai/zcc-domain';
+import type { CloseFollowupFailure } from '@zana-ai/zcc-domain/product';
 import type { OwnNotificationLevel, ThreadNotificationState } from '@zana-ai/zcc-domain';
 import type {
   ProviderCliInstallActionKind,
@@ -771,7 +772,13 @@ export interface CcApi {
       cancel(threadId: string, interactionId: string): Promise<PendingInteraction>;
     };
     archive(threadId: string): Promise<{ ok: boolean }>;
-    closeFollowup(threadId: string): Promise<{ ok: boolean; summarized: number; followedUp: number }>;
+    closeFollowup(threadId: string): Promise<{
+      ok: boolean;
+      summarized: number;
+      followedUp: number;
+      /** Why a step produced nothing; absent from older main. */
+      failures?: CloseFollowupFailure[];
+    }>;
     fork(threadId: string, options?: { sourceSeqEnd?: number }): Promise<Result<{
       id: string;
       projectId: string;
@@ -1075,7 +1082,12 @@ export interface CcApi {
     closeFollowup(
       projectId: string,
       sessionIds: string[]
-    ): Promise<{ summarized: number; followedUp: number }>;
+    ): Promise<{
+      summarized: number;
+      followedUp: number;
+      /** Why a step produced nothing; absent from older main. */
+      failures?: CloseFollowupFailure[];
+    }>;
   };
   config: {
     get(): Promise<AppConfig>;
