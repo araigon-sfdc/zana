@@ -321,6 +321,16 @@ Only an explicit "run it now with X", "start X immediately" or "skip the Inbox"
 makes the agent start the Squad straight away with `execution.start`, as the run's
 owner. Either way the agent says in one line which path it took.
 
+An owner that starts the run with `notify: true` (the bundled skills do) gets the
+same `[Squad report]` when its run finishes or needs a human answer, so it doesn't
+have to poll; the reports follow it to a fresh session that takes the run over
+with `execution.resume_binding` (Recover orchestrator relaunches the run's coordinator
+and leaves the reports with the owner's session). It may answer
+such a question itself with `execution.respond` when what you told it decides it;
+otherwise it asks you, and the question is in your Inbox too. An owner gets no
+"Squad completed" Inbox entry: the run is on its board, and if the owner's session is gone when the run ends, the report is dropped with no Inbox fallback. Without `notify: true`,
+`execution.start` behaves as before.
+
 Rules: the Squad always runs in the proposing session's Project. Its files can be
 in that Project, your home folder (for example a doc vault or `~/.zcc/library`) or
 the clone root. A file outside the Project shows its full path, marked "outside the

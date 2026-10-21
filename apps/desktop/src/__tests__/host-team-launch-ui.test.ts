@@ -314,7 +314,9 @@ describe('startTeamJobFromUi proposed launches', () => {
       const executionId = (result as { value: { executionId: string } }).value.executionId;
       expect(start.mock.calls[0]).toHaveLength(4);
       expect(start.mock.calls[0]![3]).toEqual({
-        proposal: { id: 'prop-ok', proposerKind: 'thread', proposerId: 'thread-1', proposerTitle: 'Design chat' }
+        proposal: { id: 'prop-ok', proposerKind: 'thread', proposerId: 'thread-1', proposerTitle: 'Design chat' },
+        // The run reports back to the conversation that proposed it.
+        reportTo: { kind: 'thread', id: 'thread-1', title: 'Design chat', role: 'proposer' }
       });
       expect(markLaunched).toHaveBeenCalledWith('prop-ok', executionId);
       expect(await squadProposalStore.get('prop-ok')).toMatchObject({ state: 'launched', executionId });

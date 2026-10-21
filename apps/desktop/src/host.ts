@@ -6032,8 +6032,10 @@ const squadPlanCheckService = createSquadProposalService({
 
 export const squadProposalNotifier = createSquadProposalNotifier({
   getRecord: (executionId) => executionStore.get(executionId),
-  markReported: (executionId, attempt) => executionStore.markProposalReported(executionId, attempt),
-  listUnreported: () => executionStore.listUnreportedProposalExecutions(),
+  markReported: (executionId, attempt) => executionStore.markReported(executionId, attempt),
+  listUnreported: () => executionStore.listUnreportedExecutions(),
+  markBlockerReported: (executionId, blockerId) => executionStore.markBlockerReported(executionId, blockerId),
+  listUnreportedBlockers: () => executionStore.listUnreportedBlockers(),
   reply: (sessionId, text) => ptys.reply(sessionId, text),
   ptyLive: (id) => { const session = ptys.getSession(id); return !!session && session.status !== 'exited'; },
   ptyState: (id) => agentStatus.get(id),
@@ -6448,8 +6450,15 @@ export async function startTeamJobFromUi(
       goal: originalGoal, title: originalJobTitle, summary: originalSummary, sourceBundle, goalSourceDescriptors: redactedGoalSources
     });
     if (!built.ok) return built.response;
+    // A proposed run reports back to the conversation that proposed it.
     const result = proposal
-      ? await squadExecutionService.start('interactive:local', projectId, built.request, { proposal })
+      ? await squadExecutionService.start('interactive:local', projectId, built.request, {
+        proposal,
+        reportTo: {
+          kind: proposal.proposerKind, id: proposal.proposerId, role: 'proposer',
+          ...(proposal.proposerTitle ? { title: proposal.proposerTitle } : {})
+        }
+      })
       : await squadExecutionService.start('interactive:local', projectId, built.request);
     if (!result.ok && sourceBundle) await executionSources.removeSnapshot(sourceBundle.contentRef);
     if (!result.ok) {

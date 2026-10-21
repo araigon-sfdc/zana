@@ -74,7 +74,7 @@ launch and the user presses Launch, so nothing starts without that click.
 | User says (examples) | Path | Tools |
 |---|---|---|
 | "build it with X", "prepare a launch for X", "propose X for this plan", "set up X to build this" | Review first | `squad_plan_check` → `list_teams` → `squad_propose`; tell the user to open the "Squad launch ready" Inbox card |
-| "run this with X now", "start X on this now", "launch X immediately, no review", "skip the Inbox and run it with X" | Start now | `execution.start` (you own the run; monitor with `execution.snapshot`) |
+| "run this with X now", "start X on this now", "launch X immediately, no review", "skip the Inbox and run it with X" | Start now | `execution.start` (you own the run; a `[Squad report]` tells you when it ends or needs an answer) |
 | Anything else, or unclear | Review first | Same as row 1 |
 
 Start now only when the user's message explicitly asks to start immediately. Do not
@@ -110,8 +110,10 @@ On the review-first path, never use `execution.start`, `launch_team` or
 path is `execution.start`, as the `zcc-inbox` skill describes, and only when the
 user asked for it. Members of a running Squad cannot propose.
 
-When a `[Squad report]` message arrives, summarise it for the user. Do not act
-on the Squad: you cannot answer its questions, stop it or steer it.
+When a `[Squad report]` about a Squad you proposed arrives, summarise it for the
+user. Do not act on that Squad: you cannot answer its questions, stop it or steer
+it. A Squad you started yourself (start now) is yours to answer, as `zcc-inbox`
+describes.
 
 ---
 

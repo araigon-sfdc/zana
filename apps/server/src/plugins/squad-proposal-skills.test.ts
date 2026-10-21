@@ -59,6 +59,15 @@ describe('squad proposal skills', () => {
       }
     });
 
+    it('teaches the owner of a started run to wait for reports, not poll, and how to answer', () => {
+      expect(inbox).toContain('After Start you will receive a\n   `[Squad report]` when the run finishes or needs a human answer. Don\'t poll in\n   a loop');
+      expect(inbox).toContain('`execution.respond { executionId, expectedStateVersion, blockerId, message }`');
+      expect(inbox).toContain('Add `notify: true` so the run\n   reports back to you.');
+      expect(inbox).toContain('| Answer a question it reported | `mcp__zcc-inbox__execution.respond` | `zcc_execution_respond` |');
+      expect(inbox).not.toContain('advance `after` to the newest event cursor');
+      expect(brainstorm).toContain('A Squad you started yourself (start now) is yours to answer');
+    });
+
     it('scopes the execution.start ban to the review-first path', () => {
       expect(inbox).toContain('then call `squad_propose`; do not call `execution.start`.');
       expect(inbox).toContain('by their exact paths (do not copy them)');
