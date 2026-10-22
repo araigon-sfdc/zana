@@ -9578,6 +9578,7 @@ async function bootstrapNormal() {
           search: (query) => runtimeSupervisor!.searchPlugins(query),
           outdated: () => runtimeSupervisor!.outdatedPlugins(),
           update: (id) => runtimeSupervisor!.updatePlugin(id),
+          updateAll: () => runtimeSupervisor!.updateAllPlugins(),
           listMarketplaces: () => runtimeSupervisor!.listMarketplaces(),
           addMarketplace: (url) => runtimeSupervisor!.addMarketplace(url),
           refreshMarketplace: (url) => runtimeSupervisor!.refreshMarketplace(url),

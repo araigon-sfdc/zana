@@ -1033,6 +1033,7 @@ const api: CcApi = {
     setSettings: (pluginId, values) => ipcRenderer.invoke(IPC.pluginApps.setSettings, pluginId, values),
     checkUpdates: () => ipcRenderer.invoke(IPC.pluginApps.checkUpdates),
     applyUpdate: (id) => ipcRenderer.invoke(IPC.pluginApps.applyUpdate, id),
+    applyAllUpdates: () => ipcRenderer.invoke(IPC.pluginApps.applyAllUpdates),
     remove: (id) => ipcRenderer.invoke(IPC.pluginApps.remove, id),
     reload: (id) => ipcRenderer.invoke(IPC.pluginApps.reload, id),
     onChanged: (cb) => {

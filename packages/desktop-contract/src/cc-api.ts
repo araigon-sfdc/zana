@@ -1665,6 +1665,7 @@ export interface CcApi {
       marketplace: string;
     }>>;
     applyUpdate(id: string): Promise<Result<true>>;
+    applyAllUpdates(): Promise<Result<import('@zana-ai/zcc-domain/product').PluginUpdateAllResult>>;
     remove(id: string): Promise<Result<true>>;
     reload(id: string): Promise<Result<true>>;
   };
