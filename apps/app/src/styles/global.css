@@ -2296,6 +2296,12 @@ body.resizing-col {
   user-select: none;
 }
 
+/* Embedded frames (plugin editors, previews) would swallow the drag's mouse events. */
+body.resizing-col iframe,
+body.resizing-col webview {
+  pointer-events: none !important;
+}
+
 .list-header {
   padding: 12px 14px;
   display: flex;

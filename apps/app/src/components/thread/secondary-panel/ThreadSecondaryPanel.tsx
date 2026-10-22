@@ -86,8 +86,9 @@ export function ThreadSecondaryPanel({
       onResize,
       (name) => document.body.classList.add(name),
       (name) => document.body.classList.remove(name),
-      (type, fn) => window.addEventListener(type, fn),
-      (type, fn) => window.removeEventListener(type, fn)
+      // `blur` hands its listener a FocusEvent, which the drag ignores.
+      (type, fn) => window.addEventListener(type, fn as unknown as EventListener),
+      (type, fn) => window.removeEventListener(type, fn as unknown as EventListener)
     );
   };
 

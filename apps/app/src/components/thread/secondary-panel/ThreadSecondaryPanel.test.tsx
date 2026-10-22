@@ -59,11 +59,18 @@ describe('ThreadSecondaryPanel chrome', () => {
     vi.spyOn(view.container, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 1000, 600));
     fireEvent.mouseDown(view.getByRole('separator', { name: 'Resize right panel' }));
     expect(document.body.classList.contains('resizing-col')).toBe(true);
-    fireEvent.mouseMove(window, { clientX: 600 });
+    fireEvent.mouseMove(window, { clientX: 600, buttons: 1 });
     expect(handlers.onResize).toHaveBeenCalledWith(400, 1000);
     fireEvent.mouseUp(window);
     expect(document.body.classList.contains('resizing-col')).toBe(false);
-    fireEvent.mouseMove(window, { clientX: 500 });
+    fireEvent.mouseMove(window, { clientX: 500, buttons: 1 });
+    expect(handlers.onResize).toHaveBeenCalledOnce();
+
+    // Released over an embedded frame: the next buttonless move ends the drag.
+    fireEvent.mouseDown(view.getByRole('separator', { name: 'Resize right panel' }));
+    fireEvent.mouseMove(window, { clientX: 500, buttons: 0 });
+    expect(document.body.classList.contains('resizing-col')).toBe(false);
+    fireEvent.mouseMove(window, { clientX: 450, buttons: 1 });
     expect(handlers.onResize).toHaveBeenCalledOnce();
   });
 
