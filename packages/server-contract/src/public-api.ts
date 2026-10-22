@@ -146,6 +146,7 @@ import type {
   ResolveThreadMentionsResponse,
   RespondPluginInteractionRequest,
   SendMessageRequest,
+  MoveThreadRequest,
   SetQueuedMessageGroupBoundaryRequest,
   SendQueuedMessageRequest,
   SendQueuedMessageResponse,
@@ -302,6 +303,7 @@ import {
   resolveThreadMentionsRequestSchema,
   respondPluginInteractionRequestSchema,
   sendMessageRequestSchema,
+  moveThreadRequestSchema,
   editMessageRequestSchema,
   setQueuedMessageGroupBoundaryRequestSchema,
   sendQueuedMessageRequestSchema,
@@ -1013,6 +1015,12 @@ export const publicApiRoutes = {
       request: jsonRequest<PathId, UpdateThreadRequest>(
         updateThreadRequestSchema,
       ),
+      response: jsonResponse<ThreadResponse>(),
+    }),
+    move: defineRoute({
+      path: "/threads/:id/move",
+      method: "post",
+      request: jsonRequest<PathId, MoveThreadRequest>(moveThreadRequestSchema),
       response: jsonResponse<ThreadResponse>(),
     }),
     pluginMetadata: {
