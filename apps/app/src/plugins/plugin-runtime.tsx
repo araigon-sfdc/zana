@@ -7,6 +7,7 @@ import type {
   PluginSettingsState,
   ThreadChatProps,
   ZccContext,
+  ZccDeepLinks,
   ZccNavigate,
   ZccWindowTitle
 } from '@zana-ai/zcc-plugin-sdk/app';
@@ -38,6 +39,7 @@ import { requestPluginPanelAgent } from './plugin-panel-agent.js';
 import { requestPluginPanelTool, usePluginPagePanel, usePluginPagePanelOpen } from './plugin-page-panel.js';
 import { resolveThreadPanelOwnerId, useThreadPanelOwnerId } from './thread-panel-owner.js';
 import { subscribeProductEvent } from '../lib/product-ws.js';
+import { deepLinksFor } from './plugin-deep-links.js';
 
 const ThreadDetailLazy = lazy(async () => {
   const mod = await import('../views/threads/ThreadDetailView.js');
@@ -235,6 +237,11 @@ function useZccNavigateImpl(): ZccNavigate {
   }, [navigate, panelOwnerId, pluginId, route.sessionId, route.threadId, sidePanel]);
 }
 
+function useZccDeepLinksImpl(): ZccDeepLinks {
+  const { pluginId } = usePluginRuntimeContext();
+  return useMemo(() => deepLinksFor(pluginId), [pluginId]);
+}
+
 const composerFallback: PluginComposerApi = {
   scope: { kind: 'new-thread', projectId: null },
   text: '',
@@ -298,6 +305,7 @@ export function installPluginRuntime(): void {
     useSettings: useSettingsImpl,
     useZccContext: useZccContextImpl,
     useZccNavigate: useZccNavigateImpl,
+    useZccDeepLinks: useZccDeepLinksImpl,
     useWindowTitle: useWindowTitleImpl,
     useComposer: () => {
       const { pluginId } = usePluginRuntimeContext();

@@ -5474,6 +5474,8 @@ export interface PluginAppEntry {
   appUrl: string | null;
   /** Compatible remote release from the last persisted source check, when any. */
   availableVersion?: string;
+  /** Plugin declares `zcc.peers: true` (it links to other installs). */
+  peers?: boolean;
   updateCheck?: PluginUpdateStatus;
   updatePolicy?: PluginUpdatePolicy;
   projectTab?: {

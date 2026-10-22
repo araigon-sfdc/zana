@@ -23,6 +23,7 @@ import { MachinesTab } from '@/views/settings/MachinesSettingsView';
 import { ConnectivityTab } from '@/views/settings/ConnectivityView';
 import { PhoneTab } from '@/views/settings/PhoneSettingsView';
 import { RemoteAccessView } from '@/views/settings/RemoteAccessView';
+import { PeersSettingsView } from '@/views/settings/PeersSettingsView';
 import { InboxSettingsTab } from '@/views/settings/InboxSettingsView';
 import { KeyboardSettingsSection } from '@/views/settings/KeyboardSettingsSection';
 import { ComposerSettingsView } from '@/views/settings/ComposerSettingsView';
@@ -319,6 +320,8 @@ export function SettingsView() {
           />
         ) : tab === 'remote-access' ? (
           <RemoteAccessView config={config} onConfigDraft={setConfig} />
+        ) : tab === 'peers' ? (
+          <PeersSettingsView />
         ) : tab === 'phone' ? (
           <PhoneTab />
         ) : tab === 'inbox' ? (

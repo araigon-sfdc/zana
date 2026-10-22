@@ -14,11 +14,26 @@ import type {
   DesignDocRevision,
   DesignDocSummary,
   DocStatus,
+  PeerConflictPage, PeerConflictReview, PeerConflictFile, PeerResolutionChoice,
   TextEdit
 } from '../shared/contract.js';
 import type { PageFile } from '../shared/frame-protocol.js';
 import type { PublishFolder } from '../shared/publish.js';
 import type { PageRenderReport, RenderedPage, SiteFile } from '../shared/page.js';
+import type { GroupStatus, RepairResult } from '../shared/peer-group.js';
+
+/** One computer connected to this one (owned by core), with this plugin's use of it and its sync state. */
+export interface ConnectionView {
+  computerId: string;
+  hostname: string;
+  state: 'connected' | 'reconnecting' | 'disconnected';
+  usedByThisPlugin: boolean;
+  use: 'pending' | 'approved' | 'denied' | null;
+  syncing: boolean;
+  retiring: boolean;
+  /** Sync setup work with this computer is running right now. */
+  settingUp?: boolean;
+}
 
 export interface TemplateInfo {
   id: string;
@@ -30,6 +45,13 @@ export interface TemplateInfo {
 export interface ProjectInfo {
   id: string;
   name: string;
+  /** The built-in Default Project, where agents for project-less docs run. */
+  quickAgent?: boolean;
+}
+
+/** The project an agent for a project-less doc runs in: the Default Project, else the first one. */
+export function defaultAgentProject(projects: readonly ProjectInfo[]): string | undefined {
+  return (projects.find((project) => project.quickAgent) ?? projects[0])?.id;
 }
 
 export interface WriteResult extends DesignDocFileMeta {
@@ -54,6 +76,7 @@ export interface CreateArgs {
 }
 
 export interface UpdateArgs {
+  expectedHead?: string | null;
   title?: string;
   summary?: string;
   status?: DocStatus;
@@ -67,6 +90,28 @@ export interface UpdateArgs {
 export interface DesignDocsApi {
   templates(): Promise<TemplateInfo[]>;
   projects(): Promise<ProjectInfo[]>;
+  peerStatus(): Promise<PeerStatus>;
+  groupStatus(): Promise<GroupStatus>;
+  enablePeer(peerId: string): Promise<GroupStatus>;
+  retryIntroductions(): Promise<GroupStatus>;
+  /** Computers connected to this one (core owns the link). `[]` on a host without core connections. */
+  connections(): Promise<ConnectionView[]>;
+  /** Ask the owner to let this plugin use a connection; `pending` until both owners decided. Core error codes pass through. */
+  useConnection(computerId: string): Promise<{ status: 'pending' | 'approved' | 'denied' }>;
+  /** Leave the sync group with that computer, then stop using the connection. The connection itself stays. */
+  stopUsingConnection(computerId: string): Promise<GroupStatus>;
+  /** Re-try sync setup for one linked computer; re-links only that connection if needed. */
+  repairPeer(peerId: string): Promise<RepairResult>;
+  /** Discard this computer's stuck sync work for one linked computer; documents and history are kept. */
+  resetPeerSync(peerId: string): Promise<{ discarded: number; status: GroupStatus }>;
+  /** Only whether a connected peer's database differs; never names or counts. */
+  peersOutOfSync(): Promise<{ outOfSync: boolean }>;
+  removePeer(replicaId: string): Promise<GroupStatus>;
+  syncNow(): Promise<{ attempted: number; synced: number; blocked: number }>;
+  peerConflicts(doc: string, cursor?: string): Promise<PeerConflictPage>;
+  peerConflictReview(doc: string, remoteHead: string): Promise<PeerConflictReview>;
+  peerConflictFile(doc: string, remoteHead: string, path: string): Promise<PeerConflictFile>;
+  resolvePeerConflict(doc: string, args: { expectedHead: string; remoteHead: string; choice: PeerResolutionChoice }): Promise<{ head: string }>;
   list(args?: ListArgs): Promise<DesignDocSummary[]>;
   get(doc: string): Promise<DesignDocDetail>;
   create(args: CreateArgs): Promise<DesignDocDetail>;
@@ -83,14 +128,14 @@ export interface DesignDocsApi {
   /** The doc as a static site: its files, the kit its pages load, and `.nojekyll`. */
   siteFiles(doc: string): Promise<{ slug: string; files: SiteFile[] }>;
   reportRender(doc: string, report: PageRenderReport): Promise<void>;
-  writeFile(doc: string, args: { path: string; content: string; encoding?: 'base64'; baseRevision?: number; note?: string }): Promise<WriteResult>;
-  editFile(doc: string, args: { path: string; edits: TextEdit[]; baseRevision?: number }): Promise<WriteResult>;
-  deleteFile(doc: string, path: string): Promise<void>;
-  renameFile(doc: string, from: string, to: string): Promise<WriteResult>;
+  writeFile(doc: string, args: { path: string; content: string; encoding?: 'base64'; baseRevision?: number; baseFileId?: string | null; note?: string }): Promise<WriteResult>;
+  editFile(doc: string, args: { path: string; edits: TextEdit[]; baseRevision?: number; baseFileId?: string | null }): Promise<WriteResult>;
+  deleteFile(doc: string, path: string, baseRevision?: number, baseFileId?: string | null): Promise<void>;
+  renameFile(doc: string, from: string, to: string, baseRevision?: number, baseFileId?: string | null): Promise<WriteResult>;
   history(doc: string, args?: { path?: string; limit?: number }): Promise<DesignDocRevision[]>;
   revision(doc: string, id: number): Promise<RevisionContent>;
   /** `baseRevision` is the file's current revision as shown, 0 when it is gone. */
-  restore(doc: string, id: number, baseRevision?: number): Promise<WriteResult>;
+  restore(doc: string, id: number, baseRevision?: number, baseFileId?: string | null): Promise<WriteResult>;
   addComment(doc: string, args: { body: string; path?: string; quote?: string }): Promise<DesignDocComment>;
   replyToComment(doc: string, id: string, body: string): Promise<DesignDocComment>;
   setCommentStatus(doc: string, id: string, status: CommentStatus): Promise<DesignDocComment>;
@@ -99,6 +144,15 @@ export interface DesignDocsApi {
   askAgent(doc: string, args: { action?: string; prompt?: string; path?: string | null; projectId?: string }): Promise<{ threadId: string; projectId: string }>;
   /** Start an agent thread that exports the doc as a site and pushes it to GitHub Pages. */
   publish(doc: string, args: { repo?: string; branch: string; folder: PublishFolder; projectId?: string }): Promise<{ threadId: string; projectId: string }>;
+}
+
+export interface PeerStatus {
+  configured: boolean;
+  repoId?: string;
+  replicaId?: string;
+  groupId?: string;
+  rosterEpoch?: number;
+  members: Array<{ replicaId: string; machineId: string; joinedAt: number; sponsorReplicaId: string | null; /** This computer, or a member with a live link; absent on older servers. */ connected?: boolean }>;
 }
 
 type Call = (method: string, args?: unknown) => Promise<unknown>;
@@ -116,6 +170,22 @@ export function createApi(call: Call): DesignDocsApi {
   return {
     templates: () => typed('templates'),
     projects: () => typed('projects'),
+    peerStatus: () => typed('peerStatus'),
+    groupStatus: () => typed('groupStatus'),
+    enablePeer: (peerId) => typed('enablePeer', { peerId }),
+    retryIntroductions: () => typed('retryIntroductions'),
+    connections: () => typed('connections'),
+    useConnection: (computerId) => typed('useConnection', { computerId }),
+    stopUsingConnection: (computerId) => typed('stopUsingConnection', { computerId }),
+    repairPeer: (peerId) => typed('repairPeer', { peerId }),
+    resetPeerSync: (peerId) => typed('resetPeerSync', { peerId }),
+    peersOutOfSync: () => typed('peersOutOfSync'),
+    removePeer: (replicaId) => typed('removePeer', { replicaId }),
+    syncNow: () => typed('syncNow'),
+    peerConflicts: (doc, cursor) => typed('peerConflicts', { doc, cursor }),
+    peerConflictReview: (doc, remoteHead) => typed('peerConflictReview', { doc, remoteHead }),
+    peerConflictFile: (doc, remoteHead, path) => typed('peerConflictFile', { doc, remoteHead, path }),
+    resolvePeerConflict: (doc, args) => typed('resolvePeerConflict', { doc, ...args }),
     list: (args = {}) => typed('list', args),
     get: (doc) => typed('get', { doc }),
     create: (args) => typed('create', args),
@@ -130,11 +200,11 @@ export function createApi(call: Call): DesignDocsApi {
     reportRender: (doc, report) => done(typed('reportRender', { doc, ...report })),
     writeFile: (doc, args) => typed('writeFile', { doc, ...args }),
     editFile: (doc, args) => typed('editFile', { doc, ...args }),
-    deleteFile: (doc, path) => done(typed('deleteFile', { doc, path })),
-    renameFile: (doc, from, to) => typed('renameFile', { doc, from, to }),
+    deleteFile: (doc, path, baseRevision, baseFileId) => done(typed('deleteFile', { doc, path, baseRevision, baseFileId })),
+    renameFile: (doc, from, to, baseRevision, baseFileId) => typed('renameFile', { doc, from, to, baseRevision, baseFileId }),
     history: (doc, args = {}) => typed('history', { doc, ...args }),
     revision: (doc, id) => typed('revision', { doc, id }),
-    restore: (doc, id, baseRevision) => typed('restore', { doc, id, baseRevision }),
+    restore: (doc, id, baseRevision, baseFileId) => typed('restore', { doc, id, baseRevision, baseFileId }),
     addComment: (doc, args) => typed('addComment', { doc, ...args }),
     replyToComment: (doc, id, body) => typed('replyToComment', { doc, id, body }),
     setCommentStatus: (doc, id, status) => typed('setCommentStatus', { doc, id, status }),

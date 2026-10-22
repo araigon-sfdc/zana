@@ -10,6 +10,9 @@ import type {
   PluginSettingsState,
   ThreadChatProps,
   ZccContext,
+  ZccDeepLinkOpenResult,
+  ZccDeepLinkRejectReason,
+  ZccDeepLinks,
   ZccNavigate,
   ZccWindowTitle
 } from './app-contract.js';
@@ -105,6 +108,9 @@ export type {
   ThreadChatMessageReference,
   ThreadChatProps,
   ZccContext,
+  ZccDeepLinkOpenResult,
+  ZccDeepLinkRejectReason,
+  ZccDeepLinks,
   ZccNavigate,
   ZccSurface,
   ZccWindowTitle,
@@ -222,6 +228,21 @@ export function useZccContext(): ZccContext {
 
 export function useZccNavigate(): ZccNavigate {
   return pluginRuntime().useZccNavigate?.() ?? missing('useZccNavigate');
+}
+
+const unavailableDeepLinks: ZccDeepLinks = {
+  base: () => null,
+  on: () => () => undefined,
+  open: async () => ({ ok: false, reason: 'unavailable' })
+};
+
+/**
+ * Deep links for this plugin: `base()`, `on(route, handler)` and `open(rawLink)`.
+ * On hosts without deep links `base()` is null, `on` never fires and `open`
+ * resolves `unavailable`, so callers can use it unconditionally.
+ */
+export function useZccDeepLinks(): ZccDeepLinks {
+  return pluginRuntime().useZccDeepLinks?.() ?? unavailableDeepLinks;
 }
 
 /**
