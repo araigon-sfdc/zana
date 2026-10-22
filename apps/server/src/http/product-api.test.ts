@@ -1085,6 +1085,12 @@ describe('product HTTP', () => {
     const outlineResponse = await fetch(`${server.url}api/v1/threads/${thread.id}/conversation-outline`);
     expect(outlineResponse.status).toBe(200);
     await expect(outlineResponse.json()).resolves.toMatchObject({ items: [], maxSeq: 0 });
+    const searchResponse = await fetch(`${server.url}api/v1/threads/${thread.id}/conversation-outline?q=${encodeURIComponent('needle')}`);
+    expect(searchResponse.status).toBe(200);
+    await expect(searchResponse.json()).resolves.toEqual({ items: [], maxSeq: 0, matches: [] });
+    const longSearch = await fetch(`${server.url}api/v1/threads/${thread.id}/conversation-outline?q=${'x'.repeat(1001)}`);
+    expect(longSearch.status).toBe(400);
+    await expect(longSearch.json()).resolves.toEqual({ error: 'invalid-input', message: 'q must be at most 1000 characters' });
     expect(timeline).toMatchObject({
       activeThinking: null,
       pendingTodos: null,
