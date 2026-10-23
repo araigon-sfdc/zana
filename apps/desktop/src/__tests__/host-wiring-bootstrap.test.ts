@@ -763,6 +763,87 @@ describe('host bootstrap wiring', () => {
     await hook(project.id, 'ov', JSON.stringify({ tool_name: 'Bash', tool_input: 'string-input' }));
   });
 
+  it('turns a StopFailure notify body into an API-error stop and cancels on new turns', async () => {
+    const hook = h.mcpDeps.onNotifyHook;
+    const stop = JSON.stringify({ hook_event_name: 'StopFailure', error: 'unknown', error_details: 'Provider anthropic not found' });
+    h.ptys.sessions.set('af1', sessionFixture({ id: 'af1', projectId: project.id, profile: 'claude' }));
+    h.ptys.sessions.set('af-exited', sessionFixture({ id: 'af-exited', projectId: project.id, profile: 'claude', status: 'exited' }));
+    const onStop = vi.spyOn(ctx().apiErrorResume, 'onApiErrorStop').mockResolvedValue(undefined);
+    const cancel = vi.spyOn(ctx().apiErrorResume, 'cancel');
+    const turnFinished = vi.spyOn(ctx().agentStatus, 'turnFinished');
+    const clearTools = vi.spyOn(ctx().agentStatus, 'clearToolsInFlight');
+    const schedulerDone = vi.spyOn(ctx().scheduler, 'onAgentFinished');
+    const goalsDone = vi.spyOn(ctx().goals, 'onAgentFinished');
+    try {
+      hook(project.id, 'af1', 'unblocked', stop);
+      expect(onStop).toHaveBeenCalledTimes(1);
+      expect(onStop).toHaveBeenCalledWith('af1', expect.objectContaining({ text: expect.stringContaining('Provider anthropic') }));
+      expect(turnFinished).toHaveBeenCalledWith('af1');
+      expect(clearTools).toHaveBeenCalledWith('af1');
+      // An errored turn is not a finished run: the scheduler and goals stay out of it.
+      expect(schedulerDone).not.toHaveBeenCalled();
+      expect(goalsDone).not.toHaveBeenCalled();
+      expect(cancel).not.toHaveBeenCalled();
+      hook('other-project', 'af1', 'unblocked', stop);
+      hook(project.id, 'af-exited', 'unblocked', stop);
+      // A body that isn't a StopFailure maps to no interaction event: nothing happens.
+      hook(project.id, 'af1', 'unblocked', JSON.stringify({ hook_event_name: 'Stop' }));
+      expect(onStop).toHaveBeenCalledTimes(1);
+      // Blocked on a person is not a new turn, so a pending resume stays armed.
+      hook(project.id, 'af1', 'blocked');
+      expect(cancel).not.toHaveBeenCalled();
+      // A new turn (no body) cancels a pending resume; so does a lifecycle Stop.
+      hook(project.id, 'af1', 'unblocked');
+      expect(cancel).toHaveBeenCalledTimes(1);
+      expect(cancel).toHaveBeenLastCalledWith('af1');
+      h.mcpDeps.onStopHook(project.id, 'af1');
+      expect(cancel).toHaveBeenCalledTimes(2);
+      expect(cancel).toHaveBeenLastCalledWith('af1');
+      await settle();
+    } finally {
+      for (const spy of [onStop, cancel, turnFinished, clearTools, schedulerDone, goalsDone]) spy.mockRestore();
+    }
+  });
+
+  it('forgets resume state on pty exit and exposes the service to IPC', async () => {
+    const forget = vi.spyOn(ctx().apiErrorResume, 'forget');
+    try {
+      h.ptys.sessions.set('af2', sessionFixture({ id: 'af2' }));
+      h.ptys.emit('exit', 'af2', 0);
+      await settle();
+      expect(forget).toHaveBeenCalledWith('af2');
+    } finally {
+      forget.mockRestore();
+    }
+    expect(ctx().apiErrorResume.check).toBeTypeOf('function');
+    expect(await ctx().apiErrorResume.check('nothing', [])).toEqual({ ruleId: null, skipped: [] });
+  });
+
+  it('spares an agent that rested on an API error from auto-close until its next turn', async () => {
+    h.ptys.sessions.set('af3', sessionFixture({ id: 'af3', projectId: project.id, profile: 'claude' }));
+    const config = store.getConfig();
+    const cfg = vi.spyOn(store, 'getConfig').mockReturnValue({ ...config, autoCloseIdleEnabled: true });
+    try {
+      const eligible = () => (ctx().autoCloseIdle as any).eligible('af3') as boolean;
+      expect(eligible()).toBe(true);
+      await ctx().apiErrorResume.onApiErrorStop('af3', { error: 'x', text: 'y' });
+      expect(eligible()).toBe(false);
+      ctx().apiErrorResume.cancel('af3');
+      expect(eligible()).toBe(true);
+      // A favourite is spared on its own, keyed by its Claude session id.
+      h.ptys.sessions.set('af4', sessionFixture({ id: 'af4', projectId: project.id, profile: 'claude', claudeSessionId: 'cs-fav' }));
+      const favourites = ctx().favoriteAgentKeys;
+      ctx().favoriteAgentKeys = new Set(['cs-fav']);
+      try {
+        expect((ctx().autoCloseIdle as any).eligible('af4')).toBe(false);
+      } finally {
+        ctx().favoriteAgentKeys = favourites;
+      }
+    } finally {
+      cfg.mockRestore();
+    }
+  });
+
   it('renders AskUserQuestion hook payloads only when enabled and well formed', async () => {
     const hook = h.mcpDeps.onQuestionHook;
     h.ptys.sessions.set('q1', sessionFixture({ id: 'q1', projectId: project.id }));

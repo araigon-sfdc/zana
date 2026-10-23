@@ -89,6 +89,7 @@ export interface IpcCtx {
   offLoudInboxAppended: any;
   openProjectWindow: any;
   overseerAudit: any;
+  apiErrorResume: any;
   packAndInstallLocal: any;
   pendingWhatsNew: any;
   permissionBroker: any;
