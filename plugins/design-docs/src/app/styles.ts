@@ -519,6 +519,12 @@ export const DESIGN_DOCS_STYLES = `
 .dd-landing-points svg { flex: 0 0 auto; position: relative; top: 2px; color: var(--accent-blue); }
 .dd-landing-points strong { color: var(--text-primary); }
 .dd-landing-start { display: flex; flex-direction: column; gap: 10px; }
+.dd-template-heading { display: flex; align-items: center; gap: 8px; }
+.dd-template-filter { margin: 4px 0 6px; }
+.dd-template-wrap { position: relative; display: flex; }
+.dd-template-wrap .dd-template { width: 100%; padding-right: 36px; }
+.dd-template-wrap > .dd-pop-anchor { position: absolute; top: 6px; right: 6px; }
+.dd-template-bar { flex: 0 0 auto; display: flex; align-items: center; padding: 8px 12px; border-bottom: 1px solid var(--border); }
 .dd-templates { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px; }
 .dd-template {
   display: flex;
