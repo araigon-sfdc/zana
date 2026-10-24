@@ -6,8 +6,10 @@
  * `--zcc-theme=<theme>` to the preload, which seeds `<html data-theme>`. The
  * spec opens a project window under each theme (Light, Dark, and System with
  * both OS appearances) and checks both against what the renderer then paints.
+ * Electron doesn't report `additionalArguments` back, so the preload argument
+ * is read from the renderer process's command line, which Linux (CI) exposes.
  */
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Page } from '@playwright/test';
@@ -40,12 +42,10 @@ test('new windows open on the background and data-theme of the effective theme',
     // The project window is the newest BrowserWindow.
     const created = await electron.evaluate(({ BrowserWindow }) => {
       const win = BrowserWindow.getAllWindows().reduce((newest, w) => (w.id > newest.id ? w : newest));
-      return {
-        background: win.getBackgroundColor().toLowerCase(),
-        args: win.webContents.getLastWebPreferences()?.additionalArguments ?? []
-      };
+      return { background: win.getBackgroundColor().toLowerCase(), pid: win.webContents.getOSProcessId() };
     });
-    return { page: page!, created };
+    const args = process.platform === 'linux' ? readFileSync(`/proc/${created.pid}/cmdline`, 'utf8').split('\0') : null;
+    return { page: page!, created: { ...created, args } };
   };
   const closeProjectWindow = async (page: Page) => {
     await page.close();
@@ -69,7 +69,7 @@ test('new windows open on the background and data-theme of the effective theme',
       const painted = hex(await page.locator('body').evaluate((body) => getComputedStyle(body).backgroundColor));
       const label = `theme=${theme} OS=${appearance}`;
       expect(created.background, label).toBe(painted);
-      expect(created.args, label).toContain(`--zcc-theme=${expected}`);
+      if (created.args) expect(created.args, label).toContain(`--zcc-theme=${expected}`);
       await closeProjectWindow(page);
     }
   } finally {
