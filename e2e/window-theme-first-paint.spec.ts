@@ -44,7 +44,8 @@ test('new windows open on the background and data-theme of the effective theme',
       const win = BrowserWindow.getAllWindows().reduce((newest, w) => (w.id > newest.id ? w : newest));
       return { background: win.getBackgroundColor().toLowerCase(), pid: win.webContents.getOSProcessId() };
     });
-    const args = process.platform === 'linux' ? readFileSync(`/proc/${created.pid}/cmdline`, 'utf8').split('\0') : null;
+    // Chromium rewrites its process title, so the arguments can be space- rather than NUL-separated.
+    const args = process.platform === 'linux' ? readFileSync(`/proc/${created.pid}/cmdline`, 'utf8').split(/[\0 ]/) : null;
     return { page: page!, created: { ...created, args } };
   };
   const closeProjectWindow = async (page: Page) => {
